@@ -39,6 +39,37 @@ func runCLI(client *control.Client, timeout time.Duration, socketPath string, ar
 		return nil
 	case "watch":
 		return runWatch(client, args)
+	case "validate", "plan", "apply":
+		path, prune, wait, err := parseBundleCommand(args)
+		if err != nil {
+			return err
+		}
+		bundle, err := readBundle(path)
+		if err != nil {
+			return err
+		}
+		if command == "validate" {
+			if prune || wait {
+				return usageError()
+			}
+			if _, err := client.PlanBundle(ctx, bundle, false); err != nil {
+				return err
+			}
+			return outputJSON(struct {
+				Valid         bool `json:"valid"`
+				BundleVersion int  `json:"bundle_version"`
+				Tunnels       int  `json:"tunnels"`
+			}{Valid: true, BundleVersion: bundle.BundleVersion, Tunnels: len(bundle.Tunnels)}, nil)
+		}
+		if command == "plan" {
+			if wait {
+				return usageError()
+			}
+			value, err := client.PlanBundle(ctx, bundle, prune)
+			return outputJSON(value, err)
+		}
+		value, err := client.ApplyBundle(ctx, bundle, prune, wait)
+		return outputJSON(value, err)
 	case "health":
 		if len(args) != 1 {
 			return usageError()
@@ -133,6 +164,30 @@ func parseWaitOption(args []string) ([]string, bool, error) {
 	return positionals, wait, nil
 }
 
+func parseBundleCommand(args []string) (path string, prune, wait bool, err error) {
+	positionals := make([]string, 0, 1)
+	for _, arg := range args[1:] {
+		switch arg {
+		case "--prune":
+			if prune {
+				return "", false, false, errors.New("--prune may be specified once")
+			}
+			prune = true
+		case "--wait":
+			if wait {
+				return "", false, false, errors.New("--wait may be specified once")
+			}
+			wait = true
+		default:
+			positionals = append(positionals, arg)
+		}
+	}
+	if len(positionals) != 1 {
+		return "", false, false, usageError()
+	}
+	return positionals[0], prune, wait, nil
+}
+
 func readTunnel(path string) (model.Tunnel, error) {
 	var reader io.Reader
 	if path == "-" {
@@ -152,6 +207,10 @@ func readTunnel(path string) (model.Tunnel, error) {
 	if len(data) > 4<<20 {
 		return model.Tunnel{}, errors.New("tunnel JSON exceeds 4 MiB")
 	}
+	return decodeTunnelData(data)
+}
+
+func decodeTunnelData(data []byte) (model.Tunnel, error) {
 	var record model.Tunnel
 	recordErr := decodeOneJSON(data, &record)
 	if recordErr == nil {

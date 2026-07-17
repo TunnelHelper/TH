@@ -104,6 +104,9 @@ th health
 th doctor
 th version
 th watch
+th validate tunnels.json
+th plan tunnels.json
+th apply tunnels.json --wait
 th list
 th get RECORD_ID
 th create tunnel.json
@@ -117,6 +120,12 @@ th delete RECORD_ID
 Mutations normally return after desired state is safely stored and reconcile in
 the background. Add `--wait` to create, update, enable, or disable when a script
 needs the resulting observed status before continuing.
+
+Declarative commands accept a single tunnel, an array, a versioned bundle, or a
+directory of `.json` files. `plan` and `apply` preserve records omitted from the
+input unless `--prune` is explicit. Batch validation checks the complete final
+ownership set before writing; an apply failure rolls desired state back and
+queues runtime repair.
 
 `th doctor` distinguishes unavailable optional backends from capabilities
 required by enabled records. `th health` reports daemon, API, schema, backend,

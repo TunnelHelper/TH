@@ -186,6 +186,24 @@ func (c *Client) ReconcileAll(ctx context.Context) ([]model.TunnelView, error) {
 	return response.Tunnels, nil
 }
 
+func (c *Client) PlanBundle(ctx context.Context, bundle model.Bundle, prune bool) (core.BundlePlan, error) {
+	var response core.BundlePlan
+	request := bundleRequest{Bundle: bundle, Prune: prune}
+	if err := c.do(ctx, http.MethodPost, "/v1/plan", request, 0, &response); err != nil {
+		return core.BundlePlan{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ApplyBundle(ctx context.Context, bundle model.Bundle, prune, wait bool) (core.BundleApplyResult, error) {
+	var response core.BundleApplyResult
+	request := bundleRequest{Bundle: bundle, Prune: prune}
+	if err := c.do(ctx, http.MethodPost, waitPath("/v1/apply", wait), request, 0, &response); err != nil {
+		return core.BundleApplyResult{}, err
+	}
+	return response, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any, generation uint64, target any) error {
 	var reader io.Reader
 	if body != nil {

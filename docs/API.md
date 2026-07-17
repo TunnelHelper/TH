@@ -18,6 +18,8 @@ by Unix directory and socket permissions. Responses include
 - `POST /v1/tunnels/{id}/disable`
 - `POST /v1/tunnels/{id}/reconcile`
 - `POST /v1/reconcile`
+- `POST /v1/plan`
+- `POST /v1/apply?wait=true`
 
 The health response includes `alive`, configured-tunnel `ready`, daemon build
 information, the state schema version, backend capability status, and tunnel
@@ -58,6 +60,39 @@ Create, update, enable, and disable persist desired state and normally return a
 to wait for that generation's reconciliation. The CLI exposes the same behavior
 as `--wait`. Delete remains synchronous because its state record cannot be
 discarded until owned runtime objects have been removed safely.
+
+Plan and apply accept this envelope:
+
+```json
+{
+  "bundle": {
+    "bundle_version": 1,
+    "tunnels": [
+      {
+        "name": "site-a-gre",
+        "kind": "gre",
+        "interface": "gre-site-a",
+        "enabled": true,
+        "spec": {
+          "gre": {
+            "local": "192.0.2.10",
+            "remote": "198.51.100.20"
+          }
+        }
+      }
+    ]
+  },
+  "prune": false
+}
+```
+
+The CLI also accepts a bare tunnel, an array, or a directory of JSON files and
+normalizes them to this bundle. Existing records match by ID first and then by
+name. IDs are optional for new records but are required to express a rename.
+The daemon validates the final set for duplicate names, interfaces, XFRM IDs,
+route tables, policy priorities, and managed route claims before changing
+state. Omitted records are deleted only with `prune: true`. Failed applies
+restore already changed desired records in reverse order and queue repair.
 
 Update uses this envelope and requires the current generation:
 

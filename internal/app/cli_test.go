@@ -72,3 +72,68 @@ func TestParseWaitOption(t *testing.T) {
 		t.Fatal("duplicate --wait was accepted")
 	}
 }
+
+func TestDecodeBundleAcceptsSingleArrayAndEnvelope(t *testing.T) {
+	record := model.Tunnel{
+		Name: "gre", Kind: model.KindGRE, Interface: "gre0",
+		Spec: model.Spec{GRE: &model.GRESpec{Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2")}},
+	}
+	for name, value := range map[string]any{
+		"single":   record,
+		"array":    []model.Tunnel{record},
+		"envelope": model.Bundle{BundleVersion: model.BundleVersion, Tunnels: []model.Tunnel{record}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			data, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bundle, err := decodeBundleData(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bundle.BundleVersion != model.BundleVersion || len(bundle.Tunnels) != 1 || bundle.Tunnels[0].Name != record.Name {
+				t.Fatalf("bundle = %+v", bundle)
+			}
+		})
+	}
+}
+
+func TestReadBundleDirectoryFlattensSortedJSONFiles(t *testing.T) {
+	directory := t.TempDir()
+	for name, recordName := range map[string]string{"02.json": "bravo", "01.json": "alpha"} {
+		data, err := json.Marshal(model.Tunnel{
+			Name: recordName, Kind: model.KindGRE, Interface: "gre-" + recordName,
+			Spec: model.Spec{GRE: &model.GRESpec{Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2")}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bundle, err := readBundle(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bundle.Tunnels) != 2 || bundle.Tunnels[0].Name != "alpha" || bundle.Tunnels[1].Name != "bravo" {
+		t.Fatalf("directory bundle = %+v", bundle.Tunnels)
+	}
+}
+
+func TestDecodeBundleRejectsUnknownEnvelopeField(t *testing.T) {
+	if _, err := decodeBundleData([]byte(`{"bundle_version":1,"tunnels":[],"unknown":true}`)); err == nil {
+		t.Fatal("unknown bundle field was accepted")
+	}
+}
+
+func TestParseBundleCommand(t *testing.T) {
+	path, prune, wait, err := parseBundleCommand([]string{"apply", "--prune", "records", "--wait"})
+	if err != nil || path != "records" || !prune || !wait {
+		t.Fatalf("parsed bundle command = %q, %t, %t, %v", path, prune, wait, err)
+	}
+	if _, _, _, err := parseBundleCommand([]string{"apply", "one", "two"}); err == nil {
+		t.Fatal("multiple bundle paths were accepted")
+	}
+}

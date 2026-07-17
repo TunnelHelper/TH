@@ -30,6 +30,8 @@ type Manager interface {
 	ReconcileAll(context.Context) ([]model.TunnelView, error)
 	Health(context.Context) map[model.Kind]core.BackendHealth
 	SubscribeEvents(uint64) core.EventSubscription
+	PlanBundle(model.Bundle, bool) (core.BundlePlan, error)
+	ApplyBundle(context.Context, model.Bundle, bool, bool) (core.BundleApplyResult, error)
 }
 
 type Server struct {
@@ -44,6 +46,11 @@ type updateRequest struct {
 
 type actionRequest struct {
 	Generation uint64 `json:"generation"`
+}
+
+type bundleRequest struct {
+	Bundle model.Bundle `json:"bundle"`
+	Prune  bool         `json:"prune"`
 }
 
 type errorEnvelope struct {
@@ -87,10 +94,48 @@ func NewServer(manager Manager) *Server {
 	server.mux.HandleFunc("POST /v1/tunnels/{id}/disable", server.disable)
 	server.mux.HandleFunc("POST /v1/tunnels/{id}/reconcile", server.reconcile)
 	server.mux.HandleFunc("POST /v1/reconcile", server.reconcileAll)
+	server.mux.HandleFunc("POST /v1/plan", server.planBundle)
+	server.mux.HandleFunc("POST /v1/apply", server.applyBundle)
 	server.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorEnvelope{Error: apiError{Code: "not_found", Message: "API endpoint not found"}})
 	})
 	return server
+}
+
+func (s *Server) planBundle(w http.ResponseWriter, r *http.Request) {
+	var request bundleRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	plan, err := s.manager.PlanBundle(request.Bundle, request.Prune)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) applyBundle(w http.ResponseWriter, r *http.Request) {
+	wait, err := parseWait(r)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if wait {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	}
+	var request bundleRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	result, err := s.manager.ApplyBundle(r.Context(), request.Bundle, request.Prune, wait)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {

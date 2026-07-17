@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/model"
@@ -19,6 +20,7 @@ type Manager struct {
 	store      Store
 	reconciler *Reconciler
 	now        func() time.Time
+	mutationMu sync.RWMutex
 }
 
 func NewManager(records Store, reconciler *Reconciler) *Manager {
@@ -26,6 +28,12 @@ func NewManager(records Store, reconciler *Reconciler) *Manager {
 }
 
 func (m *Manager) List() ([]model.TunnelView, error) {
+	m.mutationMu.RLock()
+	defer m.mutationMu.RUnlock()
+	return m.listLocked()
+}
+
+func (m *Manager) listLocked() ([]model.TunnelView, error) {
 	records, err := m.store.List()
 	if err != nil {
 		return nil, err
@@ -38,6 +46,12 @@ func (m *Manager) List() ([]model.TunnelView, error) {
 }
 
 func (m *Manager) Get(id string) (model.TunnelView, error) {
+	m.mutationMu.RLock()
+	defer m.mutationMu.RUnlock()
+	return m.getLocked(id)
+}
+
+func (m *Manager) getLocked(id string) (model.TunnelView, error) {
 	record, err := m.store.Get(id)
 	if err != nil {
 		return model.TunnelView{}, err
@@ -46,6 +60,12 @@ func (m *Manager) Get(id string) (model.TunnelView, error) {
 }
 
 func (m *Manager) Create(ctx context.Context, record model.Tunnel) (model.TunnelView, error) {
+	m.mutationMu.Lock()
+	defer m.mutationMu.Unlock()
+	return m.createLocked(ctx, record)
+}
+
+func (m *Manager) createLocked(_ context.Context, record model.Tunnel) (model.TunnelView, error) {
 	// Identity and revision metadata belong to the daemon, not API callers.
 	record.ID = ""
 	record.SchemaVersion = 0
@@ -68,6 +88,12 @@ func (m *Manager) Create(ctx context.Context, record model.Tunnel) (model.Tunnel
 }
 
 func (m *Manager) Update(ctx context.Context, id string, expected uint64, next model.Tunnel) (model.TunnelView, error) {
+	m.mutationMu.Lock()
+	defer m.mutationMu.Unlock()
+	return m.updateLocked(ctx, id, expected, next)
+}
+
+func (m *Manager) updateLocked(ctx context.Context, id string, expected uint64, next model.Tunnel) (model.TunnelView, error) {
 	current, err := m.store.Get(id)
 	if err != nil {
 		return model.TunnelView{}, err
@@ -106,7 +132,7 @@ func (m *Manager) Update(ctx context.Context, id string, expected uint64, next m
 	}
 	m.reconciler.MarkPending(next)
 	m.reconciler.Enqueue(id)
-	return m.Get(id)
+	return m.getLocked(id)
 }
 
 func requiresCleanupBeforeUpdate(current, next model.Tunnel) bool {
@@ -151,6 +177,12 @@ func validateStableOwnership(current, next model.Tunnel) error {
 }
 
 func (m *Manager) SetEnabled(ctx context.Context, id string, expected uint64, enabled bool) (model.TunnelView, error) {
+	m.mutationMu.Lock()
+	defer m.mutationMu.Unlock()
+	return m.setEnabledLocked(ctx, id, expected, enabled)
+}
+
+func (m *Manager) setEnabledLocked(_ context.Context, id string, expected uint64, enabled bool) (model.TunnelView, error) {
 	current, err := m.store.Get(id)
 	if err != nil {
 		return model.TunnelView{}, err
@@ -171,10 +203,12 @@ func (m *Manager) SetEnabled(ctx context.Context, id string, expected uint64, en
 	}
 	m.reconciler.MarkPending(next)
 	m.reconciler.Enqueue(id)
-	return m.Get(id)
+	return m.getLocked(id)
 }
 
 func (m *Manager) Delete(ctx context.Context, id string, expected uint64) error {
+	m.mutationMu.Lock()
+	defer m.mutationMu.Unlock()
 	return m.reconciler.Delete(ctx, id, expected)
 }
 

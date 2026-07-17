@@ -6,6 +6,12 @@ import (
 )
 
 const SchemaVersion = 2
+const BundleVersion = 1
+
+type Bundle struct {
+	BundleVersion int      `json:"bundle_version"`
+	Tunnels       []Tunnel `json:"tunnels"`
+}
 
 type Kind string
 

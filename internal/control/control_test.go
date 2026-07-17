@@ -357,3 +357,9 @@ func (m *stubManager) SubscribeEvents(after uint64) core.EventSubscription {
 	}
 	return m.events.Subscribe(after)
 }
+func (m *stubManager) PlanBundle(model.Bundle, bool) (core.BundlePlan, error) {
+	return core.BundlePlan{BundleVersion: model.BundleVersion}, nil
+}
+func (m *stubManager) ApplyBundle(context.Context, model.Bundle, bool, bool) (core.BundleApplyResult, error) {
+	return core.BundleApplyResult{}, nil
+}
