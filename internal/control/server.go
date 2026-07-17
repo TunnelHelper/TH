@@ -260,7 +260,10 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case event := <-subscription.Events:
+		case event, ok := <-subscription.Events:
+			if !ok {
+				return
+			}
 			if err := encoder.Encode(event); err != nil {
 				return
 			}

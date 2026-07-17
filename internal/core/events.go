@@ -73,18 +73,15 @@ func (h *EventHub) Publish(event Event) Event {
 		copy(h.history, h.history[len(h.history)-h.capacity:])
 		h.history = h.history[:h.capacity]
 	}
-	for _, subscriber := range h.subscribers {
+	for id, subscriber := range h.subscribers {
 		select {
 		case subscriber <- event:
 		default:
-			select {
-			case <-subscriber:
-			default:
-			}
-			select {
-			case subscriber <- event:
-			default:
-			}
+			// A subscriber that cannot keep up must reconnect and replay from its
+			// last sequence. Silently dropping one event would leave stateful
+			// clients with a plausible but stale view.
+			close(subscriber)
+			delete(h.subscribers, id)
 		}
 	}
 	return event
@@ -113,7 +110,7 @@ func (h *EventHub) Subscribe(after uint64) EventSubscription {
 		Events:  stream,
 		Current: h.next,
 		Oldest:  oldest,
-		Gap:     after != 0 && after+1 < oldest,
+		Gap:     after != 0 && oldest > 1 && after < oldest-1,
 		Cancel: func() {
 			once.Do(func() {
 				h.mu.Lock()
