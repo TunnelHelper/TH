@@ -12,7 +12,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/model"
 )
 
 var (

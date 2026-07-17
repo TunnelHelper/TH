@@ -10,8 +10,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/sudogeeker/tunnel-helper/internal/control"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/control"
+	"github.com/TunnelHelper/TH/internal/model"
 )
 
 func runCLI(client *control.Client, timeout time.Duration, args []string) error {

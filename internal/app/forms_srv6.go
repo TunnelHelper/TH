@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sudogeeker/tunnel-helper/internal/model"
-	"github.com/sudogeeker/tunnel-helper/internal/ui"
+	"github.com/TunnelHelper/TH/internal/model"
+	"github.com/TunnelHelper/TH/internal/ui"
 )
 
 func collectSRv6(prompts *prompts, record *model.Tunnel, creating bool) error {

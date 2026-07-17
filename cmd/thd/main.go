@@ -14,11 +14,11 @@ import (
 	"syscall"
 	"time"
 
-	linuxbackend "github.com/sudogeeker/tunnel-helper/internal/backend/linux"
-	"github.com/sudogeeker/tunnel-helper/internal/config"
-	"github.com/sudogeeker/tunnel-helper/internal/control"
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/store"
+	linuxbackend "github.com/TunnelHelper/TH/internal/backend/linux"
+	"github.com/TunnelHelper/TH/internal/config"
+	"github.com/TunnelHelper/TH/internal/control"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/store"
 )
 
 func main() {
@@ -29,7 +29,7 @@ func main() {
 }
 
 func run(args []string) error {
-	flags := flag.NewFlagSet("tunnel-helperd", flag.ContinueOnError)
+	flags := flag.NewFlagSet("thd", flag.ContinueOnError)
 	configPath := flags.String("config", config.DefaultConfigPath, "daemon settings file")
 	stateDir := flags.String("state-dir", "", "override persistent state directory")
 	runtimeDir := flags.String("runtime-dir", "", "override runtime directory")
@@ -41,10 +41,10 @@ func run(args []string) error {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return errors.New("tunnel-helperd does not accept positional arguments")
+		return errors.New("thd does not accept positional arguments")
 	}
 	if os.Geteuid() != 0 {
-		return errors.New("tunnel-helperd must run as root")
+		return errors.New("thd must run as root")
 	}
 
 	settings, err := config.Load(*configPath)

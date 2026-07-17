@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const DefaultConfigPath = "/etc/tunnel-helper/tunnel-helperd.json"
+const DefaultConfigPath = "/etc/th/thd.json"
 
 type Settings struct {
 	StateDir                 string `json:"state_dir"`
@@ -31,11 +31,11 @@ type Settings struct {
 
 func Defaults() Settings {
 	return Settings{
-		StateDir:                 "/var/lib/tunnel-helper",
-		RuntimeDir:               "/run/tunnel-helper",
-		SocketPath:               "/run/tunnel-helper/control.sock",
+		StateDir:                 "/var/lib/th",
+		RuntimeDir:               "/run/th",
+		SocketPath:               "/run/th/control.sock",
 		SocketMode:               0660,
-		SocketGroup:              "tunnel-helper",
+		SocketGroup:              "th",
 		SocketGID:                -1,
 		VICISocketPath:           "/run/charon.vici",
 		ReconcileIntervalSeconds: 30,

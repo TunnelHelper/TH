@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sudogeeker/tunnel-helper/internal/config"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/config"
+	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"

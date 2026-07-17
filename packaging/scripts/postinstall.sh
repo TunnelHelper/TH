@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-unit="tunnel-helperd.service"
-group="tunnel-helper"
+unit="thd.service"
+group="th"
 
 if command -v systemd-sysusers >/dev/null 2>&1; then
-	systemd-sysusers /usr/lib/sysusers.d/tunnel-helper.conf
+	systemd-sysusers /usr/lib/sysusers.d/th.conf
 elif command -v getent >/dev/null 2>&1 && getent group "$group" >/dev/null 2>&1; then
 	:
 elif command -v groupadd >/dev/null 2>&1; then
@@ -18,13 +18,13 @@ else
 fi
 
 if command -v systemd-tmpfiles >/dev/null 2>&1; then
-	systemd-tmpfiles --create /usr/lib/tmpfiles.d/tunnel-helper.conf
+	systemd-tmpfiles --create /usr/lib/tmpfiles.d/th.conf
 else
-	install -d -m 0750 -o root -g "$group" /run/tunnel-helper
-	install -d -m 0700 -o root -g root /var/lib/tunnel-helper
-	install -d -m 0700 -o root -g root /var/lib/tunnel-helper/tunnels
-	install -d -m 0700 -o root -g root /var/lib/tunnel-helper/cache
-	install -d -m 0700 -o root -g root /var/lib/tunnel-helper/cache/srv6
+	install -d -m 0750 -o root -g "$group" /run/th
+	install -d -m 0700 -o root -g root /var/lib/th
+	install -d -m 0700 -o root -g root /var/lib/th/tunnels
+	install -d -m 0700 -o root -g root /var/lib/th/cache
+	install -d -m 0700 -o root -g root /var/lib/th/cache/srv6
 fi
 
 upgrade=0

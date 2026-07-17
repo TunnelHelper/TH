@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/sudogeeker/tunnel-helper/internal/app"
+	"github.com/TunnelHelper/TH/internal/app"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-module github.com/sudogeeker/tunnel-helper
+module github.com/TunnelHelper/TH
 
 go 1.24
 

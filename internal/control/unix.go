@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/sudogeeker/tunnel-helper/internal/config"
+	"github.com/TunnelHelper/TH/internal/config"
 )
 
 func ServeUnix(ctx context.Context, settings config.Settings, handler http.Handler, logger *slog.Logger) error {
@@ -118,7 +118,7 @@ func removeStaleSocket(path string, timeout time.Duration) error {
 	connection, dialErr := net.DialTimeout("unix", path, timeout)
 	if dialErr == nil {
 		_ = connection.Close()
-		return fmt.Errorf("another tunnel-helperd is already listening on %s", path)
+		return fmt.Errorf("another thd is already listening on %s", path)
 	}
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("remove stale control socket: %w", err)

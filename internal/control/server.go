@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
 )
 
 const APIVersion = "v1"
@@ -73,7 +73,7 @@ func NewServer(manager Manager) *Server {
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Tunnel-Helper-API", APIVersion)
+		w.Header().Set("X-TH-API", APIVersion)
 		s.mux.ServeHTTP(w, r)
 	})
 }

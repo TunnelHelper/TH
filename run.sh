@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPOSITORY="sudogeeker/tunnel-helper"
+REPOSITORY="TunnelHelper/TH"
 INSTALL=0
 args=()
 for arg in "$@"; do
@@ -13,7 +13,7 @@ for arg in "$@"; do
 done
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "tunnel-helper V2 supports Linux only." >&2
+  echo "TH V2 supports Linux only." >&2
   exit 1
 fi
 
@@ -93,8 +93,8 @@ printf '%s  %s\n' "$expected_checksum" "$asset_path" | sha256sum --check --statu
 
 if [[ "$INSTALL" -eq 0 ]]; then
   tar -xzf "$asset_path" -C "$workdir"
-  client="$workdir/tunnel-helper"
-  daemon="$workdir/tunnel-helperd"
+  client="$workdir/th"
+  daemon="$workdir/thd"
   if [[ ! -x "$client" || ! -x "$daemon" ]]; then
     echo "Release archive does not contain both V2 binaries." >&2
     exit 1
@@ -134,27 +134,27 @@ group_added=0
 if [[ -n "$operator" && "$operator" != "root" ]] && id "$operator" >/dev/null 2>&1; then
   is_member=0
   for operator_group in $(id -nG "$operator"); do
-    if [[ "$operator_group" == "tunnel-helper" ]]; then
+    if [[ "$operator_group" == "th" ]]; then
       is_member=1
       break
     fi
   done
   if [[ "$is_member" -eq 0 ]]; then
     if "${as_root[@]}" sh -c 'command -v usermod >/dev/null 2>&1'; then
-      "${as_root[@]}" usermod -aG tunnel-helper "$operator"
+      "${as_root[@]}" usermod -aG th "$operator"
       group_added=1
     elif "${as_root[@]}" sh -c 'command -v gpasswd >/dev/null 2>&1'; then
-      "${as_root[@]}" gpasswd -a "$operator" tunnel-helper
+      "${as_root[@]}" gpasswd -a "$operator" th
       group_added=1
     else
-      echo "Could not add $operator to the tunnel-helper group automatically." >&2
+      echo "Could not add $operator to the th group automatically." >&2
     fi
   fi
 fi
 
-echo "Installed $asset_name and registered tunnel-helperd.service."
+echo "Installed $asset_name and registered thd.service."
 if [[ "$group_added" -eq 1 ]]; then
-  echo "Added $operator to the tunnel-helper group; start a new login session before running tunnel-helper."
+  echo "Added $operator to the th group; start a new login session before running th."
 elif [[ "$operator" == "root" ]]; then
-  echo "Add non-root operators to the tunnel-helper group before they run tunnel-helper."
+  echo "Add non-root operators to the th group before they run th."
 fi

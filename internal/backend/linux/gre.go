@@ -6,8 +6,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
 )
 

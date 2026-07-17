@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/mdlayher/genetlink"
 	mdnetlink "github.com/mdlayher/netlink"
 	"github.com/strongswan/govici/vici"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )

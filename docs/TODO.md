@@ -1,4 +1,4 @@
-# tunnel-helper V2 TODO
+# TH V2 TODO
 
 This checklist is the durable progress record for the V2 migration. Update it
 as each item is completed. The scope and acceptance rules are defined in
@@ -23,8 +23,8 @@ Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
 - [x] Implement in-memory observed status and structured conditions.
 - [x] Implement versioned HTTP/JSON API over a Unix socket.
 - [x] Add Unix-socket client with timeouts and typed errors.
-- [x] Add `cmd/tunnel-helperd` daemon entry point.
-- [x] Convert `cmd/tunnel-helper` into a non-root daemon client.
+- [x] Add `cmd/thd` daemon entry point.
+- [x] Convert `cmd/th` into a non-root daemon client.
 
 ## 2. Reconciler and Kernel Foundation
 

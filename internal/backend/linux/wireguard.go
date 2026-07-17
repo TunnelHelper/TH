@@ -12,8 +12,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -282,7 +282,7 @@ func (b *Backend) reconcileManagedRoutes(record model.Tunnel, link netlink.Link,
 			want, expected := desired[key]
 			if routes[i].Protocol != managedRouteProtocol {
 				if expected {
-					return fmt.Errorf("route %s is not owned by tunnel-helper: %w", key, ErrOwnershipConflict)
+					return fmt.Errorf("route %s is not owned by TH: %w", key, ErrOwnershipConflict)
 				}
 				continue
 			}
@@ -434,7 +434,7 @@ func (b *Backend) reconcileWireGuardRules(record model.Tunnel, families map[int]
 			}
 			want, needed := expected[rules[i].Priority]
 			if rules[i].Protocol != managedRouteProtocol {
-				return fmt.Errorf("policy-rule priority %d is not owned by tunnel-helper: %w", rules[i].Priority, ErrOwnershipConflict)
+				return fmt.Errorf("policy-rule priority %d is not owned by TH: %w", rules[i].Priority, ErrOwnershipConflict)
 			}
 			if needed && equalManagedRule(&rules[i], want) {
 				present[rules[i].Priority] = struct{}{}

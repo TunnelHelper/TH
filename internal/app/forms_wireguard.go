@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sudogeeker/tunnel-helper/internal/model"
-	"github.com/sudogeeker/tunnel-helper/internal/ui"
+	"github.com/TunnelHelper/TH/internal/model"
+	"github.com/TunnelHelper/TH/internal/ui"
 )
 
 func collectWireGuard(prompts *prompts, record *model.Tunnel) error {

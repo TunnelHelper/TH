@@ -1,6 +1,6 @@
-# tunnel-helper V2
+# TH V2
 
-tunnel-helper V2 is a Linux tunnel management daemon with a non-root TUI and
+TH V2 is a Linux tunnel management daemon with a non-root TUI and
 CLI. The daemon stores desired state in its own private directory and
 reconciles links, addresses, routes, rules, and XFRM objects through netlink.
 It does not generate distribution-specific network configuration files or run
@@ -23,12 +23,12 @@ enabling V2 records that use the same names.
 ## Architecture
 
 ```text
-tunnel-helper (TUI and CLI, non-root)
-             |
-             | HTTP/JSON over /run/tunnel-helper/control.sock
-             v
-tunnel-helperd (root)
-  +-- /var/lib/tunnel-helper/tunnels/*.json
+th (TUI and CLI, non-root)
+  |
+  | HTTP/JSON over /run/th/control.sock
+  v
+thd (root)
+  +-- /var/lib/th/tunnels/*.json
   +-- rtnetlink and XFRM netlink
   +-- WireGuard and AmneziaWG generic netlink
   `-- strongSwan VICI
@@ -45,37 +45,35 @@ downloads the matching native package from the latest release, verifies it
 against `checksums.txt`, and installs it with the host package manager:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/sudogeeker/tunnel-helper/main/run.sh) --install
+bash <(curl -fsSL https://raw.githubusercontent.com/TunnelHelper/TH/main/run.sh) --install
 ```
 
-On its first installation, the package creates the `tunnel-helper` operator
-group and runtime directories, then enables and starts
-`tunnel-helperd.service`. Upgrades preserve an administrator's disabled or
-stopped state. The one-command installer also adds its invoking non-root user
-to the operator group. Start a new login session afterward, then run the client
-without `sudo`:
+On its first installation, the package creates the `th` operator group and
+runtime directories, then enables and starts `thd.service`. Upgrades preserve
+an administrator's disabled or stopped state. The one-command installer also
+adds its invoking non-root user to the operator group. Start a new login session
+afterward, then run the client without `sudo`:
 
 ```bash
-tunnel-helper
+th
 ```
 
-The daemon stays available even when
-`/etc/tunnel-helper/tunnel-helperd.json` is absent or there are no tunnel
-records. In that case it uses built-in defaults and keeps listening for the
-client on `/run/tunnel-helper/control.sock`.
+The daemon stays available even when `/etc/th/thd.json` is absent or there are
+no tunnel records. In that case it uses built-in defaults and keeps listening
+for the client on `/run/th/control.sock`.
 
 Native packages can also be downloaded from the release page and installed
 directly:
 
 ```bash
-sudo apt-get install ./tunnel-helper_VERSION_ARCH.deb
+sudo apt-get install ./th_VERSION_ARCH.deb
 # or
-sudo dnf install ./tunnel-helper-VERSION-1.ARCH.rpm
-sudo usermod -aG tunnel-helper "$USER"
+sudo dnf install ./th-VERSION-1.ARCH.rpm
+sudo usermod -aG th "$USER"
 ```
 
-Configuration in `/etc/tunnel-helper` and state in `/var/lib/tunnel-helper`
-are preserved when the package is removed.
+Configuration in `/etc/th` and state in `/var/lib/th` are preserved when the
+package is removed.
 
 ## Build From Source
 
@@ -84,11 +82,11 @@ Go 1.24 or newer is required.
 ```bash
 make build
 sudo make install
-sudo systemd-sysusers /usr/lib/sysusers.d/tunnel-helper.conf
-sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/tunnel-helper.conf
+sudo systemd-sysusers /usr/lib/sysusers.d/th.conf
+sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/th.conf
 sudo systemctl daemon-reload
-sudo systemctl enable --now tunnel-helperd
-sudo usermod -aG tunnel-helper "$USER"
+sudo systemctl enable --now thd
+sudo usermod -aG th "$USER"
 ```
 
 GoReleaser is also required to build local snapshot packages:
@@ -99,18 +97,18 @@ make package
 
 ## Client Commands
 
-With no command, `tunnel-helper` opens the TUI. The same API is scriptable:
+With no command, `th` opens the TUI. The same API is scriptable:
 
 ```bash
-tunnel-helper health
-tunnel-helper list
-tunnel-helper get RECORD_ID
-tunnel-helper create tunnel.json
-tunnel-helper update tunnel.json
-tunnel-helper enable RECORD_ID
-tunnel-helper disable RECORD_ID
-tunnel-helper reconcile RECORD_ID
-tunnel-helper delete RECORD_ID
+th health
+th list
+th get RECORD_ID
+th create tunnel.json
+th update tunnel.json
+th enable RECORD_ID
+th disable RECORD_ID
+th reconcile RECORD_ID
+th delete RECORD_ID
 ```
 
 Use `-` instead of a filename for JSON on stdin. Updates require the current
@@ -118,10 +116,10 @@ Use `-` instead of a filename for JSON on stdin. Updates require the current
 
 ## Filesystem Layout
 
-- `/etc/tunnel-helper/tunnel-helperd.json`: optional daemon settings
-- `/var/lib/tunnel-helper/tunnels/<id>.json`: root-only desired state and keys
-- `/var/lib/tunnel-helper/cache/srv6/`: atomically updated SRv6 source cache
-- `/run/tunnel-helper/control.sock`: group-authorized local API
+- `/etc/th/thd.json`: optional daemon settings
+- `/var/lib/th/tunnels/<id>.json`: root-only desired state and keys
+- `/var/lib/th/cache/srv6/`: atomically updated SRv6 source cache
+- `/run/th/control.sock`: group-authorized local API
 
 Normal list and status responses redact private keys, preshared keys, and
 static XFRM key material. Generated secrets are displayed once by the TUI and

@@ -3,7 +3,7 @@ package core
 import (
 	"context"
 
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/model"
 )
 
 type Observation struct {

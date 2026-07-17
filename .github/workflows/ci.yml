@@ -39,8 +39,8 @@ jobs:
 
       - name: Network namespace integration tests
         run: |
-          go test -c -tags=integration -o /tmp/tunnel-helper-integration.test ./internal/backend/linux
-          sudo /tmp/tunnel-helper-integration.test -test.v
+          go test -c -tags=integration -o /tmp/th-integration.test ./internal/backend/linux
+          sudo /tmp/th-integration.test -test.v
 
       - name: Build release archives and native packages
         uses: goreleaser/goreleaser-action@v6

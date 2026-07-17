@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sudogeeker/tunnel-helper/internal/config"
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
-	"github.com/sudogeeker/tunnel-helper/internal/store"
+	"github.com/TunnelHelper/TH/internal/config"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
+	"github.com/TunnelHelper/TH/internal/store"
 )
 
 func TestServerAPIContracts(t *testing.T) {
@@ -29,8 +29,8 @@ func TestServerAPIContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || response.Header.Get("X-Tunnel-Helper-API") != APIVersion {
-		t.Fatalf("list status/header = %d/%q", response.StatusCode, response.Header.Get("X-Tunnel-Helper-API"))
+	if response.StatusCode != http.StatusOK || response.Header.Get("X-TH-API") != APIVersion {
+		t.Fatalf("list status/header = %d/%q", response.StatusCode, response.Header.Get("X-TH-API"))
 	}
 	response.Body.Close()
 
@@ -73,7 +73,7 @@ func TestServerAPIContracts(t *testing.T) {
 
 func TestUnixServerAndTypedClient(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("Unix socket ownership test requires root, as does tunnel-helperd")
+		t.Skip("Unix socket ownership test requires root, as does thd")
 	}
 	runtimeDir := filepath.Join(t.TempDir(), "run")
 	settings := config.Defaults()

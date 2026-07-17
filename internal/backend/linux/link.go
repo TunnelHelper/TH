@@ -10,13 +10,13 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
 )
 
 func ownershipAlias(id string) string {
-	return "tunnel-helper:" + id
+	return "th:" + id
 }
 
 func (b *Backend) ensureLink(record model.Tunnel, desired netlink.Link, matches func(netlink.Link) bool) (netlink.Link, error) {

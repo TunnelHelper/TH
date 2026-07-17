@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
 )
 
 func TestMainMenuDimsUnavailableBackends(t *testing.T) {

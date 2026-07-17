@@ -27,7 +27,7 @@ func TestLoadPartialSettingsPreservesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.RequestTimeoutSeconds != 42 || settings.SocketGroup != "root" || settings.RuntimeDir != "/run/tunnel-helper" {
+	if settings.RequestTimeoutSeconds != 42 || settings.SocketGroup != "root" || settings.RuntimeDir != "/run/th" {
 		t.Fatalf("partial settings did not preserve defaults: %+v", settings)
 	}
 	if err := settings.ResolveSocketGID(); err != nil || settings.SocketGID < 0 {

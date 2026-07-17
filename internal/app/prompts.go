@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sudogeeker/tunnel-helper/internal/ui"
+	"github.com/TunnelHelper/TH/internal/ui"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 

@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"strconv"
 
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/model"
 )
 
 func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel) (model.Tunnel, error) {

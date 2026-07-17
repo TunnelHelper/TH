@@ -1,5 +1,5 @@
 {
-  "socket_group": "tunnel-helper",
+  "socket_group": "th",
   "vici_socket_path": "/run/charon.vici",
   "reconcile_interval_seconds": 30,
   "request_timeout_seconds": 15

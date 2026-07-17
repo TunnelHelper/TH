@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
 )
 
 type Client struct {
@@ -145,7 +145,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, generati
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		return fmt.Errorf("contact tunnel-helperd: %w", err)
+		return fmt.Errorf("contact thd: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {

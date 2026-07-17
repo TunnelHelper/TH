@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sudogeeker/tunnel-helper/internal/model"
-	"github.com/sudogeeker/tunnel-helper/internal/store"
+	"github.com/TunnelHelper/TH/internal/model"
+	"github.com/TunnelHelper/TH/internal/store"
 )
 
 var (

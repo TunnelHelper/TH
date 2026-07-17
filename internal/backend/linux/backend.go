@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/sudogeeker/tunnel-helper/internal/config"
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
+	"github.com/TunnelHelper/TH/internal/config"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -20,7 +20,7 @@ import (
 
 const managedRouteProtocol = 242
 
-var ErrOwnershipConflict = errors.New("kernel object is not owned by tunnel-helper")
+var ErrOwnershipConflict = errors.New("kernel object is not owned by TH")
 
 type Backend struct {
 	settings config.Settings

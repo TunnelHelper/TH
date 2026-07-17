@@ -2,17 +2,17 @@
 
 ## Daemon Settings
 
-The daemon reads `/etc/tunnel-helper/tunnel-helperd.json`. The file is optional
+The daemon reads `/etc/th/thd.json`. The file is optional
 and unspecified fields retain secure defaults. Unknown fields and multiple JSON
 values are rejected. When present, it must be a regular file owned by the daemon
 UID and must not be writable by its group or other users.
 
 ```json
 {
-  "state_dir": "/var/lib/tunnel-helper",
-  "runtime_dir": "/run/tunnel-helper",
-  "socket_path": "/run/tunnel-helper/control.sock",
-  "socket_group": "tunnel-helper",
+  "state_dir": "/var/lib/th",
+  "runtime_dir": "/run/th",
+  "socket_path": "/run/th/control.sock",
+  "socket_group": "th",
   "vici_socket_path": "/run/charon.vici",
   "reconcile_interval_seconds": 30,
   "request_timeout_seconds": 15
@@ -68,7 +68,7 @@ failure.
 
 ## State And Secrets
 
-`/var/lib/tunnel-helper` and its tunnel files are forced to modes `0700` and
+`/var/lib/th` and its tunnel files are forced to modes `0700` and
 `0600`. Writes use a same-directory temporary file, file sync, atomic rename,
 and directory sync. A record with an unsafe mode, invalid filename, unknown
 field, unsupported schema, or more than one JSON value stops store loading.
@@ -81,8 +81,8 @@ atomic from the operator's perspective.
 
 For a consistent offline backup:
 
-1. Stop `tunnel-helperd` using the platform service manager.
-2. Archive `/etc/tunnel-helper` and `/var/lib/tunnel-helper` while preserving
+1. Stop `thd` using the platform service manager.
+2. Archive `/etc/th` and `/var/lib/th` while preserving
    ownership, permissions, and timestamps.
 3. Restart the daemon.
 

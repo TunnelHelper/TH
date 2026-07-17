@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sudogeeker/tunnel-helper/internal/model"
-	"github.com/sudogeeker/tunnel-helper/internal/store"
+	"github.com/TunnelHelper/TH/internal/model"
+	"github.com/TunnelHelper/TH/internal/store"
 )
 
 type Reconciler struct {

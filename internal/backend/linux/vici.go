@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/strongswan/govici/vici"
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
 	"github.com/vishvananda/netlink"
 )
 
@@ -172,7 +172,7 @@ func (c *viciController) health(ctx context.Context) error {
 }
 
 func connectionName(record model.Tunnel) string {
-	return "tunnel-helper-" + record.ID
+	return "th-" + record.ID
 }
 
 func childName(record model.Tunnel) string {
@@ -180,7 +180,7 @@ func childName(record model.Tunnel) string {
 }
 
 func sharedKeyID(record model.Tunnel) string {
-	return "tunnel-helper:" + record.ID
+	return "th:" + record.ID
 }
 
 func buildVICIConnection(record model.Tunnel) (*vici.Message, error) {

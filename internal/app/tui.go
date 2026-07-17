@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/sudogeeker/tunnel-helper/internal/control"
-	"github.com/sudogeeker/tunnel-helper/internal/core"
-	"github.com/sudogeeker/tunnel-helper/internal/model"
-	"github.com/sudogeeker/tunnel-helper/internal/ui"
+	"github.com/TunnelHelper/TH/internal/control"
+	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
+	"github.com/TunnelHelper/TH/internal/ui"
 )
 
 const tuiHealthTimeout = time.Second
@@ -29,11 +29,11 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 	output := ui.New(os.Stdout, os.Stderr, os.Stdin)
 	app := &tuiApp{client: client, timeout: timeout, ui: output, prompts: newPrompts(output)}
 	if err := app.loadHealth(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		output.Warn("tunnel-helperd unavailable")
+		output.Warn("thd unavailable")
 	}
 	for {
 		choice := "manage"
-		output.Title("tunnel-helper V2")
+		output.Title("TH V2")
 		err := app.prompts.selectValue("Action", app.mainMenuOptions(), &choice)
 		if errors.Is(err, ErrAborted) || choice == "exit" {
 			return nil

@@ -40,7 +40,7 @@ func (b *Backend) watchLinkEvents() {
 	go func() {
 		defer b.eventWG.Done()
 		for update := range updates {
-			managedDown := update.Link != nil && strings.HasPrefix(update.Link.Attrs().Alias, "tunnel-helper:") &&
+			managedDown := update.Link != nil && strings.HasPrefix(update.Link.Attrs().Alias, "th:") &&
 				update.Link.Attrs().Flags&net.FlagUp == 0
 			if update.Header.Type == unix.RTM_DELLINK || managedDown {
 				b.signalEvent()

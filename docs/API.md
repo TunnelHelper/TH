@@ -1,9 +1,9 @@
 # Local V2 API
 
 The client and daemon use HTTP/1.1 with JSON over
-`/run/tunnel-helper/control.sock`. This is a local administrative API protected
+`/run/th/control.sock`. This is a local administrative API protected
 by Unix directory and socket permissions. Responses include
-`X-Tunnel-Helper-API: v1`.
+`X-TH-API: v1`.
 
 ## Endpoints
 

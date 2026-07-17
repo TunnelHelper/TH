@@ -1,5 +1,5 @@
-APP := tunnel-helper
-DAEMON := tunnel-helperd
+APP := th
+DAEMON := thd
 BIN_DIR := ./bin
 
 PREFIX ?= /usr
@@ -32,8 +32,8 @@ help:
 
 build:
 	@mkdir -p $(BIN_DIR)
-	go build -o $(BIN_DIR)/$(APP) ./cmd/$(APP)
-	go build -o $(BIN_DIR)/$(DAEMON) ./cmd/$(DAEMON)
+	go build -trimpath -o $(BIN_DIR)/$(APP) ./cmd/$(APP)
+	go build -trimpath -o $(BIN_DIR)/$(DAEMON) ./cmd/$(DAEMON)
 
 run:
 	go run ./cmd/$(APP)
@@ -55,18 +55,18 @@ tidy:
 
 build-linux-amd64:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $(BIN_DIR)/$(APP)_linux_amd64 ./cmd/$(APP)
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o $(BIN_DIR)/$(DAEMON)_linux_amd64 ./cmd/$(DAEMON)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o $(BIN_DIR)/$(APP)_linux_amd64 ./cmd/$(APP)
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o $(BIN_DIR)/$(DAEMON)_linux_amd64 ./cmd/$(DAEMON)
 
 build-linux-arm64:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o $(BIN_DIR)/$(APP)_linux_arm64 ./cmd/$(APP)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o $(BIN_DIR)/$(DAEMON)_linux_arm64 ./cmd/$(DAEMON)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o $(BIN_DIR)/$(APP)_linux_arm64 ./cmd/$(APP)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o $(BIN_DIR)/$(DAEMON)_linux_arm64 ./cmd/$(DAEMON)
 
 build-linux-armv7:
 	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -o $(BIN_DIR)/$(APP)_linux_armv7 ./cmd/$(APP)
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -o $(BIN_DIR)/$(DAEMON)_linux_armv7 ./cmd/$(DAEMON)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -o $(BIN_DIR)/$(APP)_linux_armv7 ./cmd/$(APP)
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -o $(BIN_DIR)/$(DAEMON)_linux_armv7 ./cmd/$(DAEMON)
 
 build-linux: build-linux-amd64 build-linux-arm64 build-linux-armv7
 

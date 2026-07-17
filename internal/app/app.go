@@ -9,20 +9,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TunnelHelper/TH/internal/config"
+	"github.com/TunnelHelper/TH/internal/control"
 	"github.com/charmbracelet/huh"
-	"github.com/sudogeeker/tunnel-helper/internal/config"
-	"github.com/sudogeeker/tunnel-helper/internal/control"
 )
 
 var ErrAborted = errors.New("aborted")
 
 func Run(args []string) error {
-	flags := flag.NewFlagSet("tunnel-helper", flag.ContinueOnError)
-	socketDefault := os.Getenv("TUNNEL_HELPER_SOCKET")
+	flags := flag.NewFlagSet("th", flag.ContinueOnError)
+	socketDefault := os.Getenv("TH_SOCKET")
 	if socketDefault == "" {
 		socketDefault = config.Defaults().SocketPath
 	}
-	socket := flags.String("socket", socketDefault, "tunnel-helperd control socket")
+	socket := flags.String("socket", socketDefault, "thd control socket")
 	timeout := flags.Duration("timeout", 15*time.Second, "daemon request timeout")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -54,5 +54,5 @@ func wrapAbort(err error) error {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: tunnel-helper [--socket PATH] [tui|health|list|get ID|create FILE|update FILE|enable ID|disable ID|delete ID|reconcile [ID]]")
+	return fmt.Errorf("usage: th [--socket PATH] [tui|health|list|get ID|create FILE|update FILE|enable ID|disable ID|delete ID|reconcile [ID]]")
 }

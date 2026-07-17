@@ -1,19 +1,19 @@
 [Unit]
-Description=Tunnel Helper V2 network tunnel daemon
+Description=TH V2 network tunnel daemon
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/tunnel-helperd
+ExecStart=/usr/bin/thd
 Restart=always
 RestartSec=2s
 TimeoutStopSec=20s
 UMask=0077
 
-RuntimeDirectory=tunnel-helper
+RuntimeDirectory=th
 RuntimeDirectoryMode=0750
-StateDirectory=tunnel-helper
+StateDirectory=th
 StateDirectoryMode=0700
 
 NoNewPrivileges=yes

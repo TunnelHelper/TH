@@ -1,8 +1,8 @@
-# tunnel-helper V2 Roadmap
+# TH V2 Roadmap
 
 ## Objective
 
-V2 turns tunnel-helper into a Linux tunnel management service instead of a
+V2 turns TH into a Linux tunnel management service instead of a
 configuration-file generator. The privileged daemon owns desired state and
 reconciles it directly with kernel and control-plane APIs. The TUI is an
 unprivileged client of that daemon.
@@ -32,7 +32,7 @@ tracks implementation progress.
    unrelated system configuration directories is not a management mechanism.
 8. The TUI does not need root. All privileged operations happen in the daemon.
 9. All apply/delete operations are idempotent and delete only objects proven to
-   be owned by tunnel-helper. Broad route or XFRM flushes are forbidden.
+   be owned by TH. Broad route or XFRM flushes are forbidden.
 10. Missing kernel modules, VICI, or protocol families are reported as
     structured health/errors. V2 does not install dependencies itself.
 
@@ -49,11 +49,11 @@ tracks implementation progress.
 ## Process Architecture
 
 ```text
-tunnel-helper (TUI and scriptable client)
+th (TUI and scriptable client)
         |
         | versioned JSON API over Unix domain socket
         v
-tunnel-helperd (privileged daemon)
+thd (privileged daemon)
   +-- API and peer authorization
   +-- desired-state store
   +-- reconciler and status conditions
@@ -65,20 +65,20 @@ tunnel-helperd (privileged daemon)
 Two binaries are used so the daemon does not include interactive UI code and
 the client does not contain privileged backends:
 
-- `cmd/tunnel-helper`: TUI and non-interactive client commands.
-- `cmd/tunnel-helperd`: long-running privileged daemon.
+- `cmd/th`: TUI and non-interactive client commands.
+- `cmd/thd`: long-running privileged daemon.
 
 ## Filesystem Layout
 
 The layout follows the distinction between operator configuration, persistent
 service state, and runtime state:
 
-- `/etc/tunnel-helper/tunnel-helperd.json`: optional daemon settings.
-- `/var/lib/tunnel-helper/tunnels/<id>.json`: desired tunnel records and
+- `/etc/th/thd.json`: optional daemon settings.
+- `/var/lib/th/tunnels/<id>.json`: desired tunnel records and
   secrets, owned by root, directory mode `0700`, file mode `0600`.
-- `/var/lib/tunnel-helper/cache/srv6/`: downloaded SRv6 source data.
-- `/run/tunnel-helper/control.sock`: local API socket, mode configurable and
-  normally owned by `root:tunnel-helper` with mode `0660`.
+- `/var/lib/th/cache/srv6/`: downloaded SRv6 source data.
+- `/run/th/control.sock`: local API socket, mode configurable and
+  normally owned by `root:th` with mode `0660`.
 
 The daemon is the only writer. Records use a schema version, stable ID,
 generation, desired enabled state, typed spec, and timestamps. Writes use a
@@ -125,7 +125,7 @@ daemon restart.
 - Reconcile after every mutation and on relevant netlink/VICI events.
 - Run a bounded periodic repair loop as a fallback.
 - Serialize operations per tunnel and bound all I/O with contexts/timeouts.
-- Mark created links with `Alias=tunnel-helper:<record-id>`.
+- Mark created links with `Alias=th:<record-id>`.
 - Refuse to mutate or delete a same-name link without the ownership alias.
 - Allocate stable XFRM `if_id` and `reqid` values from record identity and check
   for collisions.
