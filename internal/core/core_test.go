@@ -227,18 +227,16 @@ func TestReconcilerStartupAndEventRetry(t *testing.T) {
 		reconciler.Run(ctx)
 		close(done)
 	}()
-	waitForCall(t, backend.called)
-	if status := reconciler.Status(record); status.Phase != model.PhaseError || status.ObservedGeneration != 0 {
-		t.Fatalf("failure status = %+v", status)
-	}
+	waitForStatus(t, reconciler, record, func(status model.Status) bool {
+		return status.Phase == model.PhaseError && status.ObservedGeneration == 0
+	})
 	backend.mu.Lock()
 	backend.applyErr = nil
 	backend.mu.Unlock()
 	backend.events <- BackendEvent{RecordID: record.ID, Type: BackendEventLink}
-	waitForCall(t, backend.called)
-	if status := reconciler.Status(record); status.Phase != model.PhaseReady || status.ObservedGeneration != record.Generation {
-		t.Fatalf("recovered status = %+v", status)
-	}
+	waitForStatus(t, reconciler, record, func(status model.Status) bool {
+		return status.Phase == model.PhaseReady && status.ObservedGeneration == record.Generation
+	})
 	cancel()
 	select {
 	case <-done:
@@ -560,5 +558,24 @@ func waitForCall(t *testing.T, calls <-chan struct{}) {
 	case <-calls:
 	case <-time.After(2 * time.Second):
 		t.Fatal("backend was not called")
+	}
+}
+
+func waitForStatus(t *testing.T, reconciler *Reconciler, record model.Tunnel, ready func(model.Status) bool) {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		status := reconciler.Status(record)
+		if ready(status) {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for reconciler status; last status = %+v", status)
+		case <-ticker.C:
+		}
 	}
 }
