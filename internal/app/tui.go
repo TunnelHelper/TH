@@ -10,37 +10,31 @@ import (
 	"time"
 
 	"github.com/sudogeeker/tunnel-helper/internal/control"
+	"github.com/sudogeeker/tunnel-helper/internal/core"
 	"github.com/sudogeeker/tunnel-helper/internal/model"
 	"github.com/sudogeeker/tunnel-helper/internal/ui"
 )
+
+const tuiHealthTimeout = time.Second
 
 type tuiApp struct {
 	client  *control.Client
 	timeout time.Duration
 	ui      *ui.UI
 	prompts *prompts
+	health  map[model.Kind]core.BackendHealth
 }
 
 func runTUI(client *control.Client, timeout time.Duration) error {
 	output := ui.New(os.Stdout, os.Stderr, os.Stdin)
 	app := &tuiApp{client: client, timeout: timeout, ui: output, prompts: newPrompts(output)}
-	if err := app.showHealthWarnings(); err != nil {
-		output.Warn(err.Error())
+	if err := app.loadHealth(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		output.Warn("tunnel-helperd unavailable")
 	}
 	for {
 		choice := "manage"
 		output.Title("tunnel-helper V2")
-		err := app.prompts.selectValue("Action", []ui.Option{
-			{Label: "Manage tunnels", Value: "manage"},
-			{Label: "Create GRE", Value: string(model.KindGRE)},
-			{Label: "Create VXLAN", Value: string(model.KindVXLAN)},
-			{Label: "Create WireGuard", Value: string(model.KindWireGuard)},
-			{Label: "Create AmneziaWG", Value: string(model.KindAmneziaWG)},
-			{Label: "Create static XFRM", Value: string(model.KindXFRMStatic)},
-			{Label: "Create IKEv2 XFRM", Value: string(model.KindXFRMIKEv2)},
-			{Label: "Create SRv6", Value: string(model.KindSRv6)},
-			{Label: "Exit", Value: "exit"},
-		}, &choice)
+		err := app.prompts.selectValue("Action", app.mainMenuOptions(), &choice)
 		if errors.Is(err, ErrAborted) || choice == "exit" {
 			return nil
 		}
@@ -53,7 +47,12 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 			}
 			continue
 		}
-		if err := app.create(model.Kind(choice)); err != nil && !errors.Is(err, ErrAborted) {
+		kind := model.Kind(choice)
+		if item, unavailable := app.unavailable(kind); unavailable {
+			output.Warn(shortUnavailableWarning(kind, item))
+			continue
+		}
+		if err := app.create(kind); err != nil && !errors.Is(err, ErrAborted) {
 			output.Warn(err.Error())
 		}
 	}
@@ -63,23 +62,52 @@ func (a *tuiApp) context() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), a.timeout)
 }
 
-func (a *tuiApp) showHealthWarnings() error {
-	ctx, cancel := a.context()
+func (a *tuiApp) loadHealth() error {
+	timeout := min(a.timeout, tuiHealthTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	health, err := a.client.Health(ctx)
 	if err != nil {
 		return err
 	}
-	for _, kind := range model.Kinds {
-		item, ok := health[kind]
-		if !ok {
-			continue
-		}
-		if !item.Available {
-			a.ui.Warn(fmt.Sprintf("%s unavailable: %s", kind, item.Message))
-		}
-	}
+	a.health = health
 	return nil
+}
+
+func (a *tuiApp) mainMenuOptions() []ui.Option {
+	options := []ui.Option{
+		{Label: "Manage tunnels", Value: "manage"},
+		{Label: "Create GRE", Value: string(model.KindGRE)},
+		{Label: "Create VXLAN", Value: string(model.KindVXLAN)},
+		{Label: "Create WireGuard", Value: string(model.KindWireGuard)},
+		{Label: "Create AmneziaWG", Value: string(model.KindAmneziaWG)},
+		{Label: "Create static XFRM", Value: string(model.KindXFRMStatic)},
+		{Label: "Create IKEv2 XFRM", Value: string(model.KindXFRMIKEv2)},
+		{Label: "Create SRv6", Value: string(model.KindSRv6)},
+		{Label: "Exit", Value: "exit"},
+	}
+	for i := range options {
+		_, options[i].Dimmed = a.unavailable(model.Kind(options[i].Value))
+	}
+	return options
+}
+
+func (a *tuiApp) unavailable(kind model.Kind) (core.BackendHealth, bool) {
+	item, ok := a.health[kind]
+	return item, ok && !item.Available
+}
+
+func shortUnavailableWarning(kind model.Kind, _ core.BackendHealth) string {
+	switch kind {
+	case model.KindWireGuard:
+		return "WireGuard unavailable: kernel support not detected"
+	case model.KindAmneziaWG:
+		return "AmneziaWG unavailable: generic-netlink family not found"
+	case model.KindXFRMIKEv2:
+		return "IKEv2 XFRM unavailable: strongSwan VICI not detected"
+	default:
+		return fmt.Sprintf("%s unavailable", kind)
+	}
 }
 
 func (a *tuiApp) create(kind model.Kind) error {

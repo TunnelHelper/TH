@@ -26,15 +26,20 @@ func (p *Prompter) newForm(groups ...*huh.Group) *huh.Form {
 }
 
 type Option struct {
-	Label string
-	Value string
+	Label  string
+	Value  string
+	Dimmed bool
 }
 
 func (p *Prompter) Select(title string, options []Option, value *string) error {
 	if p.ui.TTY {
 		huhOptions := make([]huh.Option[string], 0, len(options))
 		for _, opt := range options {
-			huhOptions = append(huhOptions, huh.NewOption(opt.Label, opt.Value))
+			label := opt.Label
+			if opt.Dimmed {
+				label = p.ui.dim.Render(label)
+			}
+			huhOptions = append(huhOptions, huh.NewOption(label, opt.Value))
 		}
 		sel := huh.NewSelect[string]().Title(title).Options(huhOptions...).Value(value)
 		if p.ui.PendingTitle != "" {
