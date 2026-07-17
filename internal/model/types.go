@@ -200,6 +200,17 @@ type Status struct {
 	LastSuccessfulTime time.Time         `json:"last_successful_time,omitempty"`
 	Conditions         []Condition       `json:"conditions,omitempty"`
 	Details            map[string]string `json:"details,omitempty"`
+	Peers              []PeerStatus      `json:"peers,omitempty"`
+}
+
+type PeerStatus struct {
+	PublicKey         string     `json:"public_key"`
+	Endpoint          string     `json:"endpoint,omitempty"`
+	AllowedIPs        []string   `json:"allowed_ips,omitempty"`
+	KeepaliveSeconds  int        `json:"keepalive_seconds,omitempty"`
+	LastHandshakeTime *time.Time `json:"last_handshake_time,omitempty"`
+	ReceiveBytes      int64      `json:"receive_bytes"`
+	TransmitBytes     int64      `json:"transmit_bytes"`
 }
 
 type TunnelView struct {

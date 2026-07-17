@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
@@ -28,6 +29,7 @@ type Manager interface {
 	Reconcile(context.Context, string) (model.TunnelView, error)
 	ReconcileAll(context.Context) ([]model.TunnelView, error)
 	Health(context.Context) map[model.Kind]core.BackendHealth
+	SubscribeEvents(uint64) core.EventSubscription
 }
 
 type Server struct {
@@ -75,6 +77,7 @@ type HealthResponse struct {
 func NewServer(manager Manager) *Server {
 	server := &Server{manager: manager, mux: http.NewServeMux()}
 	server.mux.HandleFunc("GET /v1/health", server.health)
+	server.mux.HandleFunc("GET /v1/events", server.events)
 	server.mux.HandleFunc("GET /v1/tunnels", server.list)
 	server.mux.HandleFunc("POST /v1/tunnels", server.create)
 	server.mux.HandleFunc("GET /v1/tunnels/{id}", server.get)
@@ -88,6 +91,70 @@ func NewServer(manager Manager) *Server {
 		writeJSON(w, http.StatusNotFound, errorEnvelope{Error: apiError{Code: "not_found", Message: "API endpoint not found"}})
 	})
 	return server
+}
+
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	after := uint64(0)
+	if value := r.URL.Query().Get("after"); value != "" {
+		parsed, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			writeBadRequest(w, errors.New("after must be an unsigned event sequence"))
+			return
+		}
+		after = parsed
+	}
+	subscription := s.manager.SubscribeEvents(after)
+	defer subscription.Cancel()
+	controller := http.NewResponseController(w)
+	_ = controller.SetWriteDeadline(time.Time{})
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	encoder := json.NewEncoder(w)
+	connected := core.Event{
+		Time:    time.Now().UTC(),
+		Type:    core.EventConnected,
+		Details: map[string]string{"current_sequence": strconv.FormatUint(subscription.Current, 10)},
+	}
+	if subscription.Gap {
+		connected.Message = "requested event history is no longer retained"
+		connected.Details["oldest_sequence"] = strconv.FormatUint(subscription.Oldest, 10)
+	}
+	if err := encoder.Encode(connected); err != nil {
+		return
+	}
+	if err := controller.Flush(); err != nil {
+		return
+	}
+	for _, event := range subscription.Replay {
+		if err := encoder.Encode(event); err != nil {
+			return
+		}
+	}
+	if err := controller.Flush(); err != nil {
+		return
+	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case event := <-subscription.Events:
+			if err := encoder.Encode(event); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
+		case now := <-heartbeat.C:
+			if err := encoder.Encode(core.Event{Time: now.UTC(), Type: core.EventHeartbeat}); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) Handler() http.Handler {

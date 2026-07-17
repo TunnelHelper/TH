@@ -13,6 +13,7 @@ import (
 type UI struct {
 	Out          io.Writer
 	Err          io.Writer
+	Input        io.Reader
 	TTY          bool
 	In           *bufio.Reader
 	info         lipgloss.Style
@@ -27,10 +28,11 @@ type UI struct {
 
 func New(out, err io.Writer, in io.Reader) *UI {
 	u := &UI{
-		Out: out,
-		Err: err,
-		TTY: isatty.IsTerminal(1),
-		In:  bufio.NewReader(in),
+		Out:   out,
+		Err:   err,
+		Input: in,
+		TTY:   isatty.IsTerminal(1),
+		In:    bufio.NewReader(in),
 	}
 
 	u.info = lipgloss.NewStyle().Foreground(lipgloss.Color("4")).Bold(true)

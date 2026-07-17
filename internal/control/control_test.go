@@ -159,6 +159,41 @@ func TestMutationWaitQueryReconcilesBeforeResponse(t *testing.T) {
 	}
 }
 
+func TestEventStreamSendsReplayAndLiveEvents(t *testing.T) {
+	hub := core.NewEventHub(8)
+	hub.Publish(core.Event{Type: core.EventStatus, TunnelID: "replayed"})
+	manager := &stubManager{events: hub}
+	server := httptest.NewServer(NewServer(manager).Handler())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/v1/events?after=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.Header.Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("content type = %q", response.Header.Get("Content-Type"))
+	}
+	decoder := json.NewDecoder(response.Body)
+	var connected, replayed, live core.Event
+	if err := decoder.Decode(&connected); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&replayed); err != nil {
+		t.Fatal(err)
+	}
+	if connected.Type != core.EventConnected || replayed.TunnelID != "replayed" {
+		t.Fatalf("initial events = %+v / %+v", connected, replayed)
+	}
+	hub.Publish(core.Event{Type: core.EventDeleted, TunnelID: "live"})
+	if err := decoder.Decode(&live); err != nil {
+		t.Fatal(err)
+	}
+	if live.Type != core.EventDeleted || live.TunnelID != "live" {
+		t.Fatalf("live event = %+v", live)
+	}
+}
+
 func TestUnixServerAndTypedClient(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("Unix socket ownership test requires root, as does thd")
@@ -169,7 +204,10 @@ func TestUnixServerAndTypedClient(t *testing.T) {
 	settings.SocketPath = filepath.Join(runtimeDir, "control.sock")
 	settings.SocketGID = os.Getgid()
 	settings.RequestTimeoutSeconds = 2
-	manager := &stubManager{view: model.TunnelView{Tunnel: model.Tunnel{ID: "11111111-2222-4333-8444-555555555555", Generation: 1, Name: "test"}}}
+	manager := &stubManager{
+		view:   model.TunnelView{Tunnel: model.Tunnel{ID: "11111111-2222-4333-8444-555555555555", Generation: 1, Name: "test"}},
+		events: core.NewEventHub(8),
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan error, 1)
 	go func() {
@@ -196,6 +234,33 @@ func TestUnixServerAndTypedClient(t *testing.T) {
 	if err != nil || len(views) != 1 || views[0].Tunnel.Name != "test" {
 		t.Fatalf("typed List = %+v, %v", views, err)
 	}
+	streamContext, streamCancel := context.WithCancel(context.Background())
+	events, streamErrors, err := client.WatchEvents(streamContext, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != core.EventConnected {
+			t.Fatalf("first stream event = %+v", event)
+		}
+	case err := <-streamErrors:
+		t.Fatalf("start event stream: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("event stream did not connect")
+	}
+	manager.events.Publish(core.Event{Type: core.EventStatus, TunnelID: "streamed"})
+	select {
+	case event := <-events:
+		if event.TunnelID != "streamed" {
+			t.Fatalf("stream event = %+v", event)
+		}
+	case err := <-streamErrors:
+		t.Fatalf("read event stream: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("live event was not streamed")
+	}
+	streamCancel()
 	cancel()
 	select {
 	case err := <-serveDone:
@@ -248,6 +313,7 @@ type stubManager struct {
 	view           model.TunnelView
 	views          []model.TunnelView
 	health         map[model.Kind]core.BackendHealth
+	events         *core.EventHub
 	getErr         error
 	updateErr      error
 	reconcileCalls int
@@ -284,4 +350,10 @@ func (m *stubManager) Health(context.Context) map[model.Kind]core.BackendHealth 
 		return m.health
 	}
 	return map[model.Kind]core.BackendHealth{model.KindGRE: {Available: true}}
+}
+func (m *stubManager) SubscribeEvents(after uint64) core.EventSubscription {
+	if m.events == nil {
+		m.events = core.NewEventHub(8)
+	}
+	return m.events.Subscribe(after)
 }

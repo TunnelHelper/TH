@@ -25,6 +25,7 @@ type Reconciler struct {
 	queueAll bool
 	queued   map[string]struct{}
 	wake     chan struct{}
+	events   *EventHub
 }
 
 func NewReconciler(records Store, backend Backend, interval time.Duration) *Reconciler {
@@ -37,6 +38,7 @@ func NewReconciler(records Store, backend Backend, interval time.Duration) *Reco
 		locks:    make(map[string]*sync.Mutex),
 		queued:   make(map[string]struct{}),
 		wake:     make(chan struct{}, 1),
+		events:   NewEventHub(1024),
 	}
 }
 
@@ -310,6 +312,13 @@ func (r *Reconciler) Delete(ctx context.Context, id string, expected uint64) err
 		return deleteErr
 	}
 	r.Forget(id)
+	r.events.Publish(Event{
+		Type:       EventDeleted,
+		TunnelID:   record.ID,
+		TunnelName: record.Name,
+		Generation: record.Generation,
+		Phase:      model.PhaseDisabled,
+	})
 	return nil
 }
 
@@ -352,9 +361,8 @@ func (r *Reconciler) Status(record model.Tunnel) model.Status {
 func (r *Reconciler) MarkPending(record model.Tunnel) {
 	now := r.now().UTC()
 	r.statusMu.Lock()
-	defer r.statusMu.Unlock()
 	previous := r.statuses[record.ID]
-	r.statuses[record.ID] = model.Status{
+	status := model.Status{
 		TunnelID:           record.ID,
 		DesiredGeneration:  record.Generation,
 		ObservedGeneration: previous.ObservedGeneration,
@@ -364,6 +372,7 @@ func (r *Reconciler) MarkPending(record model.Tunnel) {
 		LastReconcileTime:  previous.LastReconcileTime,
 		LastSuccessfulTime: previous.LastSuccessfulTime,
 		Details:            previous.Details,
+		Peers:              previous.Peers,
 		Conditions: []model.Condition{{
 			Type:               "Ready",
 			Status:             false,
@@ -372,6 +381,9 @@ func (r *Reconciler) MarkPending(record model.Tunnel) {
 			LastTransitionTime: transitionTime(previous, false, now),
 		}},
 	}
+	r.statuses[record.ID] = status
+	r.statusMu.Unlock()
+	r.publishStatus(record, status)
 }
 
 func (r *Reconciler) Forget(id string) {
@@ -424,7 +436,6 @@ func (r *Reconciler) reconcileRecord(ctx context.Context, record model.Tunnel) e
 func (r *Reconciler) setResult(record model.Tunnel, observation Observation, err error, successPhase model.Phase) {
 	now := r.now().UTC()
 	r.statusMu.Lock()
-	defer r.statusMu.Unlock()
 	previous := r.statuses[record.ID]
 	status := model.Status{
 		TunnelID:           record.ID,
@@ -436,6 +447,7 @@ func (r *Reconciler) setResult(record model.Tunnel, observation Observation, err
 		LastReconcileTime:  now,
 		LastSuccessfulTime: previous.LastSuccessfulTime,
 		Details:            observation.Details,
+		Peers:              observation.Peers,
 	}
 	if err != nil {
 		status.Phase = model.PhaseError
@@ -457,6 +469,30 @@ func (r *Reconciler) setResult(record model.Tunnel, observation Observation, err
 		}}
 	}
 	r.statuses[record.ID] = status
+	r.statusMu.Unlock()
+	r.publishStatus(record, status)
+}
+
+func (r *Reconciler) publishStatus(record model.Tunnel, status model.Status) {
+	message := ""
+	if len(status.Conditions) != 0 {
+		message = status.Conditions[0].Message
+	}
+	r.events.Publish(Event{
+		Type:       EventStatus,
+		TunnelID:   record.ID,
+		TunnelName: record.Name,
+		TunnelKind: record.Kind,
+		Enabled:    record.Enabled,
+		Generation: record.Generation,
+		Phase:      status.Phase,
+		Message:    message,
+		Status:     &status,
+	})
+}
+
+func (r *Reconciler) SubscribeEvents(after uint64) EventSubscription {
+	return r.events.Subscribe(after)
 }
 
 func transitionTime(previous model.Status, next bool, now time.Time) time.Time {

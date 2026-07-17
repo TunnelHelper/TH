@@ -59,5 +59,5 @@ func wrapAbort(err error) error {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: th [--socket PATH] [tui|version|doctor|health|list|get ID|create FILE [--wait]|update FILE [--wait]|enable ID [--wait]|disable ID [--wait]|delete ID|reconcile [ID]]")
+	return fmt.Errorf("usage: th [--socket PATH] [tui|version|doctor|health|watch [--after SEQUENCE]|list|get ID|create FILE [--wait]|update FILE [--wait]|enable ID [--wait]|disable ID [--wait]|delete ID|reconcile [ID]]")
 }

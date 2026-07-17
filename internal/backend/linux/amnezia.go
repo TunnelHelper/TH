@@ -589,6 +589,7 @@ func (b *Backend) observeAmneziaWG(ctx context.Context, record model.Tunnel) (co
 	}
 	observation.Details["receive_bytes"] = strconv.FormatInt(rx, 10)
 	observation.Details["transmit_bytes"] = strconv.FormatInt(tx, 10)
+	observation.Peers = wireGuardPeerStatuses(device.Peers)
 	if !latest.IsZero() {
 		observation.Details["latest_handshake"] = latest.UTC().Format(time.RFC3339)
 	}

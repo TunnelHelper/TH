@@ -32,7 +32,7 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 		output.Warn("thd unavailable")
 	}
 	for {
-		choice := "manage"
+		choice := "watch"
 		output.Title("TH V2")
 		err := app.prompts.selectValue("Action", app.mainMenuOptions(), &choice)
 		if errors.Is(err, ErrAborted) || choice == "exit" {
@@ -43,6 +43,12 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 		}
 		if choice == "manage" {
 			if err := app.manage(); err != nil && !errors.Is(err, ErrAborted) {
+				output.Warn(err.Error())
+			}
+			continue
+		}
+		if choice == "watch" {
+			if err := runDashboard(app.client, app.timeout, output); err != nil && !errors.Is(err, ErrAborted) {
 				output.Warn(err.Error())
 			}
 			continue
@@ -76,6 +82,7 @@ func (a *tuiApp) loadHealth() error {
 
 func (a *tuiApp) mainMenuOptions() []ui.Option {
 	options := []ui.Option{
+		{Label: "Live status", Value: "watch"},
 		{Label: "Manage tunnels", Value: "manage"},
 		{Label: "Create GRE", Value: string(model.KindGRE)},
 		{Label: "Create VXLAN", Value: string(model.KindVXLAN)},
@@ -283,6 +290,14 @@ func showStatus(output *ui.UI, view model.TunnelView) {
 		if condition.Message != "" {
 			output.Warn(condition.Message)
 		}
+	}
+	for _, peer := range view.Status.Peers {
+		handshake := "never"
+		if peer.LastHandshakeTime != nil {
+			handshake = formatDuration(time.Since(*peer.LastHandshakeTime))
+		}
+		fmt.Fprintf(output.Out, "Peer %s: endpoint=%s handshake=%s rx=%s tx=%s\n",
+			fit(peer.PublicKey, 16), peer.Endpoint, handshake, formatBytes(peer.ReceiveBytes), formatBytes(peer.TransmitBytes))
 	}
 	output.HR()
 }

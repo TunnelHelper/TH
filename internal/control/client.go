@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 )
 
@@ -41,6 +42,50 @@ func NewClient(socketPath string, timeout time.Duration) *Client {
 
 func (c *Client) CloseIdleConnections() {
 	c.http.CloseIdleConnections()
+}
+
+func (c *Client) WatchEvents(ctx context.Context, after uint64) (<-chan core.Event, <-chan error, error) {
+	path := "/v1/events?after=" + strconv.FormatUint(after, 10)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix"+path, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	streamClient := &http.Client{Transport: c.http.Transport}
+	response, err := streamClient.Do(request)
+	if err != nil {
+		return nil, nil, fmt.Errorf("contact thd: %w", err)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		defer response.Body.Close()
+		var envelope errorEnvelope
+		if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&envelope); err != nil {
+			return nil, nil, fmt.Errorf("daemon returned HTTP %d", response.StatusCode)
+		}
+		return nil, nil, &APIError{Status: response.StatusCode, Code: envelope.Error.Code, Message: envelope.Error.Message}
+	}
+	events := make(chan core.Event, 64)
+	errors := make(chan error, 1)
+	go func() {
+		defer response.Body.Close()
+		defer close(events)
+		defer close(errors)
+		decoder := json.NewDecoder(response.Body)
+		for {
+			var event core.Event
+			if err := decoder.Decode(&event); err != nil {
+				if ctx.Err() == nil {
+					errors <- fmt.Errorf("read daemon event stream: %w", err)
+				}
+				return
+			}
+			select {
+			case events <- event:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return events, errors, nil
 }
 
 func (c *Client) Health(ctx context.Context) (HealthResponse, error) {

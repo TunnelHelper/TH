@@ -121,6 +121,30 @@ func TestAmneziaSockaddrRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWireGuardPeerStatusesExposeOperationalData(t *testing.T) {
+	key, _ := wgtypes.GeneratePrivateKey()
+	handshake := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	statuses := wireGuardPeerStatuses([]wgtypes.Peer{{
+		PublicKey:                   key.PublicKey(),
+		Endpoint:                    &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 51820},
+		PersistentKeepaliveInterval: 25 * time.Second,
+		LastHandshakeTime:           handshake,
+		ReceiveBytes:                1024,
+		TransmitBytes:               2048,
+		AllowedIPs:                  []net.IPNet{{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(24, 32)}},
+	}})
+	if len(statuses) != 1 {
+		t.Fatalf("statuses = %+v", statuses)
+	}
+	status := statuses[0]
+	if status.PublicKey != key.PublicKey().String() || status.Endpoint != "192.0.2.10:51820" || status.KeepaliveSeconds != 25 || status.LastHandshakeTime == nil || !status.LastHandshakeTime.Equal(handshake) {
+		t.Fatalf("peer status = %+v", status)
+	}
+	if len(status.AllowedIPs) != 1 || status.AllowedIPs[0] != "10.0.0.0/24" || status.ReceiveBytes != 1024 || status.TransmitBytes != 2048 {
+		t.Fatalf("peer operational data = %+v", status)
+	}
+}
+
 func TestParseAmneziaDeviceFixture(t *testing.T) {
 	key, _ := wgtypes.GeneratePrivateKey()
 	encoder := mdnetlink.NewAttributeEncoder()

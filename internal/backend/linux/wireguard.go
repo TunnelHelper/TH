@@ -149,10 +149,36 @@ func (b *Backend) observeWireGuard(record model.Tunnel) (core.Observation, error
 	}
 	observation.Details["receive_bytes"] = strconv.FormatInt(rx, 10)
 	observation.Details["transmit_bytes"] = strconv.FormatInt(tx, 10)
+	observation.Peers = wireGuardPeerStatuses(device.Peers)
 	if !latest.IsZero() {
 		observation.Details["latest_handshake"] = latest.UTC().Format(time.RFC3339)
 	}
 	return observation, nil
+}
+
+func wireGuardPeerStatuses(peers []wgtypes.Peer) []model.PeerStatus {
+	statuses := make([]model.PeerStatus, 0, len(peers))
+	for _, peer := range peers {
+		status := model.PeerStatus{
+			PublicKey:        peer.PublicKey.String(),
+			KeepaliveSeconds: int(peer.PersistentKeepaliveInterval / time.Second),
+			ReceiveBytes:     peer.ReceiveBytes,
+			TransmitBytes:    peer.TransmitBytes,
+			AllowedIPs:       make([]string, 0, len(peer.AllowedIPs)),
+		}
+		if peer.Endpoint != nil {
+			status.Endpoint = peer.Endpoint.String()
+		}
+		if !peer.LastHandshakeTime.IsZero() {
+			handshake := peer.LastHandshakeTime.UTC()
+			status.LastHandshakeTime = &handshake
+		}
+		for _, prefix := range peer.AllowedIPs {
+			status.AllowedIPs = append(status.AllowedIPs, prefix.String())
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses
 }
 
 func effectiveRouteTable(record model.Tunnel, spec *model.WireGuardSpec) int {

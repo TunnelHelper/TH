@@ -10,6 +10,7 @@ type Observation struct {
 	InterfaceExists bool
 	InterfaceUp     bool
 	Details         map[string]string
+	Peers           []model.PeerStatus
 }
 
 type BackendHealth struct {

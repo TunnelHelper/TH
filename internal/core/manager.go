@@ -198,6 +198,10 @@ func (m *Manager) Health(ctx context.Context) map[model.Kind]BackendHealth {
 	return m.reconciler.Health(ctx)
 }
 
+func (m *Manager) SubscribeEvents(after uint64) EventSubscription {
+	return m.reconciler.SubscribeEvents(after)
+}
+
 func (m *Manager) view(record model.Tunnel) model.TunnelView {
 	redacted, fields := model.Redact(record)
 	return model.TunnelView{

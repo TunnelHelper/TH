@@ -37,6 +37,8 @@ func runCLI(client *control.Client, timeout time.Duration, socketPath string, ar
 			return ErrDoctorFailed
 		}
 		return nil
+	case "watch":
+		return runWatch(client, args)
 	case "health":
 		if len(args) != 1 {
 			return usageError()

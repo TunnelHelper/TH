@@ -103,6 +103,7 @@ With no command, `th` opens the TUI. The same API is scriptable:
 th health
 th doctor
 th version
+th watch
 th list
 th get RECORD_ID
 th create tunnel.json
@@ -120,6 +121,10 @@ needs the resulting observed status before continuing.
 `th doctor` distinguishes unavailable optional backends from capabilities
 required by enabled records. `th health` reports daemon, API, schema, backend,
 and configured-tunnel readiness separately.
+
+The TUI live-status view and `th watch` consume an NDJSON event stream over the
+same Unix socket. WireGuard and AmneziaWG status includes per-peer endpoints,
+handshake times, AllowedIPs, and traffic counters without exposing key material.
 
 Use `-` instead of a filename for JSON on stdin. Updates require the current
 `id` and `generation`, so a stale client cannot overwrite a newer record.

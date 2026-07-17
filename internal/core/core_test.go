@@ -24,6 +24,8 @@ func TestManagerLifecycleAndSecretRedaction(t *testing.T) {
 		Name: "wg", Kind: model.KindWireGuard, Interface: "wg0", Enabled: true,
 		Spec: model.Spec{WireGuard: &model.WireGuardSpec{Peers: []model.WireGuardPeer{{PublicKey: peer.PublicKey().String(), PresharedKey: psk.String()}}}},
 	}
+	subscription := manager.SubscribeEvents(0)
+	defer subscription.Cancel()
 	view, err := manager.Create(context.Background(), record)
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +39,14 @@ func TestManagerLifecycleAndSecretRedaction(t *testing.T) {
 	}
 	if view.Tunnel.Spec.WireGuard.PrivateKey != "" || view.Tunnel.Spec.WireGuard.Peers[0].PresharedKey != "" {
 		t.Fatal("manager returned secrets")
+	}
+	select {
+	case event := <-subscription.Events:
+		if event.Type != EventStatus || event.Status == nil || event.TunnelID != view.Tunnel.ID {
+			t.Fatalf("status event = %+v", event)
+		}
+	default:
+		t.Fatal("queued status event was not published")
 	}
 	raw, err := records.Get(view.Tunnel.ID)
 	if err != nil || raw.Spec.WireGuard.PrivateKey == "" || raw.Spec.WireGuard.Peers[0].PresharedKey == "" {
