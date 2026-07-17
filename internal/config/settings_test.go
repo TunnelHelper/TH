@@ -3,23 +3,27 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
-func TestLoadDefaultsAndPartialSettings(t *testing.T) {
+func TestLoadMissingSettingsUsesAllDefaults(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.json")
 	settings, err := Load(missing)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.StateDir != "/var/lib/tunnel-helper" || settings.SocketGroup != "tunnel-helper" || settings.SocketGID != -1 {
-		t.Fatalf("unexpected defaults: %+v", settings)
+	if defaults := Defaults(); !reflect.DeepEqual(settings, defaults) {
+		t.Fatalf("missing settings = %+v, want defaults %+v", settings, defaults)
 	}
+}
+
+func TestLoadPartialSettingsPreservesDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"request_timeout_seconds":42,"socket_group":"root"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	settings, err = Load(path)
+	settings, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -38,19 +38,52 @@ The daemon is the only writer of V2 state. Kernel objects created by the
 daemon are tagged or placed in reserved ownership namespaces, and deletion is
 refused when ownership cannot be proven.
 
-## Build And Install
+## Install
+
+The recommended installer detects Debian-family and RPM-family systems,
+downloads the matching native package from the latest release, verifies it
+against `checksums.txt`, and installs it with the host package manager:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/sudogeeker/tunnel-helper/main/run.sh) --install
+```
+
+On its first installation, the package creates the `tunnel-helper` operator
+group and runtime directories, then enables and starts
+`tunnel-helperd.service`. Upgrades preserve an administrator's disabled or
+stopped state. The one-command installer also adds its invoking non-root user
+to the operator group. Start a new login session afterward, then run the client
+without `sudo`:
+
+```bash
+tunnel-helper
+```
+
+The daemon stays available even when
+`/etc/tunnel-helper/tunnel-helperd.json` is absent or there are no tunnel
+records. In that case it uses built-in defaults and keeps listening for the
+client on `/run/tunnel-helper/control.sock`.
+
+Native packages can also be downloaded from the release page and installed
+directly:
+
+```bash
+sudo apt-get install ./tunnel-helper_VERSION_ARCH.deb
+# or
+sudo dnf install ./tunnel-helper-VERSION-1.ARCH.rpm
+sudo usermod -aG tunnel-helper "$USER"
+```
+
+Configuration in `/etc/tunnel-helper` and state in `/var/lib/tunnel-helper`
+are preserved when the package is removed.
+
+## Build From Source
 
 Go 1.24 or newer is required.
 
 ```bash
 make build
 sudo make install
-```
-
-For a manual systemd installation, create the service group and directories,
-then enable the unit using the platform service manager:
-
-```bash
 sudo systemd-sysusers /usr/lib/sysusers.d/tunnel-helper.conf
 sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/tunnel-helper.conf
 sudo systemctl daemon-reload
@@ -58,22 +91,11 @@ sudo systemctl enable --now tunnel-helperd
 sudo usermod -aG tunnel-helper "$USER"
 ```
 
-Start a new login session after changing group membership. The client itself
-must not be run with `sudo`:
+GoReleaser is also required to build local snapshot packages:
 
 ```bash
-tunnel-helper
+make package
 ```
-
-Release archives can also be installed with:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/sudogeeker/tunnel-helper/main/run.sh) --install
-```
-
-The installer requires `curl`, `tar`, and `sha256sum`, verifies the release
-checksum, places files, and initializes sysusers/tmpfiles when available. It
-does not enable or start the service.
 
 ## Client Commands
 

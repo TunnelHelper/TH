@@ -32,10 +32,19 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Check packaging scripts
+        run: |
+          bash -n run.sh
+          for script in packaging/scripts/*.sh; do sh -n "$script"; done
+
       - name: Network namespace integration tests
         run: |
           go test -c -tags=integration -o /tmp/tunnel-helper-integration.test ./internal/backend/linux
           sudo /tmp/tunnel-helper-integration.test -test.v
 
-      - name: Cross-build Linux targets
-        run: make build-linux
+      - name: Build release archives and native packages
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --snapshot --clean

@@ -55,7 +55,62 @@ archives:
       - LICENSE
       - docs/*
       - packaging/*
-      - packaging/**/*
+
+nfpms:
+  - id: tunnel-helper-packages
+    package_name: tunnel-helper
+    file_name_template: "{{ .ConventionalFileName }}"
+    ids:
+      - tunnel-helper
+      - tunnel-helperd
+    vendor: sudogeeker
+    homepage: https://github.com/sudogeeker/tunnel-helper
+    maintainer: sudogeeker <237268424+sudogeeker@users.noreply.github.com>
+    description: |-
+      Linux network tunnel management daemon and non-root client.
+      Supports GRE, VXLAN, WireGuard, AmneziaWG, XFRM, IKEv2, and SRv6.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    section: net
+    priority: optional
+    release: 1
+    dependencies:
+      - systemd
+    contents:
+      - src: packaging/systemd/tunnel-helperd.service
+        dst: /usr/lib/systemd/system/tunnel-helperd.service
+        file_info:
+          mode: 0644
+      - src: packaging/sysusers.d/tunnel-helper.conf
+        dst: /usr/lib/sysusers.d/tunnel-helper.conf
+        file_info:
+          mode: 0644
+      - src: packaging/tmpfiles.d/tunnel-helper.conf
+        dst: /usr/lib/tmpfiles.d/tunnel-helper.conf
+        file_info:
+          mode: 0644
+      - src: packaging/tunnel-helperd.json
+        dst: /etc/tunnel-helper/tunnel-helperd.json
+        type: config|noreplace
+        file_info:
+          mode: 0644
+      - src: LICENSE
+        dst: /usr/share/doc/tunnel-helper/LICENSE
+        file_info:
+          mode: 0644
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh
+      preremove: packaging/scripts/preremove.sh
+      postremove: packaging/scripts/postremove.sh
+    rpm:
+      summary: Linux network tunnel management daemon and client
+      group: System Environment/Daemons
+    deb:
+      fields:
+        Bugs: https://github.com/sudogeeker/tunnel-helper/issues
 
 checksum:
   name_template: 'checksums.txt'

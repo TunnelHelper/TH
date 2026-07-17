@@ -5,13 +5,13 @@ BIN_DIR := ./bin
 PREFIX ?= /usr
 DESTDIR ?=
 BINDIR ?= $(PREFIX)/bin
-SBINDIR ?= $(PREFIX)/sbin
+SBINDIR ?= $(PREFIX)/bin
 SYSCONFDIR ?= /etc
 SYSTEMDUNITDIR ?= $(PREFIX)/lib/systemd/system
 SYSUSERSDIR ?= $(PREFIX)/lib/sysusers.d
 TMPFILESDIR ?= $(PREFIX)/lib/tmpfiles.d
 
-.PHONY: help build run test test-integration vet fmt tidy clean \
+.PHONY: help build run test test-integration vet fmt tidy clean package \
 	build-linux build-linux-amd64 build-linux-arm64 build-linux-armv7 \
 	install uninstall
 
@@ -27,6 +27,7 @@ help:
 	@echo "  make tidy               Normalize Go modules"
 	@echo "  make install            Install binaries and service assets"
 	@echo "  make uninstall          Remove installed program files only"
+	@echo "  make package            Build snapshot deb/rpm packages with GoReleaser"
 	@echo "  make clean              Remove ./bin"
 
 build:
@@ -68,6 +69,9 @@ build-linux-armv7:
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -o $(BIN_DIR)/$(DAEMON)_linux_armv7 ./cmd/$(DAEMON)
 
 build-linux: build-linux-amd64 build-linux-arm64 build-linux-armv7
+
+package:
+	goreleaser release --snapshot --clean
 
 install: build
 	install -Dm0755 $(BIN_DIR)/$(APP) $(DESTDIR)$(BINDIR)/$(APP)
