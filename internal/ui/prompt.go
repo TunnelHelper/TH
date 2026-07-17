@@ -108,6 +108,32 @@ func (p *Prompter) Input(title string, value *string, validate func(string) erro
 	return nil
 }
 
+func (p *Prompter) Secret(title string, value *string, validate func(string) error) error {
+	if p.ui.TTY {
+		input := huh.NewInput().Title(title).Value(value).EchoMode(huh.EchoModePassword)
+		if validate != nil {
+			input = input.Validate(func(s string) error { return validate(strings.TrimSpace(s)) })
+		}
+		return p.newForm(huh.NewGroup(input)).Run()
+	}
+	fmt.Fprintf(p.out, "%s: ", title)
+	line, err := p.ui.ReadLine()
+	if err != nil {
+		return err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		line = strings.TrimSpace(*value)
+	}
+	if validate != nil {
+		if err := validate(line); err != nil {
+			return err
+		}
+	}
+	*value = line
+	return nil
+}
+
 func (p *Prompter) Confirm(title string, value *bool, defaultYes bool) error {
 	if p.ui.TTY {
 		c := huh.NewConfirm().Title(title).Value(value)

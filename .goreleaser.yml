@@ -16,17 +16,46 @@ builds:
     goarch:
       - amd64
       - arm64
+      - arm
+    goarm:
+      - '7'
     ldflags:
       - -s -w
     binary: tunnel-helper
+  - id: tunnel-helperd
+    main: ./cmd/tunnel-helperd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    goarm:
+      - '7'
+    ldflags:
+      - -s -w
+    binary: tunnel-helperd
 
 archives:
-  - format: tar.gz
+  - ids:
+      - tunnel-helper
+      - tunnel-helperd
+    formats:
+      - tar.gz
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
+      {{- with .Arm }}v{{ . }}{{- end }}
+    files:
+      - README.md
+      - LICENSE
+      - docs/*
+      - packaging/*
+      - packaging/**/*
 
 checksum:
   name_template: 'checksums.txt'

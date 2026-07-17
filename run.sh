@@ -1,104 +1,98 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BIN_NAME="tunnel-helper"
-
-OS="$(uname -s)"
-INSTALL_ONLY=0
+REPOSITORY="sudogeeker/tunnel-helper"
+INSTALL=0
 args=()
 for arg in "$@"; do
   if [[ "$arg" == "--install" ]]; then
-    INSTALL_ONLY=1
+    INSTALL=1
   else
     args+=("$arg")
   fi
 done
 
-if [[ "$OS" != "Linux" ]]; then
-  echo "This tool supports Linux only. Detected: $OS"
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "tunnel-helper V2 supports Linux only." >&2
   exit 1
 fi
 
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64|amd64) ARCH="amd64" ;;
-  aarch64|arm64) ARCH="arm64" ;;
-  *)
-    echo "Unsupported architecture: $ARCH"
-    exit 1
-    ;;
+case "$(uname -m)" in
+  x86_64|amd64) asset_arch="amd64" ;;
+  aarch64|arm64) asset_arch="arm64" ;;
+  armv7l|armv7) asset_arch="armv7" ;;
+  *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-command -v curl >/dev/null 2>&1 || { echo "curl is required."; exit 1; }
-command -v tar  >/dev/null 2>&1 || { echo "tar is required."; exit 1; }
-
-REPO="sudogeeker/tunnel-helper"
-API="https://api.github.com/repos/${REPO}/releases/latest"
-
-AUTH_HEADERS=()
-if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-  AUTH_HEADERS=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
-fi
-
-if ! json="$(curl -fsSL "${AUTH_HEADERS[@]}" "$API")"; then
-  echo "Failed to fetch release metadata from ${REPO}."
-  exit 1
-fi
-
-asset_url="$(printf '%s\n' "$json" | awk -v arch="$ARCH" -F '\"' '/browser_download_url/ && $0 ~ "linux_"arch"\\.tar\\.gz" {print $4; exit}')"
-
-if [[ -z "$asset_url" ]]; then
-  echo "Could not find a linux_${ARCH} release asset for ${REPO}."
-  echo "Available assets:"
-  printf '%s\n' "$json" | awk -F '\"' '/browser_download_url/ {print $4}' || true
-  exit 1
-fi
-
-tmpdir="$(mktemp -d)"
-cleanup() { rm -rf "$tmpdir"; }
-trap cleanup EXIT
-
-archive="$tmpdir/pkg.tar.gz"
-curl -fsSL "${AUTH_HEADERS[@]}" "$asset_url" -o "$archive"
-tar -xzf "$archive" -C "$tmpdir"
-
-bin_path="$(find "$tmpdir" -maxdepth 2 -type f -name "$BIN_NAME" -print -quit)"
-if [[ -z "$bin_path" ]]; then
-  echo "Binary ${BIN_NAME} not found in release archive."
-  exit 1
-fi
-
-chmod +x "$bin_path"
-
-if [[ "$INSTALL_ONLY" -eq 1 ]]; then
-  echo "Installing $BIN_NAME to /usr/bin..."
-  if [[ "$(id -u)" -ne 0 ]]; then
-    if command -v sudo >/dev/null 2>&1; then
-      sudo cp "$bin_path" "/usr/bin/$BIN_NAME"
-      sudo chmod +x "/usr/bin/$BIN_NAME"
-    else
-      echo "Sudo not found. Run as root to install to /usr/bin."
-      exit 1
-    fi
-  else
-    cp "$bin_path" "/usr/bin/$BIN_NAME"
-    chmod +x "/usr/bin/$BIN_NAME"
-  fi
-  echo "Installation complete. You can now run '$BIN_NAME'."
-  exit 0
-fi
-
-if [[ "${RUN_AFTER_DOWNLOAD:-1}" != "1" ]]; then
-  exit 0
-fi
-
-if [[ "$(id -u)" -ne 0 ]]; then
-  if command -v sudo >/dev/null 2>&1; then
-    sudo "$bin_path" "${args[@]}"
-  else
-    echo "Run as root: $bin_path ${args[*]}"
+for dependency in curl tar sha256sum; do
+  command -v "$dependency" >/dev/null 2>&1 || {
+    echo "$dependency is required." >&2
     exit 1
-  fi
-else
-  "$bin_path" "${args[@]}"
+  }
+done
+
+headers=()
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  headers=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
 fi
+metadata="$(curl -fsSL --max-time 30 "${headers[@]}" "https://api.github.com/repos/${REPOSITORY}/releases/latest")"
+asset_url="$(printf '%s\n' "$metadata" | awk -F '"' -v suffix="linux_${asset_arch}.tar.gz" '/browser_download_url/ && index($4, suffix) {print $4; exit}')"
+checksum_url="$(printf '%s\n' "$metadata" | awk -F '"' '/browser_download_url/ && $4 ~ /\/checksums.txt$/ {print $4; exit}')"
+if [[ -z "$asset_url" || -z "$checksum_url" ]]; then
+  echo "No V2 release archive found for linux_${asset_arch}." >&2
+  exit 1
+fi
+
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
+curl -fsSL --max-time 120 "${headers[@]}" "$asset_url" -o "$workdir/release.tar.gz"
+curl -fsSL --max-time 30 "${headers[@]}" "$checksum_url" -o "$workdir/checksums.txt"
+asset_name="${asset_url##*/}"
+expected_checksum="$(awk -v name="$asset_name" '$2 == name {print $1; exit}' "$workdir/checksums.txt")"
+if [[ -z "$expected_checksum" ]]; then
+  echo "Release checksum does not contain $asset_name." >&2
+  exit 1
+fi
+printf '%s  %s\n' "$expected_checksum" "$workdir/release.tar.gz" | sha256sum --check --status
+tar -xzf "$workdir/release.tar.gz" -C "$workdir"
+
+client="$workdir/tunnel-helper"
+daemon="$workdir/tunnel-helperd"
+if [[ ! -x "$client" || ! -x "$daemon" ]]; then
+  echo "Release archive does not contain both V2 binaries." >&2
+  exit 1
+fi
+
+if [[ "$INSTALL" -eq 0 ]]; then
+  "$client" "${args[@]}"
+  exit $?
+fi
+
+as_root=()
+if [[ "$(id -u)" -ne 0 ]]; then
+  command -v sudo >/dev/null 2>&1 || {
+    echo "Installation requires root or sudo." >&2
+    exit 1
+  }
+  as_root=(sudo)
+fi
+
+"${as_root[@]}" install -Dm0755 "$client" /usr/bin/tunnel-helper
+"${as_root[@]}" install -Dm0755 "$daemon" /usr/sbin/tunnel-helperd
+"${as_root[@]}" install -Dm0644 "$workdir/packaging/systemd/tunnel-helperd.service" /usr/lib/systemd/system/tunnel-helperd.service
+"${as_root[@]}" install -Dm0644 "$workdir/packaging/sysusers.d/tunnel-helper.conf" /usr/lib/sysusers.d/tunnel-helper.conf
+"${as_root[@]}" install -Dm0644 "$workdir/packaging/tmpfiles.d/tunnel-helper.conf" /usr/lib/tmpfiles.d/tunnel-helper.conf
+"${as_root[@]}" install -d -m0755 /etc/tunnel-helper
+if ! "${as_root[@]}" test -e /etc/tunnel-helper/tunnel-helperd.json; then
+  "${as_root[@]}" install -m0644 "$workdir/packaging/tunnel-helperd.json" /etc/tunnel-helper/tunnel-helperd.json
+fi
+
+if command -v systemd-sysusers >/dev/null 2>&1; then
+  "${as_root[@]}" systemd-sysusers /usr/lib/sysusers.d/tunnel-helper.conf
+fi
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+  "${as_root[@]}" systemd-tmpfiles --create /usr/lib/tmpfiles.d/tunnel-helper.conf
+fi
+
+echo "Installed tunnel-helper V2."
+echo "Add operators to the tunnel-helper group, then enable tunnel-helperd with your service manager."

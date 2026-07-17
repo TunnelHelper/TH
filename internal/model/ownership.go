@@ -1,0 +1,92 @@
+package model
+
+import (
+	"crypto/sha256"
+	"encoding/binary"
+	"net/netip"
+)
+
+const mainRouteTable = 254
+
+type RouteClaim struct {
+	Table  int
+	Prefix netip.Prefix
+}
+
+// ManagedRulePriorities reserves stable, non-overlapping priority ranges for
+// policy rules whose kernel API has no user-defined ownership tag.
+func ManagedRulePriorities(t Tunnel) []int {
+	digest := sha256.Sum256([]byte(t.ID))
+	switch t.Kind {
+	case KindWireGuard:
+		base := 100000 + int(binary.BigEndian.Uint32(digest[0:4])%900000)*2
+		return []int{base, base + 1}
+	case KindAmneziaWG:
+		base := 100000 + int(binary.BigEndian.Uint32(digest[0:4])%900000)*2
+		return []int{base, base + 1}
+	case KindSRv6:
+		return []int{3000000 + int(binary.BigEndian.Uint32(digest[4:8])%1000000)}
+	}
+	return nil
+}
+
+func WireGuardRouteTable(t Tunnel, spec *WireGuardSpec) int {
+	if spec.RouteTable != 0 {
+		return spec.RouteTable
+	}
+	if wireGuardHasDefaultRoute(spec) {
+		digest := sha256.Sum256([]byte(t.ID))
+		return 51820 + int(binary.BigEndian.Uint16(digest[:2])%10000)
+	}
+	return mainRouteTable
+}
+
+func ManagedRouteClaims(t Tunnel) []RouteClaim {
+	var spec *WireGuardSpec
+	switch t.Kind {
+	case KindWireGuard:
+		spec = t.Spec.WireGuard
+	case KindAmneziaWG:
+		if t.Spec.AmneziaWG != nil {
+			spec = &t.Spec.AmneziaWG.WireGuardSpec
+		}
+	}
+	if spec == nil || !spec.RouteAllowedIPs {
+		return nil
+	}
+	table := WireGuardRouteTable(t, spec)
+	seen := make(map[netip.Prefix]struct{})
+	claims := make([]RouteClaim, 0)
+	for _, peer := range spec.Peers {
+		for _, prefix := range peer.AllowedIPs {
+			prefix = prefix.Masked()
+			if _, ok := seen[prefix]; ok {
+				continue
+			}
+			seen[prefix] = struct{}{}
+			claims = append(claims, RouteClaim{Table: table, Prefix: prefix})
+		}
+	}
+	return claims
+}
+
+// ExclusiveRouteTables returns tables for backends that reconcile the whole
+// application-owned portion of a table. Other records must not place managed
+// routes in these tables because removal and stale-route cleanup are table-wide.
+func ExclusiveRouteTables(t Tunnel) []int {
+	if t.Kind == KindSRv6 && t.Spec.SRv6 != nil {
+		return []int{t.Spec.SRv6.Table}
+	}
+	return nil
+}
+
+func wireGuardHasDefaultRoute(spec *WireGuardSpec) bool {
+	for _, peer := range spec.Peers {
+		for _, prefix := range peer.AllowedIPs {
+			if prefix.IsValid() && prefix.Bits() == 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
