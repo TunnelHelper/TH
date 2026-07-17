@@ -113,6 +113,10 @@ th reconcile RECORD_ID
 th delete RECORD_ID
 ```
 
+Mutations normally return after desired state is safely stored and reconcile in
+the background. Add `--wait` to create, update, enable, or disable when a script
+needs the resulting observed status before continuing.
+
 `th doctor` distinguishes unavailable optional backends from capabilities
 required by enabled records. `th health` reports daemon, API, schema, backend,
 and configured-tunnel readiness separately.

@@ -58,7 +58,8 @@ func (m *Manager) Create(ctx context.Context, record model.Tunnel) (model.Tunnel
 	if err := m.store.Create(record); err != nil {
 		return model.TunnelView{}, err
 	}
-	_ = m.reconciler.Reconcile(ctx, record.ID)
+	m.reconciler.MarkPending(record)
+	m.reconciler.Enqueue(record.ID)
 	stored, err := m.store.Get(record.ID)
 	if err != nil {
 		return model.TunnelView{}, err
@@ -99,11 +100,12 @@ func (m *Manager) Update(ctx context.Context, id string, expected uint64, next m
 		if cleanupBeforeUpdate {
 			// A concurrent update or storage failure left the old desired record in
 			// place. Restore whichever generation is currently authoritative.
-			_ = m.reconciler.Reconcile(ctx, id)
+			m.reconciler.Enqueue(id)
 		}
 		return model.TunnelView{}, err
 	}
-	_ = m.reconciler.Reconcile(ctx, id)
+	m.reconciler.MarkPending(next)
+	m.reconciler.Enqueue(id)
 	return m.Get(id)
 }
 
@@ -167,7 +169,8 @@ func (m *Manager) SetEnabled(ctx context.Context, id string, expected uint64, en
 	if err := m.store.Update(next, expected); err != nil {
 		return model.TunnelView{}, err
 	}
-	_ = m.reconciler.Reconcile(ctx, id)
+	m.reconciler.MarkPending(next)
+	m.reconciler.Enqueue(id)
 	return m.Get(id)
 }
 

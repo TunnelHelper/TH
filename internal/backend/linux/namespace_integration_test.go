@@ -199,7 +199,10 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 			t.Fatal(err)
 		}
 		select {
-		case <-backend.Events():
+		case event := <-backend.Events():
+			if event.RecordID != record.ID || event.Interface != record.Interface {
+				t.Fatalf("backend event = %+v, want record %s interface %s", event, record.ID, record.Interface)
+			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("managed link deletion did not emit a backend event")
 		}

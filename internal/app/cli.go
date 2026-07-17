@@ -56,37 +56,40 @@ func runCLI(client *control.Client, timeout time.Duration, socketPath string, ar
 		value, err := client.Get(ctx, args[1])
 		return outputJSON(value, err)
 	case "create":
-		if len(args) != 2 {
+		positionals, wait, err := parseWaitOption(args)
+		if err != nil || len(positionals) != 2 {
 			return usageError()
 		}
-		record, err := readTunnel(args[1])
+		record, err := readTunnel(positionals[1])
 		if err != nil {
 			return err
 		}
-		value, err := client.Create(ctx, record)
+		value, err := client.CreateWithWait(ctx, record, wait)
 		return outputJSON(value, err)
 	case "update":
-		if len(args) != 2 {
+		positionals, wait, err := parseWaitOption(args)
+		if err != nil || len(positionals) != 2 {
 			return usageError()
 		}
-		record, err := readTunnel(args[1])
+		record, err := readTunnel(positionals[1])
 		if err != nil {
 			return err
 		}
 		if record.ID == "" || record.Generation == 0 {
 			return errors.New("updated record requires id and generation")
 		}
-		value, err := client.Update(ctx, model.TunnelView{Tunnel: record})
+		value, err := client.UpdateWithWait(ctx, model.TunnelView{Tunnel: record}, wait)
 		return outputJSON(value, err)
 	case "enable", "disable":
-		if len(args) != 2 {
+		positionals, wait, err := parseWaitOption(args)
+		if err != nil || len(positionals) != 2 {
 			return usageError()
 		}
-		view, err := client.Get(ctx, args[1])
+		view, err := client.Get(ctx, positionals[1])
 		if err != nil {
 			return err
 		}
-		value, err := client.SetEnabled(ctx, view, command == "enable")
+		value, err := client.SetEnabledWithWait(ctx, view, command == "enable", wait)
 		return outputJSON(value, err)
 	case "delete":
 		if len(args) != 2 {
@@ -110,6 +113,22 @@ func runCLI(client *control.Client, timeout time.Duration, socketPath string, ar
 	default:
 		return usageError()
 	}
+}
+
+func parseWaitOption(args []string) ([]string, bool, error) {
+	positionals := make([]string, 0, len(args))
+	wait := false
+	for _, arg := range args {
+		if arg != "--wait" {
+			positionals = append(positionals, arg)
+			continue
+		}
+		if wait {
+			return nil, false, errors.New("--wait may be specified once")
+		}
+		wait = true
+	}
+	return positionals, wait, nil
 }
 
 func readTunnel(path string) (model.Tunnel, error) {

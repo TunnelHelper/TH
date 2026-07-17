@@ -18,12 +18,30 @@ type BackendHealth struct {
 	Message   string `json:"message,omitempty"`
 }
 
+type BackendEventType string
+
+const (
+	BackendEventLink    BackendEventType = "link"
+	BackendEventAddress BackendEventType = "address"
+	BackendEventRoute   BackendEventType = "route"
+	BackendEventXFRM    BackendEventType = "xfrm"
+	BackendEventVICI    BackendEventType = "vici"
+)
+
+type BackendEvent struct {
+	Type       BackendEventType
+	RecordID   string
+	Interface  string
+	RouteTable int
+	XFRMIfID   uint32
+}
+
 type Backend interface {
 	Apply(context.Context, model.Tunnel) (Observation, error)
 	Remove(context.Context, model.Tunnel) (Observation, error)
 	Observe(context.Context, model.Tunnel) (Observation, error)
 	Health(context.Context) map[model.Kind]BackendHealth
-	Events() <-chan struct{}
+	Events() <-chan BackendEvent
 	Close() error
 }
 

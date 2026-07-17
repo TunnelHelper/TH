@@ -32,7 +32,7 @@ type Backend struct {
 	vici     *viciController
 	eventCtx context.Context
 	eventEnd context.CancelFunc
-	events   chan struct{}
+	events   chan core.BackendEvent
 	eventWG  sync.WaitGroup
 	close    sync.Once
 }
@@ -59,7 +59,7 @@ func New(settings config.Settings) (*Backend, error) {
 		vici:     newVICIController(settings.VICISocketPath, settings.RequestTimeout()),
 		eventCtx: eventCtx,
 		eventEnd: eventEnd,
-		events:   make(chan struct{}, 1),
+		events:   make(chan core.BackendEvent, 64),
 	}
 	backend.startEventWatchers()
 	return backend, nil
@@ -156,7 +156,7 @@ func (b *Backend) Health(ctx context.Context) map[model.Kind]core.BackendHealth 
 	return health
 }
 
-func (b *Backend) Events() <-chan struct{} {
+func (b *Backend) Events() <-chan core.BackendEvent {
 	return b.events
 }
 

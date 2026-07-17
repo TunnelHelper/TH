@@ -21,6 +21,10 @@ type Reconciler struct {
 	statuses map[string]model.Status
 	locksMu  sync.Mutex
 	locks    map[string]*sync.Mutex
+	queueMu  sync.Mutex
+	queueAll bool
+	queued   map[string]struct{}
+	wake     chan struct{}
 }
 
 func NewReconciler(records Store, backend Backend, interval time.Duration) *Reconciler {
@@ -31,17 +35,20 @@ func NewReconciler(records Store, backend Backend, interval time.Duration) *Reco
 		now:      time.Now,
 		statuses: make(map[string]model.Status),
 		locks:    make(map[string]*sync.Mutex),
+		queued:   make(map[string]struct{}),
+		wake:     make(chan struct{}, 1),
 	}
 }
 
 func (r *Reconciler) Run(ctx context.Context) {
-	_ = r.ReconcileAll(ctx)
+	r.EnqueueAll()
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 	events := r.backend.Events()
 	var (
-		debounce  *time.Timer
-		debounced <-chan time.Time
+		debounce      *time.Timer
+		debounced     <-chan time.Time
+		backendEvents = make(map[BackendEvent]struct{})
 	)
 	stopDebounce := func() {
 		if debounce != nil && !debounce.Stop() {
@@ -57,20 +64,155 @@ func (r *Reconciler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = r.ReconcileAll(ctx)
-		case _, ok := <-events:
+			r.EnqueueAll()
+		case <-r.wake:
+			r.processQueue(ctx)
+		case event, ok := <-events:
 			if !ok {
 				events = nil
 				continue
+			}
+			if len(backendEvents) >= 1024 {
+				clear(backendEvents)
+				backendEvents[BackendEvent{}] = struct{}{}
+			} else {
+				backendEvents[event] = struct{}{}
 			}
 			stopDebounce()
 			debounce = time.NewTimer(250 * time.Millisecond)
 			debounced = debounce.C
 		case <-debounced:
 			debounced = nil
-			_ = r.ReconcileAll(ctx)
+			for event := range backendEvents {
+				r.enqueueBackendEvent(event)
+			}
+			clear(backendEvents)
 		}
 	}
+}
+
+func (r *Reconciler) Enqueue(id string) {
+	if id == "" {
+		r.EnqueueAll()
+		return
+	}
+	r.queueMu.Lock()
+	if !r.queueAll {
+		r.queued[id] = struct{}{}
+	}
+	r.queueMu.Unlock()
+	r.signalQueue()
+}
+
+func (r *Reconciler) EnqueueAll() {
+	r.queueMu.Lock()
+	r.queueAll = true
+	clear(r.queued)
+	r.queueMu.Unlock()
+	r.signalQueue()
+}
+
+func (r *Reconciler) signalQueue() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (r *Reconciler) processQueue(ctx context.Context) {
+	r.queueMu.Lock()
+	all := r.queueAll
+	r.queueAll = false
+	ids := make([]string, 0, len(r.queued))
+	for id := range r.queued {
+		ids = append(ids, id)
+	}
+	clear(r.queued)
+	r.queueMu.Unlock()
+	if all {
+		_ = r.ReconcileAll(ctx)
+		return
+	}
+	r.reconcileIDs(ctx, ids)
+}
+
+func (r *Reconciler) reconcileIDs(ctx context.Context, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	workers := min(4, len(ids))
+	jobs := make(chan string)
+	var workersDone sync.WaitGroup
+	workersDone.Add(workers)
+	for range workers {
+		go func() {
+			defer workersDone.Done()
+			for id := range jobs {
+				_ = r.Reconcile(ctx, id)
+			}
+		}()
+	}
+send:
+	for _, id := range ids {
+		select {
+		case jobs <- id:
+		case <-ctx.Done():
+			break send
+		}
+	}
+	close(jobs)
+	workersDone.Wait()
+}
+
+func (r *Reconciler) enqueueBackendEvent(event BackendEvent) {
+	if event == (BackendEvent{}) {
+		r.EnqueueAll()
+		return
+	}
+	if event.RecordID != "" {
+		r.Enqueue(event.RecordID)
+		return
+	}
+	records, err := r.store.List()
+	if err != nil {
+		r.EnqueueAll()
+		return
+	}
+	for _, record := range records {
+		if backendEventMatches(event, record) {
+			r.Enqueue(record.ID)
+		}
+	}
+}
+
+func backendEventMatches(event BackendEvent, record model.Tunnel) bool {
+	if event.Interface != "" && event.Interface == record.Interface {
+		return true
+	}
+	if event.RouteTable != 0 {
+		for _, claim := range model.ManagedRouteClaims(record) {
+			if claim.Table == event.RouteTable {
+				return true
+			}
+		}
+		for _, table := range model.ExclusiveRouteTables(record) {
+			if table == event.RouteTable {
+				return true
+			}
+		}
+	}
+	switch event.Type {
+	case BackendEventVICI:
+		return record.Kind == model.KindXFRMIKEv2
+	case BackendEventXFRM:
+		switch record.Kind {
+		case model.KindXFRMStatic:
+			return event.XFRMIfID == 0 || record.Spec.XFRMStatic.IfID == event.XFRMIfID
+		case model.KindXFRMIKEv2:
+			return event.XFRMIfID == 0 || record.Spec.XFRMIKEv2.IfID == event.XFRMIfID
+		}
+	}
+	return false
 }
 
 func (r *Reconciler) ReconcileAll(ctx context.Context) error {
@@ -78,12 +220,42 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var joined error
+	if len(records) == 0 {
+		return nil
+	}
+	workers := min(4, len(records))
+	jobs := make(chan model.Tunnel)
+	var (
+		workersDone sync.WaitGroup
+		errorsMu    sync.Mutex
+		joined      error
+	)
+	workersDone.Add(workers)
+	for range workers {
+		go func() {
+			defer workersDone.Done()
+			for record := range jobs {
+				if err := r.reconcileRecord(ctx, record); err != nil {
+					errorsMu.Lock()
+					joined = errors.Join(joined, fmt.Errorf("%s: %w", record.Name, err))
+					errorsMu.Unlock()
+				}
+			}
+		}()
+	}
+send:
 	for _, record := range records {
-		if err := r.reconcileRecord(ctx, record); err != nil {
-			joined = errors.Join(joined, fmt.Errorf("%s: %w", record.Name, err))
+		select {
+		case jobs <- record:
+		case <-ctx.Done():
+			errorsMu.Lock()
+			joined = errors.Join(joined, ctx.Err())
+			errorsMu.Unlock()
+			break send
 		}
 	}
+	close(jobs)
+	workersDone.Wait()
 	return joined
 }
 
@@ -174,6 +346,31 @@ func (r *Reconciler) Status(record model.Tunnel) model.Status {
 		TunnelID:          record.ID,
 		DesiredGeneration: record.Generation,
 		Phase:             phase,
+	}
+}
+
+func (r *Reconciler) MarkPending(record model.Tunnel) {
+	now := r.now().UTC()
+	r.statusMu.Lock()
+	defer r.statusMu.Unlock()
+	previous := r.statuses[record.ID]
+	r.statuses[record.ID] = model.Status{
+		TunnelID:           record.ID,
+		DesiredGeneration:  record.Generation,
+		ObservedGeneration: previous.ObservedGeneration,
+		Phase:              model.PhasePending,
+		InterfaceExists:    previous.InterfaceExists,
+		InterfaceUp:        previous.InterfaceUp,
+		LastReconcileTime:  previous.LastReconcileTime,
+		LastSuccessfulTime: previous.LastSuccessfulTime,
+		Details:            previous.Details,
+		Conditions: []model.Condition{{
+			Type:               "Ready",
+			Status:             false,
+			Reason:             "Queued",
+			Message:            "reconciliation queued",
+			LastTransitionTime: transitionTime(previous, false, now),
+		}},
 	}
 }
 

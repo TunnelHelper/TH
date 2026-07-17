@@ -45,6 +45,12 @@ UUID, generation, and timestamps is prepared by the daemon. For example:
 }
 ```
 
+Create, update, enable, and disable persist desired state and normally return a
+`pending` view while reconciliation continues in the daemon. Add `?wait=true`
+to wait for that generation's reconciliation. The CLI exposes the same behavior
+as `--wait`. Delete remains synchronous because its state record cannot be
+discarded until owned runtime objects have been removed safely.
+
 Update uses this envelope and requires the current generation:
 
 ```json

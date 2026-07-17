@@ -135,6 +135,30 @@ func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
 	}
 }
 
+func TestMutationWaitQueryReconcilesBeforeResponse(t *testing.T) {
+	manager := &stubManager{view: model.TunnelView{Tunnel: model.Tunnel{ID: "11111111-2222-4333-8444-555555555555", Generation: 1}}}
+	server := httptest.NewServer(NewServer(manager).Handler())
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/v1/tunnels?wait=true", "application/json", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusCreated || manager.reconcileCalls != 1 {
+		t.Fatalf("status/reconcile calls = %d/%d", response.StatusCode, manager.reconcileCalls)
+	}
+
+	response, err = http.Post(server.URL+"/v1/tunnels?wait=eventually", "application/json", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAPIError(t, response, http.StatusBadRequest, "invalid_request")
+	if manager.reconcileCalls != 1 {
+		t.Fatalf("invalid query mutated state; reconcile calls = %d", manager.reconcileCalls)
+	}
+}
+
 func TestUnixServerAndTypedClient(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("Unix socket ownership test requires root, as does thd")
@@ -221,11 +245,12 @@ func assertAPIError(t *testing.T, response *http.Response, status int, code stri
 }
 
 type stubManager struct {
-	view      model.TunnelView
-	views     []model.TunnelView
-	health    map[model.Kind]core.BackendHealth
-	getErr    error
-	updateErr error
+	view           model.TunnelView
+	views          []model.TunnelView
+	health         map[model.Kind]core.BackendHealth
+	getErr         error
+	updateErr      error
+	reconcileCalls int
 }
 
 func (m *stubManager) List() ([]model.TunnelView, error) {
@@ -248,6 +273,7 @@ func (m *stubManager) SetEnabled(context.Context, string, uint64, bool) (model.T
 }
 func (m *stubManager) Delete(context.Context, string, uint64) error { return nil }
 func (m *stubManager) Reconcile(context.Context, string) (model.TunnelView, error) {
+	m.reconcileCalls++
 	return m.view, nil
 }
 func (m *stubManager) ReconcileAll(context.Context) ([]model.TunnelView, error) {

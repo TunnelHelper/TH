@@ -70,33 +70,53 @@ func (c *Client) Get(ctx context.Context, id string) (model.TunnelView, error) {
 }
 
 func (c *Client) Create(ctx context.Context, record model.Tunnel) (model.TunnelView, error) {
+	return c.CreateWithWait(ctx, record, false)
+}
+
+func (c *Client) CreateWithWait(ctx context.Context, record model.Tunnel, wait bool) (model.TunnelView, error) {
 	var response model.TunnelView
-	if err := c.do(ctx, http.MethodPost, "/v1/tunnels", record, 0, &response); err != nil {
+	if err := c.do(ctx, http.MethodPost, waitPath("/v1/tunnels", wait), record, 0, &response); err != nil {
 		return model.TunnelView{}, err
 	}
 	return response, nil
 }
 
 func (c *Client) Update(ctx context.Context, view model.TunnelView) (model.TunnelView, error) {
+	return c.UpdateWithWait(ctx, view, false)
+}
+
+func (c *Client) UpdateWithWait(ctx context.Context, view model.TunnelView, wait bool) (model.TunnelView, error) {
 	request := updateRequest{Generation: view.Tunnel.Generation, Tunnel: view.Tunnel}
 	var response model.TunnelView
-	if err := c.do(ctx, http.MethodPut, "/v1/tunnels/"+view.Tunnel.ID, request, 0, &response); err != nil {
+	if err := c.do(ctx, http.MethodPut, waitPath("/v1/tunnels/"+view.Tunnel.ID, wait), request, 0, &response); err != nil {
 		return model.TunnelView{}, err
 	}
 	return response, nil
 }
 
 func (c *Client) SetEnabled(ctx context.Context, view model.TunnelView, enabled bool) (model.TunnelView, error) {
+	return c.SetEnabledWithWait(ctx, view, enabled, false)
+}
+
+func (c *Client) SetEnabledWithWait(ctx context.Context, view model.TunnelView, enabled, wait bool) (model.TunnelView, error) {
 	action := "disable"
 	if enabled {
 		action = "enable"
 	}
 	var response model.TunnelView
 	request := actionRequest{Generation: view.Tunnel.Generation}
-	if err := c.do(ctx, http.MethodPost, "/v1/tunnels/"+view.Tunnel.ID+"/"+action, request, 0, &response); err != nil {
+	path := "/v1/tunnels/" + view.Tunnel.ID + "/" + action
+	if err := c.do(ctx, http.MethodPost, waitPath(path, wait), request, 0, &response); err != nil {
 		return model.TunnelView{}, err
 	}
 	return response, nil
+}
+
+func waitPath(path string, wait bool) string {
+	if wait {
+		return path + "?wait=true"
+	}
+	return path
 }
 
 func (c *Client) Delete(ctx context.Context, view model.TunnelView) error {

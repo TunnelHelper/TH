@@ -28,8 +28,12 @@ func TestManagerLifecycleAndSecretRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if backend.applyCalls != 1 || view.Status.Phase != model.PhaseReady {
+	if backend.applyCalls != 0 || view.Status.Phase != model.PhasePending {
 		t.Fatalf("apply calls/status = %d/%s", backend.applyCalls, view.Status.Phase)
+	}
+	view, err = manager.Reconcile(context.Background(), view.Tunnel.ID)
+	if err != nil || backend.applyCalls != 1 || view.Status.Phase != model.PhaseReady {
+		t.Fatalf("waited apply calls/status/error = %d/%s/%v", backend.applyCalls, view.Status.Phase, err)
 	}
 	if view.Tunnel.Spec.WireGuard.PrivateKey != "" || view.Tunnel.Spec.WireGuard.Peers[0].PresharedKey != "" {
 		t.Fatal("manager returned secrets")
@@ -45,8 +49,12 @@ func TestManagerLifecycleAndSecretRedaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if disabled.Tunnel.Enabled || disabled.Status.Phase != model.PhaseDisabled || backend.removeCalls != 1 {
+	if disabled.Tunnel.Enabled || disabled.Status.Phase != model.PhasePending || backend.removeCalls != 0 {
 		t.Fatalf("unexpected disabled view/calls: %+v, %d", disabled, backend.removeCalls)
+	}
+	disabled, err = manager.Reconcile(context.Background(), disabled.Tunnel.ID)
+	if err != nil || disabled.Status.Phase != model.PhaseDisabled || backend.removeCalls != 1 {
+		t.Fatalf("waited disable view/calls/error: %+v, %d, %v", disabled, backend.removeCalls, err)
 	}
 	if err := manager.Delete(context.Background(), raw.ID, disabled.Tunnel.Generation); err != nil {
 		t.Fatal(err)
@@ -71,15 +79,23 @@ func TestManagerLifecycleForEveryTunnelKind(t *testing.T) {
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
-			if created.Status.Phase != model.PhaseDisabled || created.Tunnel.Enabled {
+			if created.Status.Phase != model.PhasePending || created.Tunnel.Enabled {
 				t.Fatalf("created state = %+v", created.Status)
+			}
+			created, err = manager.Reconcile(context.Background(), created.Tunnel.ID)
+			if err != nil || created.Status.Phase != model.PhaseDisabled {
+				t.Fatalf("waited created state/error = %+v, %v", created.Status, err)
 			}
 			enabled, err := manager.SetEnabled(context.Background(), created.Tunnel.ID, created.Tunnel.Generation, true)
 			if err != nil {
 				t.Fatalf("enable: %v", err)
 			}
-			if enabled.Status.Phase != model.PhaseReady || !enabled.Tunnel.Enabled {
+			if enabled.Status.Phase != model.PhasePending || !enabled.Tunnel.Enabled {
 				t.Fatalf("enabled state = %+v", enabled.Status)
+			}
+			enabled, err = manager.Reconcile(context.Background(), enabled.Tunnel.ID)
+			if err != nil || enabled.Status.Phase != model.PhaseReady {
+				t.Fatalf("waited enabled state/error = %+v, %v", enabled.Status, err)
 			}
 			next := enabled.Tunnel
 			next.Name += "-updated"
@@ -87,15 +103,23 @@ func TestManagerLifecycleForEveryTunnelKind(t *testing.T) {
 			if err != nil {
 				t.Fatalf("update: %v", err)
 			}
-			if updated.Tunnel.Name != next.Name || updated.Status.ObservedGeneration != updated.Tunnel.Generation {
+			if updated.Tunnel.Name != next.Name || updated.Status.Phase != model.PhasePending {
 				t.Fatalf("updated state = %+v", updated)
+			}
+			updated, err = manager.Reconcile(context.Background(), updated.Tunnel.ID)
+			if err != nil || updated.Status.ObservedGeneration != updated.Tunnel.Generation {
+				t.Fatalf("waited updated state/error = %+v, %v", updated, err)
 			}
 			disabled, err := manager.SetEnabled(context.Background(), updated.Tunnel.ID, updated.Tunnel.Generation, false)
 			if err != nil {
 				t.Fatalf("disable: %v", err)
 			}
-			if disabled.Status.Phase != model.PhaseDisabled {
+			if disabled.Status.Phase != model.PhasePending {
 				t.Fatalf("disabled state = %+v", disabled.Status)
+			}
+			disabled, err = manager.Reconcile(context.Background(), disabled.Tunnel.ID)
+			if err != nil || disabled.Status.Phase != model.PhaseDisabled {
+				t.Fatalf("waited disabled state/error = %+v, %v", disabled.Status, err)
 			}
 			if err := manager.Delete(context.Background(), disabled.Tunnel.ID, disabled.Tunnel.Generation); err != nil {
 				t.Fatalf("delete: %v", err)
@@ -158,6 +182,9 @@ func TestManagerCleansOldAutomaticWireGuardRouteTableBeforeUpdate(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := manager.Reconcile(context.Background(), created.Tunnel.ID); err != nil {
+		t.Fatal(err)
+	}
 	raw, err := records.Get(created.Tunnel.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +224,7 @@ func TestReconcilerStartupAndEventRetry(t *testing.T) {
 	backend.mu.Lock()
 	backend.applyErr = nil
 	backend.mu.Unlock()
-	backend.events <- struct{}{}
+	backend.events <- BackendEvent{RecordID: record.ID, Type: BackendEventLink}
 	waitForCall(t, backend.called)
 	if status := reconciler.Status(record); status.Phase != model.PhaseReady || status.ObservedGeneration != record.Generation {
 		t.Fatalf("recovered status = %+v", status)
@@ -207,6 +234,55 @@ func TestReconcilerStartupAndEventRetry(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("reconciler did not stop")
+	}
+}
+
+func TestReconcilerTargetsBackendEventToOneRecord(t *testing.T) {
+	first := preparedCoreGRE(t, true)
+	second := preparedCoreGRE(t, true)
+	second.ID = "22222222-2222-4222-8222-222222222222"
+	second.Name = "second"
+	second.Interface = "gre1"
+	records := newMemoryStore(first, second)
+	backend := newFakeBackend()
+	reconciler := NewReconciler(records, backend, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reconciler.Run(ctx)
+	waitForCall(t, backend.called)
+	waitForCall(t, backend.called)
+
+	backend.mu.Lock()
+	firstBefore := backend.applyByID[first.ID]
+	secondBefore := backend.applyByID[second.ID]
+	backend.mu.Unlock()
+	backend.events <- BackendEvent{Type: BackendEventLink, RecordID: first.ID, Interface: first.Interface}
+	waitForCall(t, backend.called)
+	time.Sleep(50 * time.Millisecond)
+	backend.mu.Lock()
+	firstAfter := backend.applyByID[first.ID]
+	secondAfter := backend.applyByID[second.ID]
+	backend.mu.Unlock()
+	if firstAfter != firstBefore+1 || secondAfter != secondBefore {
+		t.Fatalf("targeted apply counts = first %d->%d, second %d->%d", firstBefore, firstAfter, secondBefore, secondAfter)
+	}
+}
+
+func TestBackendEventMatchesRouteAndXFRMOwnership(t *testing.T) {
+	wg := lifecycleInputs(t)[2]
+	wg.ID = "33333333-3333-4333-8333-333333333333"
+	wg.Spec.WireGuard.RouteAllowedIPs = true
+	wg.Spec.WireGuard.RouteTable = 1234
+	wg.Spec.WireGuard.Peers = []model.WireGuardPeer{{AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")}}}
+	if !backendEventMatches(BackendEvent{Type: BackendEventRoute, RouteTable: 1234}, wg) {
+		t.Fatal("WireGuard route-table event did not match")
+	}
+	xfrm := lifecycleInputs(t)[4]
+	if !backendEventMatches(BackendEvent{Type: BackendEventXFRM, XFRMIfID: xfrm.Spec.XFRMStatic.IfID}, xfrm) {
+		t.Fatal("XFRM if_id event did not match")
+	}
+	if backendEventMatches(BackendEvent{Type: BackendEventXFRM, XFRMIfID: xfrm.Spec.XFRMStatic.IfID + 1}, xfrm) {
+		t.Fatal("unrelated XFRM if_id event matched")
 	}
 }
 
@@ -270,16 +346,18 @@ type fakeBackend struct {
 	removeErr   error
 	block       chan struct{}
 	called      chan struct{}
-	events      chan struct{}
+	events      chan BackendEvent
+	applyByID   map[string]int
 }
 
 func newFakeBackend() *fakeBackend {
-	return &fakeBackend{called: make(chan struct{}, 16), events: make(chan struct{}, 16)}
+	return &fakeBackend{called: make(chan struct{}, 32), events: make(chan BackendEvent, 16), applyByID: make(map[string]int)}
 }
 
-func (b *fakeBackend) Apply(ctx context.Context, _ model.Tunnel) (Observation, error) {
+func (b *fakeBackend) Apply(ctx context.Context, record model.Tunnel) (Observation, error) {
 	b.mu.Lock()
 	b.applyCalls++
+	b.applyByID[record.ID]++
 	b.active++
 	if b.active > b.maxActive {
 		b.maxActive = b.active
@@ -318,8 +396,8 @@ func (b *fakeBackend) Health(context.Context) map[model.Kind]BackendHealth {
 	return map[model.Kind]BackendHealth{model.KindGRE: {Available: true}}
 }
 
-func (b *fakeBackend) Events() <-chan struct{} { return b.events }
-func (b *fakeBackend) Close() error            { return nil }
+func (b *fakeBackend) Events() <-chan BackendEvent { return b.events }
+func (b *fakeBackend) Close() error                { return nil }
 
 type memoryStore struct {
 	mu      sync.Mutex

@@ -160,6 +160,11 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
+	wait, err := parseWait(r)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
 	var record model.Tunnel
 	if err := decodeJSON(r, &record); err != nil {
 		writeBadRequest(w, err)
@@ -170,10 +175,22 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if wait {
+		view, err = s.manager.Reconcile(r.Context(), view.Tunnel.ID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusCreated, view)
 }
 
 func (s *Server) update(w http.ResponseWriter, r *http.Request) {
+	wait, err := parseWait(r)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
 	var request updateRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeBadRequest(w, err)
@@ -183,6 +200,13 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if wait {
+		view, err = s.manager.Reconcile(r.Context(), view.Tunnel.ID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, view)
 }
@@ -209,6 +233,11 @@ func (s *Server) disable(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) setEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
+	wait, err := parseWait(r)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
 	var request actionRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeBadRequest(w, err)
@@ -219,7 +248,29 @@ func (s *Server) setEnabled(w http.ResponseWriter, r *http.Request, enabled bool
 		writeError(w, err)
 		return
 	}
+	if wait {
+		view, err = s.manager.Reconcile(r.Context(), view.Tunnel.ID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+func parseWait(r *http.Request) (bool, error) {
+	values, ok := r.URL.Query()["wait"]
+	if !ok {
+		return false, nil
+	}
+	if len(values) != 1 {
+		return false, errors.New("wait query parameter must occur once")
+	}
+	wait, err := strconv.ParseBool(values[0])
+	if err != nil {
+		return false, errors.New("wait query parameter must be true or false")
+	}
+	return wait, nil
 }
 
 func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {

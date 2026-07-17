@@ -62,3 +62,13 @@ func TestDiagnoseMissingSocket(t *testing.T) {
 		t.Fatalf("check = %+v", report.Checks[0])
 	}
 }
+
+func TestParseWaitOption(t *testing.T) {
+	positionals, wait, err := parseWaitOption([]string{"create", "record.json", "--wait"})
+	if err != nil || !wait || len(positionals) != 2 || positionals[1] != "record.json" {
+		t.Fatalf("parsed = %v, %t, %v", positionals, wait, err)
+	}
+	if _, _, err := parseWaitOption([]string{"create", "--wait", "--wait", "record.json"}); err == nil {
+		t.Fatal("duplicate --wait was accepted")
+	}
+}
