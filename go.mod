@@ -1,8 +1,6 @@
 module github.com/TunnelHelper/TH
 
-go 1.24.0
-
-toolchain go1.24.4
+go 1.25.12
 
 require (
 	filippo.io/age v1.3.1

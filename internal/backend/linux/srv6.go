@@ -4,6 +4,7 @@ package linux
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -26,7 +27,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const maxSRv6FeedSize = 16 << 20
+const (
+	maxSRv6FeedSize      = 16 << 20
+	maxSRv6RoutesPerFeed = 65536
+	maxSRv6RoutesTotal   = 262144
+)
 
 type srv6Route struct {
 	prefix netip.Prefix
@@ -44,11 +49,11 @@ func (b *Backend) applySRv6(ctx context.Context, record model.Tunnel) (core.Obse
 	if err != nil {
 		return core.Observation{}, err
 	}
-	desired, err := b.buildSRv6Routes(spec, underlay, routes)
+	desired, err := b.buildSRv6Routes(record, underlay, routes)
 	if err != nil {
 		return core.Observation{}, err
 	}
-	if err := b.reconcileSRv6Routes(spec.Table, desired); err != nil {
+	if err := b.reconcileSRv6Routes(record, desired); err != nil {
 		return core.Observation{}, err
 	}
 	if err := b.reconcileSRv6Rules(record, spec.Table, desired); err != nil {
@@ -108,6 +113,9 @@ func (b *Backend) loadSRv6Feeds(ctx context.Context, record model.Tunnel) ([]srv
 			prefixes, err := parseSRv6Feed(data, feed.family)
 			if err != nil {
 				return nil, "", fmt.Errorf("parse SRv6 feed %s: %w", filename, err)
+			}
+			if len(allRoutes)+len(prefixes) > maxSRv6RoutesTotal {
+				return nil, "", fmt.Errorf("SRv6 feeds exceed %d total routes", maxSRv6RoutesTotal)
 			}
 			for _, prefix := range prefixes {
 				allRoutes = append(allRoutes, srv6Route{prefix: prefix, sid: *feed.sid, mtu: source.MTU})
@@ -203,7 +211,7 @@ func writeCacheAtomic(path string, data []byte) error {
 func parseSRv6Feed(data []byte, family int) ([]netip.Prefix, error) {
 	result := make([]netip.Prefix, 0)
 	seen := make(map[netip.Prefix]struct{})
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 64*1024), 1<<20)
 	lineNumber := 0
 	for scanner.Scan() {
@@ -223,6 +231,9 @@ func parseSRv6Feed(data []byte, family int) ([]netip.Prefix, error) {
 		if _, ok := seen[prefix]; ok {
 			continue
 		}
+		if len(result) >= maxSRv6RoutesPerFeed {
+			return nil, fmt.Errorf("feed exceeds %d unique routes", maxSRv6RoutesPerFeed)
+		}
 		seen[prefix] = struct{}{}
 		result = append(result, prefix)
 	}
@@ -232,7 +243,9 @@ func parseSRv6Feed(data []byte, family int) ([]netip.Prefix, error) {
 	return result, nil
 }
 
-func (b *Backend) buildSRv6Routes(spec *model.SRv6Spec, underlay netlink.Link, routes []srv6Route) ([]netlink.Route, error) {
+func (b *Backend) buildSRv6Routes(record model.Tunnel, underlay netlink.Link, routes []srv6Route) ([]netlink.Route, error) {
+	spec := record.Spec.SRv6
+	realm := model.ManagedRouteRealm(record)
 	desired := make([]netlink.Route, 0, len(routes)+len(spec.Sources)*2)
 	sids := make(map[netip.Addr]struct{})
 	for _, route := range routes {
@@ -242,6 +255,7 @@ func (b *Backend) buildSRv6Routes(spec *model.SRv6Spec, underlay netlink.Link, r
 			Dst:       prefixToIPNet(route.prefix),
 			Table:     spec.Table,
 			Protocol:  managedRouteProtocol,
+			Realm:     realm,
 			Scope:     netlink.SCOPE_UNIVERSE,
 			MTU:       route.mtu,
 			Encap: &netlink.SEG6Encap{
@@ -260,6 +274,7 @@ func (b *Backend) buildSRv6Routes(spec *model.SRv6Spec, underlay netlink.Link, r
 			Dst:       prefixToIPNet(netip.PrefixFrom(sid, 128)),
 			Table:     spec.Table,
 			Protocol:  managedRouteProtocol,
+			Realm:     realm,
 			Scope:     netlink.SCOPE_LINK,
 		}
 		if defaultRoute != nil && len(defaultRoute.Gw) > 0 {
@@ -295,7 +310,8 @@ func maskSize(network *net.IPNet) int {
 	return ones
 }
 
-func (b *Backend) reconcileSRv6Routes(table int, desired []netlink.Route) error {
+func (b *Backend) reconcileSRv6Routes(record model.Tunnel, desired []netlink.Route) error {
+	table := record.Spec.SRv6.Table
 	current, err := b.netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		return fmt.Errorf("list SRv6 route table %d: %w", table, err)
@@ -308,14 +324,16 @@ func (b *Backend) reconcileSRv6Routes(table int, desired []netlink.Route) error 
 		}
 		wanted[key] = route
 	}
+	currentByKey := make(map[string][]netlink.Route, len(current))
+	for _, route := range current {
+		key := routeKey(route)
+		currentByKey[key] = append(currentByKey[key], route)
+	}
 	for key, route := range wanted {
 		matched := false
-		for _, existing := range current {
-			if routeKey(existing) != key {
-				continue
-			}
-			if existing.Protocol != managedRouteProtocol {
-				return fmt.Errorf("route %s in table %d has protocol %d: %w", key, table, existing.Protocol, ErrOwnershipConflict)
+		for _, existing := range currentByKey[key] {
+			if !routeOwnedByRecord(record, existing) && !(existing.Protocol == managedRouteProtocol && existing.Realm == 0) {
+				return fmt.Errorf("route %s in table %d is not owned by TH: %w", key, table, ErrOwnershipConflict)
 			}
 			if equalManagedRoute(existing, route) {
 				matched = true
@@ -328,7 +346,7 @@ func (b *Backend) reconcileSRv6Routes(table int, desired []netlink.Route) error 
 		}
 	}
 	for i := range current {
-		if current[i].Protocol != managedRouteProtocol {
+		if !routeOwnedByRecord(record, current[i]) {
 			continue
 		}
 		if _, ok := wanted[routeKey(current[i])]; ok {
@@ -342,7 +360,7 @@ func (b *Backend) reconcileSRv6Routes(table int, desired []netlink.Route) error 
 }
 
 func equalManagedRoute(a, b netlink.Route) bool {
-	if routeKey(a) != routeKey(b) || a.LinkIndex != b.LinkIndex || a.Protocol != b.Protocol || a.Scope != b.Scope ||
+	if routeKey(a) != routeKey(b) || a.LinkIndex != b.LinkIndex || a.Protocol != b.Protocol || a.Realm != b.Realm || a.Scope != b.Scope ||
 		a.MTU != b.MTU || a.Flags != b.Flags || !a.Gw.Equal(b.Gw) {
 		return false
 	}
@@ -435,7 +453,7 @@ func (b *Backend) removeSRv6(record model.Tunnel) error {
 		return err
 	}
 	for i := range routes {
-		if routes[i].Protocol == managedRouteProtocol {
+		if routeOwnedByRecord(record, routes[i]) {
 			if err := b.netlink.RouteDel(&routes[i]); err != nil && !errors.Is(err, syscall.ESRCH) {
 				return err
 			}
@@ -466,7 +484,7 @@ func (b *Backend) observeSRv6(record model.Tunnel) (core.Observation, error) {
 	}
 	managed := 0
 	for _, route := range routes {
-		if route.Protocol == managedRouteProtocol {
+		if routeOwnedByRecord(record, route) {
 			managed++
 		}
 	}

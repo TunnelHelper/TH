@@ -163,6 +163,18 @@ func TestManagedRulePrioritiesAreStableAndSeparated(t *testing.T) {
 	}
 }
 
+func TestManagedRouteRealmIsStableAndNamespaced(t *testing.T) {
+	record := Tunnel{ID: "11111111-2222-4333-8444-555555555555"}
+	first := ManagedRouteRealm(record)
+	second := ManagedRouteRealm(record)
+	if first != second || first <= 0 || !IsManagedRouteRealm(first) {
+		t.Fatalf("unexpected managed route realms: %d / %d", first, second)
+	}
+	if IsManagedRouteRealm(0) || IsManagedRouteRealm(1234) {
+		t.Fatal("foreign route realm was classified as managed")
+	}
+}
+
 func TestPrepareRejectsMismatchedSpecWithoutPanicking(t *testing.T) {
 	record := Tunnel{
 		Name: "wrong", Kind: KindWireGuard, Interface: "wg0",
@@ -183,6 +195,28 @@ func TestInterfaceAddressesPreserveHostBits(t *testing.T) {
 	}
 	if err := validateNetworks(addresses); err == nil {
 		t.Fatal("duplicate masked networks were accepted")
+	}
+}
+
+func TestValidationRejectsOversizedCollections(t *testing.T) {
+	if err := validateInterfaceAddresses(make([]netip.Prefix, MaxInterfaceAddresses+1)); err == nil {
+		t.Fatal("oversized interface address list was accepted")
+	}
+	if err := validateWireGuard(&WireGuardSpec{Peers: make([]WireGuardPeer, MaxWireGuardPeers+1)}); err == nil {
+		t.Fatal("oversized WireGuard peer list was accepted")
+	}
+	if err := validateWireGuard(&WireGuardSpec{Peers: []WireGuardPeer{{AllowedIPs: make([]netip.Prefix, MaxAllowedIPsPerPeer+1)}}}); err == nil {
+		t.Fatal("oversized per-peer AllowedIPs list was accepted")
+	}
+	peers := make([]WireGuardPeer, MaxAllowedIPsPerTunnel/MaxAllowedIPsPerPeer+1)
+	for i := range peers {
+		peers[i].AllowedIPs = make([]netip.Prefix, MaxAllowedIPsPerPeer)
+	}
+	if err := validateWireGuard(&WireGuardSpec{Peers: peers}); err == nil {
+		t.Fatal("oversized tunnel AllowedIPs total was accepted")
+	}
+	if err := validateSRv6(&SRv6Spec{Sources: make([]SRv6Source, MaxSRv6Sources+1)}); err == nil {
+		t.Fatal("oversized SRv6 source list was accepted")
 	}
 }
 

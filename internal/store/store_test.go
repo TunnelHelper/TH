@@ -66,6 +66,96 @@ func TestFileStoreLifecycleAndPermissions(t *testing.T) {
 	}
 }
 
+func TestFileStoreRollsBackWhenDirectorySyncFails(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		records, err := Open(filepath.Join(t.TempDir(), "state"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := preparedGRE(t, "one", "gre0")
+		failNextDirectorySync(records)
+		if err := records.Create(record); err == nil {
+			t.Fatal("create succeeded despite injected directory sync failure")
+		}
+		if _, err := records.Get(record.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("record remained after failed create: %v", err)
+		}
+		if err := records.Create(record); err != nil {
+			t.Fatalf("create retry: %v", err)
+		}
+	})
+
+	t.Run("update", func(t *testing.T) {
+		records, err := Open(filepath.Join(t.TempDir(), "state"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		original := preparedGRE(t, "one", "gre0")
+		if err := records.Create(original); err != nil {
+			t.Fatal(err)
+		}
+		updated, err := model.Clone(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		updated.Name = "updated"
+		if err := model.PrepareUpdate(&updated, &original, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		failNextDirectorySync(records)
+		if err := records.Update(updated, original.Generation); err == nil {
+			t.Fatal("update succeeded despite injected directory sync failure")
+		}
+		loaded, err := records.Get(original.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.Name != original.Name || loaded.Generation != original.Generation {
+			t.Fatalf("record changed after failed update: %+v", loaded)
+		}
+		if err := records.Update(updated, original.Generation); err != nil {
+			t.Fatalf("update retry: %v", err)
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		records, err := Open(filepath.Join(t.TempDir(), "state"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		record := preparedGRE(t, "one", "gre0")
+		if err := records.Create(record); err != nil {
+			t.Fatal(err)
+		}
+		failNextDirectorySync(records)
+		if err := records.Delete(record.ID, record.Generation); err == nil {
+			t.Fatal("delete succeeded despite injected directory sync failure")
+		}
+		loaded, err := records.Get(record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.Generation != record.Generation {
+			t.Fatalf("record changed after failed delete: %+v", loaded)
+		}
+		if err := records.Delete(record.ID, record.Generation); err != nil {
+			t.Fatalf("delete retry: %v", err)
+		}
+	})
+}
+
+func failNextDirectorySync(records *FileStore) {
+	syncDirectory := records.syncDirectory
+	failed := false
+	records.syncDirectory = func(path string) error {
+		if !failed {
+			failed = true
+			return errors.New("injected directory sync failure")
+		}
+		return syncDirectory(path)
+	}
+}
+
 func TestFileStoreRejectsCollisions(t *testing.T) {
 	records, err := Open(filepath.Join(t.TempDir(), "state"))
 	if err != nil {

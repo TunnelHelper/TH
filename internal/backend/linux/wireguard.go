@@ -233,6 +233,7 @@ func (b *Backend) reconcileWireGuardRoutes(record model.Tunnel, spec *model.Wire
 				Dst:       prefixToIPNet(prefix),
 				Table:     table,
 				Protocol:  managedRouteProtocol,
+				Realm:     model.ManagedRouteRealm(record),
 				Scope:     netlink.SCOPE_LINK,
 			}
 			desired[managedRouteKey(route)] = route
@@ -269,13 +270,18 @@ func (b *Backend) removeManagedRoutes(record model.Tunnel, link netlink.Link) er
 	if err != nil {
 		return err
 	}
+	expected := make(map[string]netlink.Route)
+	for _, claim := range model.ManagedRouteClaims(record) {
+		route := netlink.Route{Table: claim.Table, Dst: prefixToIPNet(claim.Prefix)}
+		expected[managedRouteKey(route)] = route
+	}
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
 		routes, err := b.listRoutesForLinkTable(link, family, table)
 		if err != nil {
 			return fmt.Errorf("list managed routes: %w", err)
 		}
 		for i := range routes {
-			if routes[i].Protocol != managedRouteProtocol {
+			if !routeOwnedByRecord(record, routes[i]) && !legacyExpectedRoute(routes[i], expected) {
 				continue
 			}
 			if err := b.netlink.RouteDel(&routes[i]); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -290,7 +296,7 @@ func (b *Backend) reconcileManagedRoutes(record model.Tunnel, link netlink.Link,
 	if link.Attrs().Alias != ownershipAlias(record.ID) {
 		return ErrOwnershipConflict
 	}
-	if err := b.assertManagedRouteClaimsAvailable(link, desired); err != nil {
+	if err := b.assertManagedRouteClaimsAvailable(record, link, desired); err != nil {
 		return err
 	}
 	present := make(map[string]struct{}, len(desired))
@@ -306,7 +312,9 @@ func (b *Backend) reconcileManagedRoutes(record model.Tunnel, link netlink.Link,
 		for i := range routes {
 			key := managedRouteKey(routes[i])
 			want, expected := desired[key]
-			if routes[i].Protocol != managedRouteProtocol {
+			owned := routeOwnedByRecord(record, routes[i])
+			legacy := expected && legacyExpectedRoute(routes[i], desired)
+			if !owned && !legacy {
 				if expected {
 					return fmt.Errorf("route %s is not owned by TH: %w", key, ErrOwnershipConflict)
 				}
@@ -357,32 +365,34 @@ func (b *Backend) listRoutesForLinkTable(link netlink.Link, family, table int) (
 	return b.netlink.RouteListFiltered(family, filter, netlink.RT_FILTER_OIF|netlink.RT_FILTER_TABLE)
 }
 
-func (b *Backend) assertManagedRouteClaimsAvailable(link netlink.Link, desired map[string]netlink.Route) error {
+func (b *Backend) assertManagedRouteClaimsAvailable(record model.Tunnel, link netlink.Link, desired map[string]netlink.Route) error {
 	type tableFamily struct {
 		table  int
 		family int
 	}
-	cache := make(map[tableFamily][]netlink.Route)
+	cache := make(map[tableFamily]map[string][]netlink.Route)
 	for key, route := range desired {
 		family := netlink.FAMILY_V6
 		if route.Dst != nil && route.Dst.IP.To4() != nil {
 			family = netlink.FAMILY_V4
 		}
 		query := tableFamily{table: route.Table, family: family}
-		routes, ok := cache[query]
+		routesByKey, ok := cache[query]
 		if !ok {
-			var err error
-			routes, err = b.netlink.RouteListFiltered(family, &netlink.Route{Table: route.Table}, netlink.RT_FILTER_TABLE)
+			routes, err := b.netlink.RouteListFiltered(family, &netlink.Route{Table: route.Table}, netlink.RT_FILTER_TABLE)
 			if err != nil {
 				return fmt.Errorf("list route table %d: %w", route.Table, err)
 			}
-			cache[query] = routes
-		}
-		for _, existing := range routes {
-			if managedRouteKey(existing) != key {
-				continue
+			routesByKey = make(map[string][]netlink.Route, len(routes))
+			for _, existing := range routes {
+				existingKey := managedRouteKey(existing)
+				routesByKey[existingKey] = append(routesByKey[existingKey], existing)
 			}
-			if existing.Protocol != managedRouteProtocol || existing.LinkIndex != link.Attrs().Index {
+			cache[query] = routesByKey
+		}
+		for _, existing := range routesByKey[key] {
+			legacy := existing.Protocol == managedRouteProtocol && existing.Realm == 0
+			if existing.LinkIndex != link.Attrs().Index || (!routeOwnedByRecord(record, existing) && !legacy) {
 				return fmt.Errorf("route %s is already owned by another source: %w", key, ErrOwnershipConflict)
 			}
 		}
@@ -409,7 +419,7 @@ func routeDestinationKey(route netlink.Route) string {
 
 func equalWireGuardRoute(a, b netlink.Route) bool {
 	return managedRouteKey(a) == managedRouteKey(b) && a.LinkIndex == b.LinkIndex && a.Protocol == b.Protocol &&
-		a.Scope == b.Scope && a.Priority == b.Priority
+		a.Realm == b.Realm && a.Scope == b.Scope && a.Priority == b.Priority
 }
 
 func rulePriorities(record model.Tunnel) (int, int) {

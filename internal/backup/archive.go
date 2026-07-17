@@ -67,6 +67,9 @@ func ValidateArchive(archive Archive) error {
 	if archive.CreatedAt.IsZero() {
 		return errors.New("backup created_at is required")
 	}
+	if len(archive.Tunnels) > model.MaxTunnelRecords {
+		return fmt.Errorf("backup exceeds %d tunnels", model.MaxTunnelRecords)
+	}
 	for index := range archive.Tunnels {
 		if err := model.Validate(&archive.Tunnels[index]); err != nil {
 			return fmt.Errorf("backup tunnel %d: %w", index, err)

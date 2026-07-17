@@ -85,8 +85,8 @@ func readBundleDirectory(path string) (model.Bundle, error) {
 			return model.Bundle{}, fmt.Errorf("bundle file %q has unsupported bundle_version %d", entry.Name(), decoded.BundleVersion)
 		}
 		bundle.Tunnels = append(bundle.Tunnels, decoded.Tunnels...)
-		if len(bundle.Tunnels) > 1024 {
-			return model.Bundle{}, errors.New("bundle exceeds 1024 tunnels")
+		if len(bundle.Tunnels) > model.MaxTunnelRecords {
+			return model.Bundle{}, fmt.Errorf("bundle exceeds %d tunnels", model.MaxTunnelRecords)
 		}
 	}
 	if len(bundle.Tunnels) == 0 {

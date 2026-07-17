@@ -10,17 +10,23 @@ on:
 permissions:
   contents: read
 
+env:
+  GORELEASER_VERSION: v2.17.0
+  GORELEASER_SHA256: dde10e2d5a13cef969c0eec00c74f359c0ac306d702b1bd291ad9337b4e54c1d
+
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          go-version: '1.24'
+          go-version: '1.25.12'
           cache: true
 
       - name: Check formatting
@@ -31,6 +37,9 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
       - name: Check packaging scripts
         run: |
@@ -43,8 +52,11 @@ jobs:
           sudo /tmp/th-integration.test -test.v
 
       - name: Build release archives and native packages
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: latest
-          args: release --snapshot --clean
+        run: |
+          archive="$RUNNER_TEMP/goreleaser.tar.gz"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$archive" \
+            "https://github.com/goreleaser/goreleaser/releases/download/$GORELEASER_VERSION/goreleaser_Linux_x86_64.tar.gz"
+          printf '%s  %s\n' "$GORELEASER_SHA256" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" goreleaser
+          "$RUNNER_TEMP/goreleaser" release --snapshot --clean

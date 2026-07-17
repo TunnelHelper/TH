@@ -226,6 +226,18 @@ func TestParseSRv6Feed(t *testing.T) {
 	}
 }
 
+func TestParseSRv6FeedRejectsTooManyRoutes(t *testing.T) {
+	var feed strings.Builder
+	for i := 0; i <= maxSRv6RoutesPerFeed; i++ {
+		address := netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+		feed.WriteString(address.String())
+		feed.WriteString("/32\n")
+	}
+	if _, err := parseSRv6Feed([]byte(feed.String()), 4); err == nil {
+		t.Fatal("oversized SRv6 feed was accepted")
+	}
+}
+
 func TestSRv6FetchCachesAndFallsBack(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/carrier_v4.txt" {
@@ -280,7 +292,7 @@ func TestStaticXFRMBuildersAreExact(t *testing.T) {
 func TestManagedRouteEqualityIncludesSEG6(t *testing.T) {
 	route := netlink.Route{
 		LinkIndex: 2, Dst: prefixToIPNet(netip.MustParsePrefix("192.0.2.0/24")), Table: 100,
-		Protocol: managedRouteProtocol, MTU: 1400,
+		Protocol: managedRouteProtocol, Realm: 1001, MTU: 1400,
 		Encap: &netlink.SEG6Encap{Mode: 1, Segments: []net.IP{net.ParseIP("2001:db8::1")}},
 	}
 	copy := route
@@ -288,9 +300,35 @@ func TestManagedRouteEqualityIncludesSEG6(t *testing.T) {
 	if !equalManagedRoute(route, copy) {
 		t.Fatal("identical SEG6 routes compare unequal")
 	}
+	copy.Realm++
+	if equalManagedRoute(route, copy) {
+		t.Fatal("routes from different ownership realms compare equal")
+	}
+	copy.Realm = route.Realm
 	copy.Encap = &netlink.SEG6Encap{Mode: 1, Segments: []net.IP{net.ParseIP("2001:db8::2")}}
 	if equalManagedRoute(route, copy) {
 		t.Fatal("different SEG6 routes compare equal")
+	}
+}
+
+func TestManagedRouteOwnershipRequiresRecordRealm(t *testing.T) {
+	record := model.Tunnel{ID: "11111111-2222-4333-8444-555555555555"}
+	route := netlink.Route{Protocol: managedRouteProtocol, Realm: model.ManagedRouteRealm(record)}
+	if !routeOwnedByRecord(record, route) {
+		t.Fatal("record route realm was not recognized")
+	}
+	route.Realm++
+	if routeOwnedByRecord(record, route) {
+		t.Fatal("foreign route realm was treated as record-owned")
+	}
+	route.Realm = 0
+	expected := map[string]netlink.Route{managedRouteKey(route): route}
+	if !legacyExpectedRoute(route, expected) {
+		t.Fatal("expected legacy route was not recognized for migration")
+	}
+	delete(expected, managedRouteKey(route))
+	if legacyExpectedRoute(route, expected) {
+		t.Fatal("unrelated legacy route was treated as record-owned")
 	}
 }
 

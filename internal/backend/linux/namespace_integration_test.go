@@ -5,6 +5,7 @@ package linux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -108,6 +109,85 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 		assertLifecycleOrSkipUnsupported(t, backend, record)
 	})
 
+	t.Run("wireguard-route-realm-migration", func(t *testing.T) {
+		peer, _ := wgtypes.GeneratePrivateKey()
+		record := prepareIntegrationRecord(t, model.Tunnel{
+			Name: "wg-migrate", Kind: model.KindWireGuard, Interface: "wg-migrate",
+			Spec: model.Spec{WireGuard: &model.WireGuardSpec{
+				RouteAllowedIPs: true,
+				RouteTable:      1200,
+				Peers: []model.WireGuardPeer{{
+					PublicKey: peer.PublicKey().String(), AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.222.0.0/24")},
+				}},
+			}},
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := backend.Apply(ctx, record); err != nil {
+			if unsupportedKernelError(err) {
+				_, _ = backend.Remove(ctx, record)
+				t.Skipf("kernel does not support %s in this environment: %v", record.Kind, err)
+			}
+			t.Fatal(err)
+		}
+		removed := false
+		defer func() {
+			if !removed {
+				_, _ = backend.Remove(context.Background(), record)
+			}
+		}()
+		link, err := backend.netlink.LinkByName(record.Interface)
+		if err != nil {
+			t.Fatal(err)
+		}
+		routes, err := backend.listRoutesForLinkTable(link, netlink.FAMILY_V4, record.Spec.WireGuard.RouteTable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := fmt.Sprintf("%d|10.222.0.0/24", record.Spec.WireGuard.RouteTable)
+		var managed *netlink.Route
+		for i := range routes {
+			if managedRouteKey(routes[i]) == key && routeOwnedByRecord(record, routes[i]) {
+				copy := routes[i]
+				managed = &copy
+				break
+			}
+		}
+		if managed == nil {
+			t.Fatal("managed WireGuard route was not created with a record realm")
+		}
+		if err := backend.netlink.RouteDel(managed); err != nil {
+			t.Fatal(err)
+		}
+		legacy := *managed
+		legacy.Realm = 0
+		if err := backend.netlink.RouteAdd(&legacy); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.Apply(ctx, record); err != nil {
+			t.Fatalf("migrate legacy route: %v", err)
+		}
+		routes, err = backend.listRoutesForLinkTable(link, netlink.FAMILY_V4, record.Spec.WireGuard.RouteTable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundOwned, foundLegacy := false, false
+		for _, route := range routes {
+			if managedRouteKey(route) != key {
+				continue
+			}
+			foundOwned = foundOwned || routeOwnedByRecord(record, route)
+			foundLegacy = foundLegacy || route.Protocol == managedRouteProtocol && route.Realm == 0
+		}
+		if !foundOwned || foundLegacy {
+			t.Fatalf("legacy route migration result: owned=%t legacy=%t", foundOwned, foundLegacy)
+		}
+		if _, err := backend.Remove(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+		removed = true
+	})
+
 	t.Run("amneziawg", func(t *testing.T) {
 		record := prepareIntegrationRecord(t, model.Tunnel{
 			Name: "awg", Kind: model.KindAmneziaWG, Interface: "awg0",
@@ -169,7 +249,37 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 				Sources: []model.SRv6Source{{Name: "carrier", SIDv4: integrationAddrPointer("2001:db8:1::1"), MTU: 1400}},
 			}},
 		})
+		underlayLink, err := backend.netlink.LinkByName("underlay0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		foreignRoute := netlink.Route{
+			LinkIndex: underlayLink.Attrs().Index,
+			Dst:       prefixToIPNet(netip.MustParsePrefix("198.18.0.0/15")),
+			Table:     record.Spec.SRv6.Table,
+			Protocol:  managedRouteProtocol,
+			Realm:     1234,
+			Scope:     netlink.SCOPE_LINK,
+		}
+		if err := backend.netlink.RouteAdd(&foreignRoute); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = backend.netlink.RouteDel(&foreignRoute) }()
 		assertLifecycleOrSkipUnsupported(t, backend, record)
+		routes, err := backend.netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: record.Spec.SRv6.Table}, netlink.RT_FILTER_TABLE)
+		if err != nil {
+			t.Fatal(err)
+		}
+		preserved := false
+		for _, route := range routes {
+			if routeKey(route) == routeKey(foreignRoute) && route.Realm == foreignRoute.Realm {
+				preserved = true
+				break
+			}
+		}
+		if !preserved {
+			t.Fatal("foreign protocol-242 route was deleted during SRv6 reconciliation")
+		}
 	})
 
 	t.Run("netlink-delete-event", func(t *testing.T) {

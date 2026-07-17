@@ -22,6 +22,18 @@ const managedRouteProtocol = 242
 
 var ErrOwnershipConflict = errors.New("kernel object is not owned by TH")
 
+func routeOwnedByRecord(record model.Tunnel, route netlink.Route) bool {
+	return route.Protocol == managedRouteProtocol && route.Realm == model.ManagedRouteRealm(record)
+}
+
+func legacyExpectedRoute(route netlink.Route, expectedKeys map[string]netlink.Route) bool {
+	if route.Protocol != managedRouteProtocol || route.Realm != 0 {
+		return false
+	}
+	_, expected := expectedKeys[managedRouteKey(route)]
+	return expected
+}
+
 type Backend struct {
 	settings config.Settings
 	netlink  *netlink.Handle

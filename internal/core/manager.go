@@ -24,7 +24,9 @@ type Manager struct {
 }
 
 func NewManager(records Store, reconciler *Reconciler) *Manager {
-	return &Manager{store: records, reconciler: reconciler, now: time.Now}
+	manager := &Manager{store: records, reconciler: reconciler, now: time.Now}
+	reconciler.setMutationGate(&manager.mutationMu)
+	return manager
 }
 
 func (m *Manager) List() ([]model.TunnelView, error) {
@@ -74,6 +76,13 @@ func (m *Manager) createLocked(_ context.Context, record model.Tunnel) (model.Tu
 	record.UpdatedAt = time.Time{}
 	if err := model.PrepareNew(&record, m.now()); err != nil {
 		return model.TunnelView{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	records, err := m.store.List()
+	if err != nil {
+		return model.TunnelView{}, err
+	}
+	if len(records) >= model.MaxTunnelRecords {
+		return model.TunnelView{}, fmt.Errorf("%w: tunnel store is limited to %d records", ErrInvalidRequest, model.MaxTunnelRecords)
 	}
 	if err := m.store.Create(record); err != nil {
 		return model.TunnelView{}, err
@@ -213,19 +222,25 @@ func (m *Manager) Delete(ctx context.Context, id string, expected uint64) error 
 }
 
 func (m *Manager) Reconcile(ctx context.Context, id string) (model.TunnelView, error) {
+	m.mutationMu.RLock()
+	defer m.mutationMu.RUnlock()
+
 	if err := m.reconciler.Reconcile(ctx, id); err != nil && !IsNotFound(err) {
-		view, getErr := m.Get(id)
+		view, getErr := m.getLocked(id)
 		if getErr != nil {
 			return model.TunnelView{}, err
 		}
 		return view, nil
 	}
-	return m.Get(id)
+	return m.getLocked(id)
 }
 
 func (m *Manager) ReconcileAll(ctx context.Context) ([]model.TunnelView, error) {
+	m.mutationMu.RLock()
+	defer m.mutationMu.RUnlock()
+
 	_ = m.reconciler.ReconcileAll(ctx)
-	return m.List()
+	return m.listLocked()
 }
 
 func (m *Manager) Health(ctx context.Context) map[model.Kind]BackendHealth {

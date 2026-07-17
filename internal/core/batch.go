@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"reflect"
 	"sort"
 
@@ -125,8 +126,8 @@ func (m *Manager) buildBundlePlanLocked(bundle model.Bundle, prune bool) (Bundle
 	if len(bundle.Tunnels) == 0 {
 		return BundlePlan{}, nil, fmt.Errorf("%w: bundle must contain at least one tunnel", ErrInvalidRequest)
 	}
-	if len(bundle.Tunnels) > 1024 {
-		return BundlePlan{}, nil, fmt.Errorf("%w: bundle exceeds 1024 tunnels", ErrInvalidRequest)
+	if len(bundle.Tunnels) > model.MaxTunnelRecords {
+		return BundlePlan{}, nil, fmt.Errorf("%w: bundle exceeds %d tunnels", ErrInvalidRequest, model.MaxTunnelRecords)
 	}
 	current, err := m.store.List()
 	if err != nil {
@@ -363,6 +364,9 @@ func cloneTunnelPointer(record model.Tunnel) *model.Tunnel {
 }
 
 func validateRecordSet(records []model.Tunnel) error {
+	if len(records) > model.MaxTunnelRecords {
+		return fmt.Errorf("record set exceeds %d tunnels", model.MaxTunnelRecords)
+	}
 	ids := make(map[string]string, len(records))
 	names := make(map[string]string, len(records))
 	interfaces := make(map[string]string, len(records))
@@ -370,6 +374,14 @@ func validateRecordSet(records []model.Tunnel) error {
 	xfrmReqIDs := make(map[uint32]string)
 	srv6Tables := make(map[int]string)
 	rulePriorities := make(map[int]string)
+	type routeClaimKey struct {
+		table  int
+		prefix netip.Prefix
+	}
+	routeClaims := make(map[routeClaimKey]string)
+	exclusiveRouteTables := make(map[int]string)
+	usedRouteTables := make(map[int]string)
+	totalRouteClaims := 0
 	for index := range records {
 		record := &records[index]
 		if err := model.Validate(record); err != nil {
@@ -420,49 +432,31 @@ func validateRecordSet(records []model.Tunnel) error {
 			}
 			rulePriorities[priority] = record.Name
 		}
-	}
-	for left := 0; left < len(records); left++ {
-		for right := left + 1; right < len(records); right++ {
-			if batchRoutesCollide(records[left], records[right]) {
-				return fmt.Errorf("managed routes collide between %q and %q", records[left].Name, records[right].Name)
+		for _, table := range model.ExclusiveRouteTables(*record) {
+			if owner, ok := usedRouteTables[table]; ok && owner != record.Name {
+				return fmt.Errorf("managed routes collide between %q and %q", owner, record.Name)
+			}
+			exclusiveRouteTables[table] = record.Name
+			usedRouteTables[table] = record.Name
+		}
+		claims := model.ManagedRouteClaims(*record)
+		totalRouteClaims += len(claims)
+		if totalRouteClaims > model.MaxManagedRouteClaims {
+			return fmt.Errorf("record set exceeds %d managed route claims", model.MaxManagedRouteClaims)
+		}
+		for _, claim := range claims {
+			if owner, ok := exclusiveRouteTables[claim.Table]; ok && owner != record.Name {
+				return fmt.Errorf("managed routes collide between %q and %q", owner, record.Name)
+			}
+			key := routeClaimKey{table: claim.Table, prefix: claim.Prefix}
+			if owner, ok := routeClaims[key]; ok && owner != record.Name {
+				return fmt.Errorf("managed routes collide between %q and %q", owner, record.Name)
+			}
+			routeClaims[key] = record.Name
+			if _, ok := usedRouteTables[claim.Table]; !ok {
+				usedRouteTables[claim.Table] = record.Name
 			}
 		}
 	}
 	return nil
-}
-
-func batchRoutesCollide(left, right model.Tunnel) bool {
-	leftClaims, rightClaims := model.ManagedRouteClaims(left), model.ManagedRouteClaims(right)
-	for _, table := range model.ExclusiveRouteTables(left) {
-		if batchRouteTableUsed(table, rightClaims, model.ExclusiveRouteTables(right)) {
-			return true
-		}
-	}
-	for _, table := range model.ExclusiveRouteTables(right) {
-		if batchRouteTableUsed(table, leftClaims, model.ExclusiveRouteTables(left)) {
-			return true
-		}
-	}
-	for _, leftClaim := range leftClaims {
-		for _, rightClaim := range rightClaims {
-			if leftClaim.Table == rightClaim.Table && leftClaim.Prefix == rightClaim.Prefix {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func batchRouteTableUsed(table int, claims []model.RouteClaim, exclusive []int) bool {
-	for _, other := range exclusive {
-		if table == other {
-			return true
-		}
-	}
-	for _, claim := range claims {
-		if table == claim.Table {
-			return true
-		}
-	}
-	return false
 }

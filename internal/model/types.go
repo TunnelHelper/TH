@@ -5,8 +5,18 @@ import (
 	"time"
 )
 
-const SchemaVersion = 2
-const BundleVersion = 1
+const (
+	SchemaVersion = 2
+	BundleVersion = 1
+
+	MaxTunnelRecords       = 1024
+	MaxInterfaceAddresses  = 256
+	MaxWireGuardPeers      = 1024
+	MaxAllowedIPsPerPeer   = 4096
+	MaxAllowedIPsPerTunnel = 16384
+	MaxManagedRouteClaims  = 262144
+	MaxSRv6Sources         = 64
+)
 
 type Bundle struct {
 	BundleVersion int      `json:"bundle_version"`

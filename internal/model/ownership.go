@@ -8,9 +8,26 @@ import (
 
 const mainRouteTable = 254
 
+const (
+	managedRouteRealmPrefix = 0x40000000
+	managedRouteRealmMask   = 0x3fffffff
+)
+
 type RouteClaim struct {
 	Table  int
 	Prefix netip.Prefix
+}
+
+// ManagedRouteRealm returns a stable record-level route ownership tag. The
+// high bits reserve a TH-specific realm range while keeping the value safe on
+// 32-bit platforms.
+func ManagedRouteRealm(t Tunnel) int {
+	digest := sha256.Sum256([]byte(t.ID))
+	return managedRouteRealmPrefix | int(binary.BigEndian.Uint32(digest[8:12])&managedRouteRealmMask)
+}
+
+func IsManagedRouteRealm(realm int) bool {
+	return realm&^managedRouteRealmMask == managedRouteRealmPrefix
 }
 
 // ManagedRulePriorities reserves stable, non-overlapping priority ranges for

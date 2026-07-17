@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/model"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 func TestBundlePlanAndApplyLifecycle(t *testing.T) {
@@ -100,6 +101,48 @@ func TestBundlePlanRejectsFinalOwnershipConflict(t *testing.T) {
 	manager := NewManager(records, NewReconciler(records, newFakeBackend(), time.Hour))
 	if _, err := manager.PlanBundle(bundle, false); !IsInvalidRequest(err) {
 		t.Fatalf("ownership conflict = %v", err)
+	}
+}
+
+func TestValidateRecordSetDetectsRouteConflictsInEitherOrder(t *testing.T) {
+	peer, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg := model.Tunnel{
+		Name: "wg-routes", Kind: model.KindWireGuard, Interface: "wg-routes",
+		Spec: model.Spec{WireGuard: &model.WireGuardSpec{
+			RouteAllowedIPs: true,
+			RouteTable:      1000,
+			Peers: []model.WireGuardPeer{{
+				PublicKey:  peer.PublicKey().String(),
+				AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.20.0.0/24")},
+			}},
+		}},
+	}
+	if err := model.PrepareNew(&wg, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	srv6 := model.Tunnel{
+		Name: "srv6-routes", Kind: model.KindSRv6,
+		Spec: model.Spec{SRv6: &model.SRv6Spec{
+			BaseURL: "https://routes.example/", UnderlayInterface: "eth0", Table: 1000,
+			Sources: []model.SRv6Source{{Name: "carrier", SIDv4: coreAddrPointer("2001:db8::1"), MTU: 1500}},
+		}},
+	}
+	if err := model.PrepareNew(&srv6, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, records := range [][]model.Tunnel{{wg, srv6}, {srv6, wg}} {
+		if err := validateRecordSet(records); err == nil {
+			t.Fatalf("route conflict was accepted in order %s, %s", records[0].Name, records[1].Name)
+		}
+	}
+}
+
+func TestValidateRecordSetRejectsTooManyRecords(t *testing.T) {
+	if err := validateRecordSet(make([]model.Tunnel, model.MaxTunnelRecords+1)); err == nil {
+		t.Fatal("oversized record set was accepted")
 	}
 }
 

@@ -95,6 +95,9 @@ The daemon validates the final set for duplicate names, interfaces, XFRM IDs,
 route tables, policy priorities, and managed route claims before changing
 state. Omitted records are deleted only with `prune: true`. Failed applies
 restore already changed desired records in reverse order and queue repair.
+The store and bundles are limited to 1024 tunnels. Per tunnel, interface
+address lists are limited to 256 entries, WireGuard/AmneziaWG to 1024 peers
+and 16384 total AllowedIPs (4096 per peer), and SRv6 to 64 sources.
 
 Admin backup and restore require UID 0 proven with `SO_PEERCRED`; socket group
 membership alone is insufficient. Backup returns an age/scrypt encrypted

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/core"
+	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
@@ -95,7 +96,7 @@ func (b *Backend) watchRouteEvents() {
 	go func() {
 		defer b.eventWG.Done()
 		for update := range updates {
-			if update.Type == unix.RTM_DELROUTE && update.Protocol == managedRouteProtocol {
+			if update.Type == unix.RTM_DELROUTE && update.Protocol == managedRouteProtocol && model.IsManagedRouteRealm(update.Realm) {
 				event := core.BackendEvent{Type: core.BackendEventRoute, RouteTable: update.Table}
 				if update.LinkIndex != 0 {
 					if link, err := b.netlink.LinkByIndex(update.LinkIndex); err == nil {

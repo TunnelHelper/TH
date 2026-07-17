@@ -21,9 +21,10 @@ var (
 )
 
 type FileStore struct {
-	mu       sync.RWMutex
-	stateDir string
-	dir      string
+	mu            sync.RWMutex
+	stateDir      string
+	dir           string
+	syncDirectory func(string) error
 }
 
 func Open(stateDir string) (*FileStore, error) {
@@ -40,7 +41,7 @@ func Open(stateDir string) (*FileStore, error) {
 	if err := ensurePrivateDirectory(dir); err != nil {
 		return nil, fmt.Errorf("prepare tunnel store: %w", err)
 	}
-	store := &FileStore{stateDir: stateDir, dir: dir}
+	store := &FileStore{stateDir: stateDir, dir: dir, syncDirectory: syncDir}
 	if _, err := store.List(); err != nil {
 		return nil, err
 	}
@@ -89,6 +90,9 @@ func (s *FileStore) listLocked() ([]model.Tunnel, error) {
 			return nil, err
 		}
 		records = append(records, record)
+		if len(records) > model.MaxTunnelRecords {
+			return nil, fmt.Errorf("tunnel store exceeds %d records", model.MaxTunnelRecords)
+		}
 	}
 	sort.Slice(records, func(i, j int) bool {
 		if records[i].Name == records[j].Name {
@@ -122,7 +126,7 @@ func (s *FileStore) Create(record model.Tunnel) error {
 	if err := s.checkNamesLocked(record, ""); err != nil {
 		return err
 	}
-	return s.writeLocked(record)
+	return s.writeLocked(record, nil)
 }
 
 func (s *FileStore) Update(record model.Tunnel, expectedGeneration uint64) error {
@@ -141,7 +145,7 @@ func (s *FileStore) Update(record model.Tunnel, expectedGeneration uint64) error
 	if err := s.checkNamesLocked(record, record.ID); err != nil {
 		return err
 	}
-	return s.writeLocked(record)
+	return s.writeLocked(record, &current)
 }
 
 func (s *FileStore) Delete(id string, expectedGeneration uint64) error {
@@ -166,13 +170,23 @@ func (s *FileStore) Delete(id string, expectedGeneration uint64) error {
 		}
 		return fmt.Errorf("delete tunnel record: %w", err)
 	}
-	return syncDir(s.dir)
+	if err := s.syncDirectory(s.dir); err != nil {
+		rollbackErr := s.restoreRecordLocked(record)
+		if rollbackErr != nil {
+			return fmt.Errorf("sync deleted tunnel record: %w; restore previous record: %v", err, rollbackErr)
+		}
+		return fmt.Errorf("sync deleted tunnel record (deletion rolled back): %w", err)
+	}
+	return nil
 }
 
 func (s *FileStore) checkNamesLocked(candidate model.Tunnel, exceptID string) error {
 	records, err := s.listLocked()
 	if err != nil {
 		return err
+	}
+	if exceptID == "" && len(records) >= model.MaxTunnelRecords {
+		return fmt.Errorf("tunnel store is limited to %d records: %w", model.MaxTunnelRecords, ErrConflict)
 	}
 	for _, record := range records {
 		if record.ID == exceptID {
@@ -200,48 +214,50 @@ func (s *FileStore) checkNamesLocked(candidate model.Tunnel, exceptID string) er
 		if collidesRulePriority(candidate, record) {
 			return fmt.Errorf("policy-rule priority collides with %q: %w", record.Name, ErrConflict)
 		}
-		if collidesManagedRoute(candidate, record) {
-			return fmt.Errorf("managed route collides with %q: %w", record.Name, ErrConflict)
-		}
+	}
+	if owner, totalClaims, collides := managedRouteCollision(candidate, records, exceptID); collides {
+		return fmt.Errorf("managed route collides with %q: %w", owner, ErrConflict)
+	} else if totalClaims > model.MaxManagedRouteClaims {
+		return fmt.Errorf("tunnel store exceeds %d managed route claims: %w", model.MaxManagedRouteClaims, ErrConflict)
 	}
 	return nil
 }
 
-func collidesManagedRoute(a, b model.Tunnel) bool {
-	left := model.ManagedRouteClaims(a)
-	right := model.ManagedRouteClaims(b)
-	for _, table := range model.ExclusiveRouteTables(a) {
-		if routeTableIsUsed(table, right, model.ExclusiveRouteTables(b)) {
-			return true
-		}
+func managedRouteCollision(candidate model.Tunnel, records []model.Tunnel, exceptID string) (string, int, bool) {
+	candidateClaims := model.ManagedRouteClaims(candidate)
+	candidateClaimSet := make(map[model.RouteClaim]struct{}, len(candidateClaims))
+	candidateUsedTables := make(map[int]struct{})
+	candidateExclusiveTables := make(map[int]struct{})
+	for _, claim := range candidateClaims {
+		candidateClaimSet[claim] = struct{}{}
+		candidateUsedTables[claim.Table] = struct{}{}
 	}
-	for _, table := range model.ExclusiveRouteTables(b) {
-		if routeTableIsUsed(table, left, model.ExclusiveRouteTables(a)) {
-			return true
-		}
+	for _, table := range model.ExclusiveRouteTables(candidate) {
+		candidateExclusiveTables[table] = struct{}{}
+		candidateUsedTables[table] = struct{}{}
 	}
-	for _, l := range left {
-		for _, r := range right {
-			if l.Table == r.Table && l.Prefix == r.Prefix {
-				return true
+	totalClaims := len(candidateClaims)
+	for _, record := range records {
+		if record.ID == exceptID {
+			continue
+		}
+		recordClaims := model.ManagedRouteClaims(record)
+		totalClaims += len(recordClaims)
+		for _, table := range model.ExclusiveRouteTables(record) {
+			if _, used := candidateUsedTables[table]; used {
+				return record.Name, totalClaims, true
+			}
+		}
+		for _, claim := range recordClaims {
+			if _, exclusive := candidateExclusiveTables[claim.Table]; exclusive {
+				return record.Name, totalClaims, true
+			}
+			if _, duplicate := candidateClaimSet[claim]; duplicate {
+				return record.Name, totalClaims, true
 			}
 		}
 	}
-	return false
-}
-
-func routeTableIsUsed(table int, claims []model.RouteClaim, exclusive []int) bool {
-	for _, other := range exclusive {
-		if table == other {
-			return true
-		}
-	}
-	for _, claim := range claims {
-		if table == claim.Table {
-			return true
-		}
-	}
-	return false
+	return "", totalClaims, false
 }
 
 func collidesRulePriority(a, b model.Tunnel) bool {
@@ -325,18 +341,46 @@ func (s *FileStore) readLocked(id string) (model.Tunnel, error) {
 	return record, nil
 }
 
-func (s *FileStore) writeLocked(record model.Tunnel) error {
+func (s *FileStore) writeLocked(record model.Tunnel, previous *model.Tunnel) error {
+	if err := s.replaceRecordLocked(record); err != nil {
+		return err
+	}
+	if err := s.syncDirectory(s.dir); err != nil {
+		rollbackErr := s.rollbackWriteLocked(record.ID, previous)
+		if rollbackErr != nil {
+			return fmt.Errorf("sync committed tunnel record: %w; restore previous record: %v", err, rollbackErr)
+		}
+		return fmt.Errorf("sync committed tunnel record (write rolled back): %w", err)
+	}
+	return nil
+}
+
+func (s *FileStore) rollbackWriteLocked(id string, previous *model.Tunnel) error {
+	if previous != nil {
+		return s.restoreRecordLocked(*previous)
+	}
+	if err := os.Remove(s.path(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove newly created record: %w", err)
+	}
+	return s.syncDirectory(s.dir)
+}
+
+func (s *FileStore) restoreRecordLocked(record model.Tunnel) error {
+	if err := s.replaceRecordLocked(record); err != nil {
+		return err
+	}
+	return s.syncDirectory(s.dir)
+}
+
+func (s *FileStore) replaceRecordLocked(record model.Tunnel) error {
 	temporary, err := os.CreateTemp(s.dir, ".record-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temporary record: %w", err)
 	}
 	temporaryName := temporary.Name()
-	committed := false
 	defer func() {
 		_ = temporary.Close()
-		if !committed {
-			_ = os.Remove(temporaryName)
-		}
+		_ = os.Remove(temporaryName)
 	}()
 	if err := temporary.Chmod(0600); err != nil {
 		return fmt.Errorf("protect temporary record: %w", err)
@@ -355,8 +399,7 @@ func (s *FileStore) writeLocked(record model.Tunnel) error {
 	if err := os.Rename(temporaryName, s.path(record.ID)); err != nil {
 		return fmt.Errorf("commit tunnel record: %w", err)
 	}
-	committed = true
-	return syncDir(s.dir)
+	return nil
 }
 
 func (s *FileStore) path(id string) string {

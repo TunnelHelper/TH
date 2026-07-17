@@ -121,6 +121,9 @@ func validateMTU(mtu int) error {
 }
 
 func validateInterfaceAddresses(addresses []netip.Prefix) error {
+	if len(addresses) > MaxInterfaceAddresses {
+		return fmt.Errorf("addresses exceeds %d entries", MaxInterfaceAddresses)
+	}
 	seen := make(map[netip.Prefix]struct{}, len(addresses))
 	for _, prefix := range addresses {
 		if !prefix.IsValid() {
@@ -189,6 +192,20 @@ func validateUnderlayPair(local, remote netip.Addr) error {
 }
 
 func validateWireGuard(spec *WireGuardSpec) error {
+	if len(spec.Peers) > MaxWireGuardPeers {
+		return fmt.Errorf("peers exceeds %d entries", MaxWireGuardPeers)
+	}
+	totalAllowedIPs := 0
+	for i := range spec.Peers {
+		count := len(spec.Peers[i].AllowedIPs)
+		if count > MaxAllowedIPsPerPeer {
+			return fmt.Errorf("peers[%d].allowed_ips exceeds %d entries", i, MaxAllowedIPsPerPeer)
+		}
+		totalAllowedIPs += count
+		if totalAllowedIPs > MaxAllowedIPsPerTunnel {
+			return fmt.Errorf("peer allowed_ips exceeds %d total entries", MaxAllowedIPsPerTunnel)
+		}
+	}
 	if spec.PrivateKey == "" {
 		return errors.New("private_key is required")
 	}
@@ -475,6 +492,9 @@ func validateIKEAddress(value string) error {
 }
 
 func validateSRv6(spec *SRv6Spec) error {
+	if len(spec.Sources) > MaxSRv6Sources {
+		return fmt.Errorf("sources exceeds %d entries", MaxSRv6Sources)
+	}
 	u, err := url.Parse(spec.BaseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return errors.New("base_url must be an absolute HTTP or HTTPS URL")

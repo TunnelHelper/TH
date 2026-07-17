@@ -247,6 +247,50 @@ func TestReconcilerStartupAndEventRetry(t *testing.T) {
 	}
 }
 
+func TestReconcilerRunWaitsForManagerMutation(t *testing.T) {
+	record := preparedCoreGRE(t, true)
+	records := newMemoryStore(record)
+	backend := newFakeBackend()
+	reconciler := NewReconciler(records, backend, time.Hour)
+	manager := NewManager(records, reconciler)
+
+	manager.mutationMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			manager.mutationMu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reconciler.Run(ctx)
+	}()
+
+	select {
+	case <-backend.called:
+		t.Fatal("backend was called while a desired-state mutation was in progress")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	manager.mutationMu.Unlock()
+	locked = false
+	select {
+	case <-backend.called:
+	case <-time.After(time.Second):
+		t.Fatal("backend was not called after the desired-state mutation completed")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reconciler did not stop")
+	}
+}
+
 func TestReconcilerTargetsBackendEventToOneRecord(t *testing.T) {
 	first := preparedCoreGRE(t, true)
 	second := preparedCoreGRE(t, true)

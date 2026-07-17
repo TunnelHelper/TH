@@ -77,7 +77,9 @@ package is removed.
 
 ## Build From Source
 
-Go 1.24 or newer is required.
+Go 1.25.12 or newer is required. The minimum patch level is intentional because
+older toolchains contain known standard-library vulnerabilities reachable from
+the client and daemon binaries.
 
 ```bash
 make build
@@ -130,6 +132,10 @@ directory of `.json` files. `plan` and `apply` preserve records omitted from the
 input unless `--prune` is explicit. Batch validation checks the complete final
 ownership set before writing; an apply failure rolls desired state back and
 queues runtime repair.
+
+Resource bounds are enforced at validation time: at most 1024 tunnels, 256
+interface addresses per tunnel, 1024 WireGuard/AmneziaWG peers, 4096
+AllowedIPs per peer (16384 per tunnel), and 64 SRv6 sources.
 
 `export --redacted` is safe for review and declarative reuse. The root-only
 backup command instead includes every stored private key and PSK, verifies an

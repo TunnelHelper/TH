@@ -17,6 +17,8 @@ type Reconciler struct {
 	interval time.Duration
 	now      func() time.Time
 
+	mutationGate *sync.RWMutex
+
 	statusMu sync.RWMutex
 	statuses map[string]model.Status
 	locksMu  sync.Mutex
@@ -26,6 +28,20 @@ type Reconciler struct {
 	queued   map[string]struct{}
 	wake     chan struct{}
 	events   *EventHub
+}
+
+func (r *Reconciler) setMutationGate(gate *sync.RWMutex) {
+	r.mutationGate = gate
+}
+
+func (r *Reconciler) withMutationRead(fn func()) {
+	if r.mutationGate == nil {
+		fn()
+		return
+	}
+	r.mutationGate.RLock()
+	defer r.mutationGate.RUnlock()
+	fn()
 }
 
 func NewReconciler(records Store, backend Backend, interval time.Duration) *Reconciler {
@@ -68,7 +84,9 @@ func (r *Reconciler) Run(ctx context.Context) {
 		case <-ticker.C:
 			r.EnqueueAll()
 		case <-r.wake:
-			r.processQueue(ctx)
+			r.withMutationRead(func() {
+				r.processQueue(ctx)
+			})
 		case event, ok := <-events:
 			if !ok {
 				events = nil
@@ -85,9 +103,11 @@ func (r *Reconciler) Run(ctx context.Context) {
 			debounced = debounce.C
 		case <-debounced:
 			debounced = nil
-			for event := range backendEvents {
-				r.enqueueBackendEvent(event)
-			}
+			r.withMutationRead(func() {
+				for event := range backendEvents {
+					r.enqueueBackendEvent(event)
+				}
+			})
 			clear(backendEvents)
 		}
 	}
