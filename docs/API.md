@@ -20,6 +20,8 @@ by Unix directory and socket permissions. Responses include
 - `POST /v1/reconcile`
 - `POST /v1/plan`
 - `POST /v1/apply?wait=true`
+- `POST /v1/admin/backup`
+- `POST /v1/admin/restore?check=true&wait=false`
 
 The health response includes `alive`, configured-tunnel `ready`, daemon build
 information, the state schema version, backend capability status, and tunnel
@@ -93,6 +95,16 @@ The daemon validates the final set for duplicate names, interfaces, XFRM IDs,
 route tables, policy priorities, and managed route claims before changing
 state. Omitted records are deleted only with `prune: true`. Failed applies
 restore already changed desired records in reverse order and queue repair.
+
+Admin backup and restore require UID 0 proven with `SO_PEERCRED`; socket group
+membership alone is insufficient. Backup returns an age/scrypt encrypted
+archive containing raw daemon-owned records, including private keys and PSKs.
+The encrypted payload carries its format, product and schema versions, creation
+time, and an internal SHA-256 over the full content. Restore authenticates and
+decrypts age, verifies the digest, validates every record and the complete
+ownership set, then calculates a full replacement plan. `check=true` returns
+that plan without mutation. An applying restore preserves archived IDs and
+rolls deleted desired state back if a later create fails.
 
 Update uses this envelope and requires the current generation:
 

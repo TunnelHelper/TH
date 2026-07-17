@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TunnelHelper/TH/internal/backup"
 	"github.com/TunnelHelper/TH/internal/config"
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
@@ -69,6 +70,12 @@ func TestServerAPIContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertAPIError(t, response, http.StatusNotFound, "not_found")
+
+	response, err = http.Post(server.URL+"/v1/admin/backup", "application/json", bytes.NewBufferString(`{"passphrase":"root backup passphrase"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAPIError(t, response, http.StatusForbidden, "forbidden")
 }
 
 func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
@@ -213,7 +220,7 @@ func TestUnixServerAndTypedClient(t *testing.T) {
 	go func() {
 		serveDone <- ServeUnix(ctx, settings, NewServer(manager).Handler(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	}()
-	client := NewClient(settings.SocketPath, 2*time.Second)
+	client := NewClient(settings.SocketPath, 60*time.Second)
 	defer client.CloseIdleConnections()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -261,6 +268,18 @@ func TestUnixServerAndTypedClient(t *testing.T) {
 		t.Fatal("live event was not streamed")
 	}
 	streamCancel()
+	adminContext, adminCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer adminCancel()
+	var encryptedBackup bytes.Buffer
+	if err := client.Backup(adminContext, "root backup passphrase", &encryptedBackup); err != nil {
+		t.Fatalf("backup through root Unix peer: %v", err)
+	}
+	if encryptedBackup.Len() == 0 {
+		t.Fatal("backup response is empty")
+	}
+	if _, err := client.RestoreBackup(adminContext, "root backup passphrase", bytes.NewReader(encryptedBackup.Bytes()), true, false); err != nil {
+		t.Fatalf("restore check through root Unix peer: %v", err)
+	}
 	cancel()
 	select {
 	case err := <-serveDone:
@@ -362,4 +381,16 @@ func (m *stubManager) PlanBundle(model.Bundle, bool) (core.BundlePlan, error) {
 }
 func (m *stubManager) ApplyBundle(context.Context, model.Bundle, bool, bool) (core.BundleApplyResult, error) {
 	return core.BundleApplyResult{}, nil
+}
+func (m *stubManager) BuildBackup() (backup.Archive, error) {
+	archive := backup.Archive{
+		FormatVersion: backup.FormatVersion, ProductVersion: "test", SchemaVersion: model.SchemaVersion, CreatedAt: time.Now().UTC(),
+	}
+	if err := backup.SealArchive(&archive); err != nil {
+		return backup.Archive{}, err
+	}
+	return archive, nil
+}
+func (m *stubManager) RestoreBackup(context.Context, backup.Archive, bool, bool) (core.RestoreResult, error) {
+	return core.RestoreResult{}, nil
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TunnelHelper/TH/internal/backup"
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/TunnelHelper/TH/internal/version"
@@ -32,6 +33,8 @@ type Manager interface {
 	SubscribeEvents(uint64) core.EventSubscription
 	PlanBundle(model.Bundle, bool) (core.BundlePlan, error)
 	ApplyBundle(context.Context, model.Bundle, bool, bool) (core.BundleApplyResult, error)
+	BuildBackup() (backup.Archive, error)
+	RestoreBackup(context.Context, backup.Archive, bool, bool) (core.RestoreResult, error)
 }
 
 type Server struct {
@@ -51,6 +54,10 @@ type actionRequest struct {
 type bundleRequest struct {
 	Bundle model.Bundle `json:"bundle"`
 	Prune  bool         `json:"prune"`
+}
+
+type backupRequest struct {
+	Passphrase string `json:"passphrase"`
 }
 
 type errorEnvelope struct {
@@ -96,10 +103,79 @@ func NewServer(manager Manager) *Server {
 	server.mux.HandleFunc("POST /v1/reconcile", server.reconcileAll)
 	server.mux.HandleFunc("POST /v1/plan", server.planBundle)
 	server.mux.HandleFunc("POST /v1/apply", server.applyBundle)
+	server.mux.HandleFunc("POST /v1/admin/backup", server.backup)
+	server.mux.HandleFunc("POST /v1/admin/restore", server.restore)
 	server.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorEnvelope{Error: apiError{Code: "not_found", Message: "API endpoint not found"}})
 	})
 	return server
+}
+
+func (s *Server) backup(w http.ResponseWriter, r *http.Request) {
+	if !requireRootPeer(w, r) {
+		return
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	var request backupRequest
+	if err := decodeJSON(r, &request); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if err := backup.ValidatePassphrase(request.Passphrase); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	archive, err := s.manager.BuildBackup()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-TH-Backup-Format", "age+scrypt")
+	w.Header().Add("Trailer", "X-TH-Backup-Error")
+	if err := backup.Encrypt(w, request.Passphrase, archive); err != nil {
+		w.Header().Set("X-TH-Backup-Error", err.Error())
+	}
+}
+
+func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
+	if !requireRootPeer(w, r) {
+		return
+	}
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Time{})
+	_ = controller.SetWriteDeadline(time.Time{})
+	wait, err := parseWait(r)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	check, err := parseBoolQuery(r, "check")
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	passphrase := r.Header.Get("X-TH-Backup-Passphrase")
+	archive, err := backup.Decrypt(r.Body, passphrase)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	result, err := s.manager.RestoreBackup(r.Context(), archive, check, wait)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func requireRootPeer(w http.ResponseWriter, r *http.Request) bool {
+	credentials, ok := PeerCredentialsFromContext(r.Context())
+	if !ok || credentials.UID != 0 {
+		writeJSON(w, http.StatusForbidden, errorEnvelope{Error: apiError{Code: "forbidden", Message: "root Unix peer credentials are required"}})
+		return false
+	}
+	return true
 }
 
 func (s *Server) planBundle(w http.ResponseWriter, r *http.Request) {
@@ -371,16 +447,20 @@ func (s *Server) setEnabled(w http.ResponseWriter, r *http.Request, enabled bool
 }
 
 func parseWait(r *http.Request) (bool, error) {
-	values, ok := r.URL.Query()["wait"]
+	return parseBoolQuery(r, "wait")
+}
+
+func parseBoolQuery(r *http.Request, name string) (bool, error) {
+	values, ok := r.URL.Query()[name]
 	if !ok {
 		return false, nil
 	}
 	if len(values) != 1 {
-		return false, errors.New("wait query parameter must occur once")
+		return false, fmt.Errorf("%s query parameter must occur once", name)
 	}
 	wait, err := strconv.ParseBool(values[0])
 	if err != nil {
-		return false, errors.New("wait query parameter must be true or false")
+		return false, fmt.Errorf("%s query parameter must be true or false", name)
 	}
 	return wait, nil
 }

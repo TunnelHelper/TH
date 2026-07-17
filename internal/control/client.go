@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/TunnelHelper/TH/internal/backup"
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 )
@@ -204,6 +205,60 @@ func (c *Client) ApplyBundle(ctx context.Context, bundle model.Bundle, prune, wa
 	return response, nil
 }
 
+func (c *Client) Backup(ctx context.Context, passphrase string, writer io.Writer) error {
+	data, err := json.Marshal(backupRequest{Passphrase: passphrase})
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix/v1/admin/backup", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("contact thd: %w", err)
+	}
+	defer response.Body.Close()
+	if err := decodeAPIResponseError(response); err != nil {
+		return err
+	}
+	written, err := io.Copy(writer, io.LimitReader(response.Body, backup.MaxEncryptedBytes+1))
+	if err != nil {
+		return fmt.Errorf("download encrypted backup: %w", err)
+	}
+	if written > backup.MaxEncryptedBytes {
+		return errors.New("encrypted backup exceeds size limit")
+	}
+	if trailerError := response.Trailer.Get("X-TH-Backup-Error"); trailerError != "" {
+		return fmt.Errorf("daemon failed to encrypt backup: %s", trailerError)
+	}
+	return nil
+}
+
+func (c *Client) RestoreBackup(ctx context.Context, passphrase string, reader io.Reader, check, wait bool) (core.RestoreResult, error) {
+	path := "/v1/admin/restore?check=" + strconv.FormatBool(check) + "&wait=" + strconv.FormatBool(wait)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix"+path, io.LimitReader(reader, backup.MaxEncryptedBytes+1))
+	if err != nil {
+		return core.RestoreResult{}, err
+	}
+	request.Header.Set("Content-Type", "application/octet-stream")
+	request.Header.Set("X-TH-Backup-Passphrase", passphrase)
+	response, err := c.http.Do(request)
+	if err != nil {
+		return core.RestoreResult{}, fmt.Errorf("contact thd: %w", err)
+	}
+	defer response.Body.Close()
+	if err := decodeAPIResponseError(response); err != nil {
+		return core.RestoreResult{}, err
+	}
+	var result core.RestoreResult
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<20)).Decode(&result); err != nil {
+		return core.RestoreResult{}, fmt.Errorf("decode daemon response: %w", err)
+	}
+	return result, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any, generation uint64, target any) error {
 	var reader io.Reader
 	if body != nil {
@@ -228,12 +283,8 @@ func (c *Client) do(ctx context.Context, method, path string, body any, generati
 		return fmt.Errorf("contact thd: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		var envelope errorEnvelope
-		if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&envelope); err != nil {
-			return fmt.Errorf("daemon returned HTTP %d", response.StatusCode)
-		}
-		return &APIError{Status: response.StatusCode, Code: envelope.Error.Code, Message: envelope.Error.Message}
+	if err := decodeAPIResponseError(response); err != nil {
+		return err
 	}
 	if target == nil || response.StatusCode == http.StatusNoContent {
 		return nil
@@ -243,4 +294,15 @@ func (c *Client) do(ctx context.Context, method, path string, body any, generati
 		return fmt.Errorf("decode daemon response: %w", err)
 	}
 	return nil
+}
+
+func decodeAPIResponseError(response *http.Response) error {
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		return nil
+	}
+	var envelope errorEnvelope
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&envelope); err != nil {
+		return fmt.Errorf("daemon returned HTTP %d", response.StatusCode)
+	}
+	return &APIError{Status: response.StatusCode, Code: envelope.Error.Code, Message: envelope.Error.Message}
 }

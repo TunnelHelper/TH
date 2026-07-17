@@ -107,6 +107,10 @@ th watch
 th validate tunnels.json
 th plan tunnels.json
 th apply tunnels.json --wait
+th export --redacted --output tunnels.json
+sudo th backup th-backup.age
+sudo th restore th-backup.age --check
+sudo th restore th-backup.age --wait
 th list
 th get RECORD_ID
 th create tunnel.json
@@ -126,6 +130,12 @@ directory of `.json` files. `plan` and `apply` preserve records omitted from the
 input unless `--prune` is explicit. Batch validation checks the complete final
 ownership set before writing; an apply failure rolls desired state back and
 queues runtime repair.
+
+`export --redacted` is safe for review and declarative reuse. The root-only
+backup command instead includes every stored private key and PSK, verifies an
+internal SHA-256, and encrypts the archive with the standard age scrypt format.
+The destination must not already exist. Supply a private `--passphrase-file`,
+set `TH_BACKUP_PASSPHRASE`, or enter the passphrase on a TTY.
 
 `th doctor` distinguishes unavailable optional backends from capabilities
 required by enabled records. `th health` reports daemon, API, schema, backend,

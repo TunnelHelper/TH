@@ -12,7 +12,16 @@ import (
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/config"
+	"golang.org/x/sys/unix"
 )
+
+type PeerCredentials struct {
+	PID int32
+	UID uint32
+	GID uint32
+}
+
+type peerCredentialsContextKey struct{}
 
 func ServeUnix(ctx context.Context, settings config.Settings, handler http.Handler, logger *slog.Logger) error {
 	listener, socketInfo, err := listenUnix(settings)
@@ -33,6 +42,13 @@ func ServeUnix(ctx context.Context, settings config.Settings, handler http.Handl
 		MaxHeaderBytes:    32 << 10,
 		BaseContext: func(net.Listener) context.Context {
 			return ctx
+		},
+		ConnContext: func(connectionContext context.Context, connection net.Conn) context.Context {
+			credentials, err := unixPeerCredentials(connection)
+			if err != nil {
+				return connectionContext
+			}
+			return context.WithValue(connectionContext, peerCredentialsContextKey{}, credentials)
 		},
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}
@@ -55,6 +71,35 @@ func ServeUnix(ctx context.Context, settings config.Settings, handler http.Handl
 		<-shutdownDone
 	}
 	return err
+}
+
+func PeerCredentialsFromContext(ctx context.Context) (PeerCredentials, bool) {
+	credentials, ok := ctx.Value(peerCredentialsContextKey{}).(PeerCredentials)
+	return credentials, ok
+}
+
+func unixPeerCredentials(connection net.Conn) (PeerCredentials, error) {
+	unixConnection, ok := connection.(*net.UnixConn)
+	if !ok {
+		return PeerCredentials{}, errors.New("connection is not Unix")
+	}
+	raw, err := unixConnection.SyscallConn()
+	if err != nil {
+		return PeerCredentials{}, err
+	}
+	var (
+		credentials *unix.Ucred
+		controlErr  error
+	)
+	if err := raw.Control(func(fd uintptr) {
+		credentials, controlErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		return PeerCredentials{}, err
+	}
+	if controlErr != nil {
+		return PeerCredentials{}, controlErr
+	}
+	return PeerCredentials{PID: credentials.Pid, UID: credentials.Uid, GID: credentials.Gid}, nil
 }
 
 func listenUnix(settings config.Settings) (*net.UnixListener, os.FileInfo, error) {

@@ -84,6 +84,29 @@ atomic from the operator's perspective.
 
 ## Backup And Restore
 
+The recommended online backup is encrypted and does not require stopping the
+daemon:
+
+```bash
+sudo th backup /secure/path/th-backup.age
+sudo th restore /secure/path/th-backup.age --check
+sudo th restore /secure/path/th-backup.age --wait
+```
+
+The archive contains the complete desired-state store and all live tunnel key
+material. It uses age scrypt authenticated encryption plus an internal SHA-256.
+Only a UID 0 Unix-socket peer can call the backup/restore API. Backup output is
+created with mode `0600` and never replaces an existing path. Passphrases are
+read from a mode `0600` regular file, `TH_BACKUP_PASSPHRASE`, or a no-echo TTY
+prompt. `--check` performs decryption, integrity, schema, record, and ownership
+validation without changing state.
+
+Daemon host settings in `/etc/th/thd.json` are not part of the portable state
+archive because restoring runtime/socket paths while the service is running is
+unsafe. Preserve that file separately when it differs from package defaults.
+
+The offline filesystem procedure remains available for disaster recovery:
+
 For a consistent offline backup:
 
 1. Stop `thd` using the platform service manager.

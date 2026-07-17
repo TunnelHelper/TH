@@ -39,6 +39,12 @@ func runCLI(client *control.Client, timeout time.Duration, socketPath string, ar
 		return nil
 	case "watch":
 		return runWatch(client, args)
+	case "export":
+		return runExport(ctx, client, args)
+	case "backup":
+		return runBackup(ctx, client, args)
+	case "restore":
+		return runRestore(ctx, client, args)
 	case "validate", "plan", "apply":
 		path, prune, wait, err := parseBundleCommand(args)
 		if err != nil {
