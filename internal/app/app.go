@@ -11,6 +11,7 @@ import (
 
 	"github.com/TunnelHelper/TH/internal/config"
 	"github.com/TunnelHelper/TH/internal/control"
+	"github.com/TunnelHelper/TH/internal/version"
 	"github.com/charmbracelet/huh"
 )
 
@@ -24,8 +25,12 @@ func Run(args []string) error {
 	}
 	socket := flags.String("socket", socketDefault, "thd control socket")
 	timeout := flags.Duration("timeout", 15*time.Second, "daemon request timeout")
+	showVersion := flags.Bool("version", false, "show client version")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *showVersion {
+		return outputJSON(version.Current(), nil)
 	}
 	if *timeout <= 0 {
 		return errors.New("timeout must be positive")
@@ -40,7 +45,7 @@ func Run(args []string) error {
 		}
 		return runTUI(client, *timeout)
 	}
-	return runCLI(client, *timeout, remaining)
+	return runCLI(client, *timeout, *socket, remaining)
 }
 
 func wrapAbort(err error) error {
@@ -54,5 +59,5 @@ func wrapAbort(err error) error {
 }
 
 func usageError() error {
-	return fmt.Errorf("usage: th [--socket PATH] [tui|health|list|get ID|create FILE|update FILE|enable ID|disable ID|delete ID|reconcile [ID]]")
+	return fmt.Errorf("usage: th [--socket PATH] [tui|version|doctor|health|list|get ID|create FILE|update FILE|enable ID|disable ID|delete ID|reconcile [ID]]")
 }

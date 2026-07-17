@@ -18,6 +18,12 @@ by Unix directory and socket permissions. Responses include
 - `POST /v1/tunnels/{id}/reconcile`
 - `POST /v1/reconcile`
 
+The health response includes `alive`, configured-tunnel `ready`, daemon build
+information, the state schema version, backend capability status, and tunnel
+counts. A backend has `required: true` only when at least one enabled record
+currently uses it. Missing optional capabilities therefore do not make the
+daemon itself unready.
+
 Create accepts a tunnel object. Server-owned metadata such as schema version,
 UUID, generation, and timestamps is prepared by the daemon. For example:
 

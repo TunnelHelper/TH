@@ -14,6 +14,7 @@ type Observation struct {
 
 type BackendHealth struct {
 	Available bool   `json:"available"`
+	Required  bool   `json:"required"`
 	Message   string `json:"message,omitempty"`
 }
 

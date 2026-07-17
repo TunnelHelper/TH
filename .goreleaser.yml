@@ -22,7 +22,11 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w
+      - >-
+        -s -w
+        -X github.com/TunnelHelper/TH/internal/version.Version={{ .Version }}
+        -X github.com/TunnelHelper/TH/internal/version.Commit={{ .Commit }}
+        -X github.com/TunnelHelper/TH/internal/version.Date={{ .Date }}
     binary: th
   - id: thd
     main: ./cmd/thd
@@ -39,7 +43,11 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w
+      - >-
+        -s -w
+        -X github.com/TunnelHelper/TH/internal/version.Version={{ .Version }}
+        -X github.com/TunnelHelper/TH/internal/version.Commit={{ .Commit }}
+        -X github.com/TunnelHelper/TH/internal/version.Date={{ .Date }}
     binary: thd
 
 archives:

@@ -66,11 +66,11 @@ func (a *tuiApp) loadHealth() error {
 	timeout := min(a.timeout, tuiHealthTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	health, err := a.client.Health(ctx)
+	response, err := a.client.Health(ctx)
 	if err != nil {
 		return err
 	}
-	a.health = health
+	a.health = response.Backends
 	return nil
 }
 

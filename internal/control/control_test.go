@@ -71,6 +71,70 @@ func TestServerAPIContracts(t *testing.T) {
 	assertAPIError(t, response, http.StatusNotFound, "not_found")
 }
 
+func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
+	tests := []struct {
+		name      string
+		views     []model.TunnelView
+		health    map[model.Kind]core.BackendHealth
+		wantReady bool
+		wantReq   bool
+	}{
+		{
+			name:      "unused optional backend unavailable",
+			views:     []model.TunnelView{},
+			health:    map[model.Kind]core.BackendHealth{model.KindAmneziaWG: {Available: false, Message: "missing"}},
+			wantReady: true,
+		},
+		{
+			name: "required backend unavailable",
+			views: []model.TunnelView{{
+				Tunnel: model.Tunnel{Kind: model.KindAmneziaWG, Enabled: true},
+				Status: model.Status{Phase: model.PhaseReady},
+			}},
+			health:    map[model.Kind]core.BackendHealth{model.KindAmneziaWG: {Available: false, Message: "missing"}},
+			wantReady: false,
+			wantReq:   true,
+		},
+		{
+			name: "configured tunnel pending",
+			views: []model.TunnelView{{
+				Tunnel: model.Tunnel{Kind: model.KindGRE, Enabled: true},
+				Status: model.Status{Phase: model.PhasePending},
+			}},
+			health:    map[model.Kind]core.BackendHealth{model.KindGRE: {Available: true}},
+			wantReady: false,
+			wantReq:   true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := &stubManager{views: test.views, health: test.health}
+			server := httptest.NewServer(NewServer(manager).Handler())
+			defer server.Close()
+			response, err := http.Get(server.URL + "/v1/health")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			var health HealthResponse
+			if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+				t.Fatal(err)
+			}
+			if health.Ready != test.wantReady {
+				t.Fatalf("Ready = %t, want %t", health.Ready, test.wantReady)
+			}
+			for kind, item := range health.Backends {
+				if item.Required != test.wantReq {
+					t.Fatalf("backend %s Required = %t, want %t", kind, item.Required, test.wantReq)
+				}
+			}
+			if health.APIVersion != APIVersion || health.SchemaVersion != model.SchemaVersion || !health.Alive {
+				t.Fatalf("health metadata = %+v", health)
+			}
+		})
+	}
+}
+
 func TestUnixServerAndTypedClient(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("Unix socket ownership test requires root, as does thd")
@@ -158,11 +222,18 @@ func assertAPIError(t *testing.T, response *http.Response, status int, code stri
 
 type stubManager struct {
 	view      model.TunnelView
+	views     []model.TunnelView
+	health    map[model.Kind]core.BackendHealth
 	getErr    error
 	updateErr error
 }
 
-func (m *stubManager) List() ([]model.TunnelView, error) { return []model.TunnelView{m.view}, nil }
+func (m *stubManager) List() ([]model.TunnelView, error) {
+	if m.views != nil {
+		return m.views, nil
+	}
+	return []model.TunnelView{m.view}, nil
+}
 func (m *stubManager) Get(string) (model.TunnelView, error) {
 	return m.view, m.getErr
 }
@@ -183,5 +254,8 @@ func (m *stubManager) ReconcileAll(context.Context) ([]model.TunnelView, error) 
 	return []model.TunnelView{m.view}, nil
 }
 func (m *stubManager) Health(context.Context) map[model.Kind]core.BackendHealth {
+	if m.health != nil {
+		return m.health
+	}
 	return map[model.Kind]core.BackendHealth{model.KindGRE: {Available: true}}
 }

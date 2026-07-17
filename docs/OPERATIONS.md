@@ -51,6 +51,11 @@ release, so verify capabilities rather than relying on a package name:
 Missing capabilities are returned as backend health or reconciliation errors.
 The daemon does not invoke a package manager or module loader.
 
+Run `th doctor` after installation or an upgrade to verify the control socket,
+API and schema compatibility, binary versions, required backends, and enabled
+tunnel readiness. Optional backends that are not used are warnings rather than
+daemon readiness failures.
+
 ## strongSwan VICI
 
 Enable the strongSwan VICI plugin and make its Unix socket reachable by the

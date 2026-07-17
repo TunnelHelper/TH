@@ -52,3 +52,13 @@ func TestReadTunnelRejectsMultipleJSONValues(t *testing.T) {
 		t.Fatal("multiple JSON values were accepted")
 	}
 }
+
+func TestDiagnoseMissingSocket(t *testing.T) {
+	report := diagnose(t.Context(), filepath.Join(t.TempDir(), "missing.sock"), nil)
+	if report.OK || len(report.Checks) != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+	if report.Checks[0].Name != "control_socket" || report.Checks[0].Status != "fail" {
+		t.Fatalf("check = %+v", report.Checks[0])
+	}
+}

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/TunnelHelper/TH/internal/control"
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/store"
+	"github.com/TunnelHelper/TH/internal/version"
 )
 
 func main() {
@@ -37,8 +39,12 @@ func run(args []string) error {
 	viciSocket := flags.String("vici-socket", "", "override strongSwan VICI socket path")
 	socketGID := flags.Int("socket-gid", -1, "override control socket group ID")
 	reconcileInterval := flags.Duration("reconcile-interval", 0, "override reconcile interval")
+	showVersion := flags.Bool("version", false, "show daemon version")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *showVersion {
+		return json.NewEncoder(os.Stdout).Encode(version.Current())
 	}
 	if flags.NArg() != 0 {
 		return errors.New("thd does not accept positional arguments")

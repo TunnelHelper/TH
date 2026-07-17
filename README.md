@@ -101,6 +101,8 @@ With no command, `th` opens the TUI. The same API is scriptable:
 
 ```bash
 th health
+th doctor
+th version
 th list
 th get RECORD_ID
 th create tunnel.json
@@ -110,6 +112,10 @@ th disable RECORD_ID
 th reconcile RECORD_ID
 th delete RECORD_ID
 ```
+
+`th doctor` distinguishes unavailable optional backends from capabilities
+required by enabled records. `th health` reports daemon, API, schema, backend,
+and configured-tunnel readiness separately.
 
 Use `-` instead of a filename for JSON on stdin. Updates require the current
 `id` and `generation`, so a stale client cannot overwrite a newer record.

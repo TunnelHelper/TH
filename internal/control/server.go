@@ -13,6 +13,7 @@ import (
 
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
+	"github.com/TunnelHelper/TH/internal/version"
 )
 
 const APIVersion = "v1"
@@ -52,6 +53,25 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
+type TunnelHealthSummary struct {
+	Total    int `json:"total"`
+	Enabled  int `json:"enabled"`
+	Ready    int `json:"ready"`
+	Pending  int `json:"pending"`
+	Error    int `json:"error"`
+	Disabled int `json:"disabled"`
+}
+
+type HealthResponse struct {
+	APIVersion    string                            `json:"api_version"`
+	SchemaVersion int                               `json:"schema_version"`
+	Alive         bool                              `json:"alive"`
+	Ready         bool                              `json:"ready"`
+	Daemon        version.Info                      `json:"daemon"`
+	Backends      map[model.Kind]core.BackendHealth `json:"backends"`
+	Tunnels       TunnelHealthSummary               `json:"tunnels"`
+}
+
 func NewServer(manager Manager) *Server {
 	server := &Server{manager: manager, mux: http.NewServeMux()}
 	server.mux.HandleFunc("GET /v1/health", server.health)
@@ -80,16 +100,44 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	health := s.manager.Health(r.Context())
+	views, err := s.manager.List()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	ready := true
-	for _, item := range health {
+	summary := TunnelHealthSummary{Total: len(views)}
+	for _, view := range views {
+		if !view.Tunnel.Enabled {
+			summary.Disabled++
+			continue
+		}
+		summary.Enabled++
+		item := health[view.Tunnel.Kind]
+		item.Required = true
+		health[view.Tunnel.Kind] = item
 		if !item.Available {
 			ready = false
 		}
+		switch view.Status.Phase {
+		case model.PhaseReady:
+			summary.Ready++
+		case model.PhaseError:
+			summary.Error++
+			ready = false
+		default:
+			summary.Pending++
+			ready = false
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"api_version": APIVersion,
-		"ready":       ready,
-		"backends":    health,
+	writeJSON(w, http.StatusOK, HealthResponse{
+		APIVersion:    APIVersion,
+		SchemaVersion: model.SchemaVersion,
+		Alive:         true,
+		Ready:         ready,
+		Daemon:        version.Current(),
+		Backends:      health,
+		Tunnels:       summary,
 	})
 }
 

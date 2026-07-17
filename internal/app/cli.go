@@ -12,13 +12,31 @@ import (
 
 	"github.com/TunnelHelper/TH/internal/control"
 	"github.com/TunnelHelper/TH/internal/model"
+	"github.com/TunnelHelper/TH/internal/version"
 )
 
-func runCLI(client *control.Client, timeout time.Duration, args []string) error {
+func runCLI(client *control.Client, timeout time.Duration, socketPath string, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	command := args[0]
 	switch command {
+	case "version":
+		if len(args) != 1 {
+			return usageError()
+		}
+		return outputJSON(version.Current(), nil)
+	case "doctor":
+		if len(args) != 1 {
+			return usageError()
+		}
+		report := diagnose(ctx, socketPath, client)
+		if err := outputJSON(report, nil); err != nil {
+			return err
+		}
+		if !report.OK {
+			return ErrDoctorFailed
+		}
+		return nil
 	case "health":
 		if len(args) != 1 {
 			return usageError()

@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 )
 
@@ -44,14 +43,12 @@ func (c *Client) CloseIdleConnections() {
 	c.http.CloseIdleConnections()
 }
 
-func (c *Client) Health(ctx context.Context) (map[model.Kind]core.BackendHealth, error) {
-	var response struct {
-		Backends map[model.Kind]core.BackendHealth `json:"backends"`
-	}
+func (c *Client) Health(ctx context.Context) (HealthResponse, error) {
+	var response HealthResponse
 	if err := c.do(ctx, http.MethodGet, "/v1/health", nil, 0, &response); err != nil {
-		return nil, err
+		return HealthResponse{}, err
 	}
-	return response.Backends, nil
+	return response, nil
 }
 
 func (c *Client) List(ctx context.Context) ([]model.TunnelView, error) {
