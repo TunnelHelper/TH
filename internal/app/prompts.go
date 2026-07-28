@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/TunnelHelper/TH/internal/ui"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -19,6 +20,11 @@ type prompts struct {
 
 func newPrompts(output *ui.UI) *prompts {
 	return &prompts{ui: output, prompter: ui.NewPrompter(output)}
+}
+
+func (p *prompts) section(title, description string) {
+	p.ui.Title(title)
+	p.ui.Dim(description)
 }
 
 func (p *prompts) selectValue(title string, options []ui.Option, value *string) error {
@@ -120,9 +126,33 @@ func validateIKEAddrInput(value string) error {
 	return validateAddrInput(value)
 }
 
-func validatePrefixesInput(value string) error {
-	_, err := parsePrefixes(value)
-	return err
+func validateInterfacePrefixesInput(value string) error {
+	return validatePrefixList(value, model.MaxInterfaceAddresses, false)
+}
+
+func validateAllowedPrefixesInput(value string) error {
+	return validatePrefixList(value, model.MaxAllowedIPsPerPeer, true)
+}
+
+func validatePrefixList(value string, maximum int, masked bool) error {
+	prefixes, err := parsePrefixes(value)
+	if err != nil {
+		return err
+	}
+	if len(prefixes) > maximum {
+		return fmt.Errorf("must contain at most %d prefixes", maximum)
+	}
+	seen := make(map[netip.Prefix]struct{}, len(prefixes))
+	for _, prefix := range prefixes {
+		if masked {
+			prefix = prefix.Masked()
+		}
+		if _, exists := seen[prefix]; exists {
+			return fmt.Errorf("duplicate prefix %s", prefix)
+		}
+		seen[prefix] = struct{}{}
+	}
+	return nil
 }
 
 func parsePrefixes(value string) ([]netip.Prefix, error) {

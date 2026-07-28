@@ -176,7 +176,11 @@ func readBackupPassphrase(path string, confirm bool) (string, error) {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			return "", errors.New("set TH_BACKUP_PASSPHRASE, use --passphrase-file, or run from a terminal")
 		}
-		fmt.Fprint(os.Stderr, "Backup passphrase: ")
+		operation := "Restore"
+		if confirm {
+			operation = "Backup"
+		}
+		fmt.Fprintf(os.Stderr, "%s passphrase: ", operation)
 		data, err := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Fprintln(os.Stderr)
 		if err != nil {

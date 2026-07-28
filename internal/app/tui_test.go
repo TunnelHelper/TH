@@ -38,6 +38,16 @@ func TestMainMenuDimsUnavailableBackends(t *testing.T) {
 	}
 }
 
+func TestMainMenuDefaultsToManagementWorkflow(t *testing.T) {
+	options := (&tuiApp{}).mainMenuOptions()
+	if len(options) < 2 || options[0].Value != "manage" || options[1].Value != "watch" {
+		t.Fatalf("main menu order = %+v", options)
+	}
+	if len(options) < 4 || options[2].Value != string(model.KindWireGuard) || options[3].Value != string(model.KindAmneziaWG) {
+		t.Fatalf("V1 creation order was not retained: %+v", options)
+	}
+}
+
 func TestAmneziaUnavailableWarningHidesLowLevelNetlinkError(t *testing.T) {
 	message := shortUnavailableWarning(model.KindAmneziaWG, core.BackendHealth{
 		Message: "resolve amneziawg generic-netlink family: netlink receive: no such file or directory",

@@ -32,7 +32,7 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 		output.Warn("thd unavailable")
 	}
 	for {
-		choice := "watch"
+		choice := "manage"
 		output.Title("TH V2")
 		err := app.prompts.selectValue("Action", app.mainMenuOptions(), &choice)
 		if errors.Is(err, ErrAborted) || choice == "exit" {
@@ -82,14 +82,14 @@ func (a *tuiApp) loadHealth() error {
 
 func (a *tuiApp) mainMenuOptions() []ui.Option {
 	options := []ui.Option{
-		{Label: "Live status", Value: "watch"},
 		{Label: "Manage tunnels", Value: "manage"},
-		{Label: "Create GRE", Value: string(model.KindGRE)},
-		{Label: "Create VXLAN", Value: string(model.KindVXLAN)},
+		{Label: "Live status", Value: "watch"},
 		{Label: "Create WireGuard", Value: string(model.KindWireGuard)},
 		{Label: "Create AmneziaWG", Value: string(model.KindAmneziaWG)},
-		{Label: "Create static XFRM", Value: string(model.KindXFRMStatic)},
+		{Label: "Create VXLAN", Value: string(model.KindVXLAN)},
+		{Label: "Create GRE", Value: string(model.KindGRE)},
 		{Label: "Create IKEv2 XFRM", Value: string(model.KindXFRMIKEv2)},
+		{Label: "Create static XFRM", Value: string(model.KindXFRMStatic)},
 		{Label: "Create SRv6", Value: string(model.KindSRv6)},
 		{Label: "Exit", Value: "exit"},
 	}
@@ -118,22 +118,109 @@ func shortUnavailableWarning(kind model.Kind, _ core.BackendHealth) string {
 }
 
 func (a *tuiApp) create(kind model.Kind) error {
-	record, err := collectTunnel(a.prompts, kind, nil)
+	ctx, cancel := a.context()
+	views, err := a.client.List(ctx)
+	cancel()
+	if err != nil {
+		return err
+	}
+	if kind == model.KindSRv6 {
+		if handled, err := a.offerExistingSRv6(views); handled || err != nil {
+			return err
+		}
+	}
+	record, err := collectTunnel(a.prompts, kind, nil, suggestedTunnelName(kind, views), views)
 	if err != nil {
 		return err
 	}
 	if err := model.PrepareNew(&record, time.Now()); err != nil {
 		return err
 	}
-	ctx, cancel := a.context()
-	defer cancel()
+	if record.Kind == model.KindXFRMStatic {
+		a.ui.HR()
+		showStaticXFRMPairing(a.ui, record.Spec.XFRMStatic)
+		a.ui.HR()
+	}
+	showTunnelSummary(a.ui, record)
+	action := "enable"
+	if err := a.prompts.selectValue("Create tunnel", createActionOptions(), &action); err != nil {
+		return err
+	}
+	if action == "back" {
+		return nil
+	}
+	record.Enabled = action == "enable"
+	ctx, cancel = a.context()
 	view, err := a.client.Create(ctx, record)
+	cancel()
 	if err != nil {
 		return err
 	}
-	a.ui.Ok(fmt.Sprintf("Created %s (%s)", view.Tunnel.Name, view.Tunnel.ID))
+	ctx, cancel = a.context()
+	reconciled, reconcileErr := a.client.Reconcile(ctx, view.Tunnel.ID)
+	cancel()
+	if reconcileErr != nil {
+		a.ui.Warn(fmt.Sprintf("Saved %s (%s), but applying it failed: %v", view.Tunnel.Name, view.Tunnel.ID, reconcileErr))
+		return nil
+	}
+	view = reconciled
+	if view.Status.Phase == model.PhaseError {
+		a.ui.Warn(fmt.Sprintf("Saved %s (%s), but it did not become ready", view.Tunnel.Name, view.Tunnel.ID))
+	} else {
+		a.ui.Ok(fmt.Sprintf("Created %s (%s): %s", view.Tunnel.Name, view.Tunnel.ID, view.Status.Phase))
+	}
 	showCreatedMaterial(a.ui, record, view)
 	return nil
+}
+
+func createActionOptions() []ui.Option {
+	return []ui.Option{
+		{Label: "Create and enable", Value: "enable"},
+		{Label: "Create disabled", Value: "disable"},
+		{Label: "Back without creating", Value: "back"},
+	}
+}
+
+func suggestedTunnelName(kind model.Kind, views []model.TunnelView) string {
+	base := defaultTunnelName(kind)
+	used := make(map[string]bool, len(views))
+	for _, view := range views {
+		used[view.Tunnel.Name] = true
+	}
+	if !used[base] {
+		return base
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := base + strconv.Itoa(suffix)
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
+func (a *tuiApp) offerExistingSRv6(views []model.TunnelView) (bool, error) {
+	for _, view := range views {
+		if view.Tunnel.Kind != model.KindSRv6 {
+			continue
+		}
+		choice := "manage"
+		if err := a.prompts.selectValue("SRv6 is already configured", []ui.Option{
+			{Label: "Manage " + view.Tunnel.Name, Value: "manage"},
+			{Label: "Create another SRv6 configuration", Value: "create"},
+			{Label: "Back", Value: "back"},
+		}, &choice); err != nil {
+			return true, err
+		}
+		switch choice {
+		case "manage":
+			return true, a.manageOne(view)
+		case "back":
+			return true, nil
+		default:
+			return false, nil
+		}
+	}
+	return false, nil
 }
 
 func (a *tuiApp) manage() error {
@@ -145,8 +232,8 @@ func (a *tuiApp) manage() error {
 			return err
 		}
 		if len(views) == 0 {
-			a.ui.Warn("No managed tunnels")
-			return nil
+			choice := "back"
+			return a.prompts.selectValue("Managed tunnels", []ui.Option{{Label: "No tunnels yet - Back", Value: "back"}}, &choice)
 		}
 		options := make([]ui.Option, 0, len(views)+1)
 		for i, view := range views {
@@ -204,15 +291,26 @@ func (a *tuiApp) manageOne(view model.TunnelView) error {
 		case "status":
 			view, err = a.client.Get(ctx, view.Tunnel.ID)
 		case "toggle":
+			action := "Disabled"
+			if !view.Tunnel.Enabled {
+				action = "Enabled"
+			}
 			view, err = a.client.SetEnabled(ctx, view, !view.Tunnel.Enabled)
+			cancel()
+			if err == nil {
+				view, err = a.reconcileMutation(view, action)
+			}
 		case "reconcile":
 			view, err = a.client.Reconcile(ctx, view.Tunnel.ID)
 		case "edit":
 			cancel()
 			current := view.Tunnel
-			updated, collectErr := collectTunnel(a.prompts, current.Kind, &current)
+			updated, saved, collectErr := editTunnel(a.prompts, current)
 			if collectErr != nil {
 				return collectErr
+			}
+			if !saved {
+				continue
 			}
 			generatedReplacement := replacementSecretsRequired(view.Tunnel, updated)
 			if generatedReplacement {
@@ -225,12 +323,21 @@ func (a *tuiApp) manageOne(view model.TunnelView) error {
 			}
 			ctx, cancel = a.context()
 			view, err = a.client.Update(ctx, model.TunnelView{Tunnel: updated})
+			cancel()
+			if err == nil {
+				view, err = a.reconcileMutation(view, "Updated")
+			}
 			if err == nil && generatedReplacement {
 				showCreatedMaterial(a.ui, updated, view)
 			}
 		case "delete":
 			cancel()
-			confirmed, confirmErr := a.prompts.confirm("Delete this tunnel", false)
+			target := view.Tunnel.Name
+			if view.Tunnel.Interface != "" {
+				target += " (" + view.Tunnel.Interface + ")"
+			}
+			message := fmt.Sprintf("Delete %s and remove its managed network state", target)
+			confirmed, confirmErr := a.prompts.confirm(message, false)
 			if confirmErr != nil {
 				return confirmErr
 			}
@@ -251,6 +358,22 @@ func (a *tuiApp) manageOne(view model.TunnelView) error {
 			return err
 		}
 	}
+}
+
+func (a *tuiApp) reconcileMutation(saved model.TunnelView, action string) (model.TunnelView, error) {
+	ctx, cancel := a.context()
+	defer cancel()
+	view, err := a.client.Reconcile(ctx, saved.Tunnel.ID)
+	if err != nil {
+		a.ui.Warn(fmt.Sprintf("%s configuration was saved, but applying it failed: %v", action, err))
+		return saved, nil
+	}
+	if view.Status.Phase == model.PhaseError {
+		a.ui.Warn(fmt.Sprintf("%s configuration was saved, but the tunnel is in error state", action))
+		return view, nil
+	}
+	a.ui.Ok(fmt.Sprintf("%s %s: %s", action, view.Tunnel.Name, view.Status.Phase))
+	return view, nil
 }
 
 func replacementSecretsRequired(current, next model.Tunnel) bool {
@@ -306,21 +429,12 @@ func showCreatedMaterial(output *ui.UI, record model.Tunnel, view model.TunnelVi
 	output.HR()
 	switch record.Kind {
 	case model.KindWireGuard:
-		fmt.Fprintf(output.Out, "Public key: %s\n", record.Spec.WireGuard.PublicKey)
+		showWireGuardPeerReference(output, record.Spec.WireGuard, "")
 	case model.KindAmneziaWG:
 		spec := record.Spec.AmneziaWG
-		fmt.Fprintf(output.Out, "Public key: %s\n", spec.PublicKey)
-		fmt.Fprintf(output.Out, "Obfuscation: %d,%d,%d,%d,%d,%s,%s,%s,%s\n",
-			spec.JunkPacketCount, spec.JunkPacketMinSize, spec.JunkPacketMaxSize,
-			spec.InitPacketJunkSize, spec.ResponsePacketJunkSize,
-			spec.InitMagicHeader, spec.ResponseMagicHeader, spec.UnderloadMagicHeader, spec.TransportMagicHeader)
+		showWireGuardPeerReference(output, &spec.WireGuardSpec, formatAmneziaParameters(spec))
 	case model.KindXFRMStatic:
-		spec := record.Spec.XFRMStatic
-		fmt.Fprintf(output.Out, "Inbound SPI: 0x%x\nOutbound SPI: 0x%x\n", spec.SPIInbound, spec.SPIOutbound)
-		fmt.Fprintf(output.Out, "Inbound encryption key: %s\nOutbound encryption key: %s\n", spec.EncryptionKeyIn, spec.EncryptionKeyOut)
-		if spec.AuthenticationKeyIn != "" {
-			fmt.Fprintf(output.Out, "Inbound authentication key: %s\nOutbound authentication key: %s\n", spec.AuthenticationKeyIn, spec.AuthenticationKeyOut)
-		}
+		showStaticXFRMPairing(output, record.Spec.XFRMStatic)
 	case model.KindXFRMIKEv2:
 		spec := record.Spec.XFRMIKEv2
 		if spec.AuthMethod == model.IKEAuthPSK {

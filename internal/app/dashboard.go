@@ -159,6 +159,8 @@ func (m dashboardModel) View() string {
 	if m.err != nil {
 		lines = append(lines, "", lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(fit(m.err.Error(), width)))
 	}
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	lines = append(lines, "", hintStyle.Render(fit("up/down or j/k: select   r: refresh", width)), hintStyle.Render("q/esc: back"))
 	return strings.Join(lines, "\n")
 }
 
@@ -259,7 +261,7 @@ func sortDashboardViews(views []model.TunnelView) {
 
 func (m dashboardModel) visibleRange() (int, int) {
 	rows := len(m.views)
-	maxRows := m.height - 12
+	maxRows := m.height - 15
 	if maxRows < 1 || maxRows > rows {
 		maxRows = rows
 	}

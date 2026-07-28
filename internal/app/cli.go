@@ -20,6 +20,12 @@ func runCLI(client *control.Client, timeout time.Duration, socketPath string, ar
 	defer cancel()
 	command := args[0]
 	switch command {
+	case "help":
+		if len(args) != 1 {
+			return usageError()
+		}
+		_, err := fmt.Fprint(os.Stdout, usageText)
+		return err
 	case "version":
 		if len(args) != 1 {
 			return usageError()

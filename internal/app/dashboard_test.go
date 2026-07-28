@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -21,6 +22,15 @@ func TestDashboardUpsertSortAndDelete(t *testing.T) {
 	modelState.remove("a")
 	if len(modelState.views) != 1 || modelState.views[0].Tunnel.ID != "b" {
 		t.Fatalf("remaining views = %+v", modelState.views)
+	}
+}
+
+func TestDashboardAlwaysShowsNavigationHints(t *testing.T) {
+	view := (dashboardModel{width: 40, height: 30}).View()
+	for _, hint := range []string{"j/k", "r: refresh", "q/esc: back"} {
+		if !strings.Contains(view, hint) {
+			t.Fatalf("dashboard does not show %q:\n%s", hint, view)
+		}
 	}
 }
 

@@ -76,6 +76,28 @@ func TestRedactAndMergeWireGuardSecrets(t *testing.T) {
 	}
 }
 
+func TestWireGuardPresharedKeyCanBeExplicitlyCleared(t *testing.T) {
+	peerPrivate, _ := wgtypes.GeneratePrivateKey()
+	psk, _ := wgtypes.GenerateKey()
+	record := Tunnel{
+		Name: "wg", Kind: KindWireGuard, Interface: "wg0",
+		Spec: Spec{WireGuard: &WireGuardSpec{Peers: []WireGuardPeer{{
+			PublicKey: peerPrivate.PublicKey().String(), PresharedKey: psk.String(),
+		}}}},
+	}
+	if err := PrepareNew(&record, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := Clone(record)
+	next.Spec.WireGuard.Peers[0].PresharedKey = ClearSecretValue
+	if err := PrepareUpdate(&next, &record, time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if next.Spec.WireGuard.Peers[0].PresharedKey != "" {
+		t.Fatal("explicit clear marker did not remove the preshared key")
+	}
+}
+
 func TestRPKPreparationAndKeyConsistency(t *testing.T) {
 	remote := XFRMIKEv2Spec{AuthMethod: IKEAuthRPK}
 	if err := ensureIKECredentials(&remote, true); err != nil {

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -14,9 +13,10 @@ import (
 func collectSRv6(prompts *prompts, record *model.Tunnel, creating bool) error {
 	spec := record.Spec.SRv6
 	if spec == nil {
+		underlay := defaultUnderlayDefaults()
 		spec = &model.SRv6Spec{
-			BaseURL:                "https://example.invalid/routes/",
-			UnderlayInterface:      "eth0",
+			BaseURL:                "https://cira.moedove.com",
+			UnderlayInterface:      underlay.Interface,
 			Table:                  100,
 			RefreshIntervalSeconds: 3600,
 		}
@@ -42,9 +42,6 @@ func collectSRv6(prompts *prompts, record *model.Tunnel, creating bool) error {
 	if err != nil {
 		return err
 	}
-	if len(sources) == 0 {
-		return errors.New("at least one SRv6 source is required")
-	}
 	spec.Table = parseInt(table)
 	spec.RefreshIntervalSeconds = parseInt(refresh)
 	spec.Sources = sources
@@ -58,8 +55,14 @@ func collectSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.S
 		for i, source := range sources {
 			options = append(options, ui.Option{Label: source.Name, Value: strconv.Itoa(i)})
 		}
-		options = append(options, ui.Option{Label: "Add source", Value: "add"}, ui.Option{Label: "Done", Value: "done"})
+		options = append(options, ui.Option{Label: "Add source", Value: "add"})
+		if len(sources) > 0 {
+			options = append(options, ui.Option{Label: "Done", Value: "done"})
+		}
 		choice := "done"
+		if len(sources) == 0 {
+			choice = "add"
+		}
 		if err := prompts.selectValue("SRv6 route sources", options, &choice); err != nil {
 			return nil, err
 		}
@@ -67,11 +70,16 @@ func collectSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.S
 			return sources, nil
 		}
 		if choice == "add" {
-			source, keep, err := collectSRv6Source(prompts, model.SRv6Source{MTU: 1500}, true)
+			source, keep, err := collectSRv6Source(prompts, model.SRv6Source{
+				Name: suggestedSRv6SourceName(sources), MTU: 1500,
+			}, true)
 			if err != nil {
 				return nil, err
 			}
 			if keep {
+				if err := ensureUniqueSRv6SourceName(prompts, sources, -1, &source.Name); err != nil {
+					return nil, err
+				}
 				sources = append(sources, source)
 			}
 			continue
@@ -92,6 +100,47 @@ func collectSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.S
 	}
 }
 
+func suggestedSRv6SourceName(sources []model.SRv6Source) string {
+	used := make(map[string]bool, len(sources))
+	for _, source := range sources {
+		used[source.Name] = true
+	}
+	for _, candidate := range []string{"chinamobile", "chinaunicom", "chinatelecom", "cernet_edu"} {
+		if !used[candidate] {
+			return candidate
+		}
+	}
+	if !used["carrier"] {
+		return "carrier"
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := "carrier" + strconv.Itoa(suffix)
+		if !used[candidate] {
+			return candidate
+		}
+	}
+}
+
+func ensureUniqueSRv6SourceName(prompts *prompts, sources []model.SRv6Source, except int, name *string) error {
+	validator := func(value string) error {
+		if err := validateNameInput(value); err != nil {
+			return err
+		}
+		for index, source := range sources {
+			if index != except && source.Name == value {
+				return fmt.Errorf("source name %q is already in use", value)
+			}
+		}
+		return nil
+	}
+	if err := validator(*name); err == nil {
+		return nil
+	} else {
+		prompts.ui.Warn(err.Error())
+	}
+	return prompts.input("Source name", name, validator)
+}
+
 func collectSRv6Source(prompts *prompts, source model.SRv6Source, adding bool) (model.SRv6Source, bool, error) {
 	if source.Name == "" {
 		source.Name = "carrier"
@@ -107,14 +156,17 @@ func collectSRv6Source(prompts *prompts, source model.SRv6Source, adding bool) (
 	if err := prompts.input("Source name", &source.Name, validateNameInput); err != nil {
 		return source, false, err
 	}
-	if err := prompts.input("SID for IPv4 routes", &sidV4, validateOptionalIPv6); err != nil {
-		return source, false, err
-	}
-	if err := prompts.input("SID for IPv6 routes", &sidV6, validateOptionalIPv6); err != nil {
-		return source, false, err
-	}
-	if sidV4 == "" && sidV6 == "" {
-		return source, false, errors.New("at least one SID is required")
+	for {
+		if err := prompts.input("SID for IPv4 routes (blank = none)", &sidV4, validateOptionalIPv6); err != nil {
+			return source, false, err
+		}
+		if err := prompts.input("SID for IPv6 routes (blank = none)", &sidV6, validateOptionalIPv6); err != nil {
+			return source, false, err
+		}
+		if sidV4 != "" || sidV6 != "" {
+			break
+		}
+		prompts.ui.Warn("At least one SID is required")
 	}
 	if err := prompts.input("MTU", &mtu, validateInt(68, 65535)); err != nil {
 		return source, false, err
@@ -122,6 +174,16 @@ func collectSRv6Source(prompts *prompts, source model.SRv6Source, adding bool) (
 	source.SIDv4, _ = parseOptionalAddr(sidV4)
 	source.SIDv6, _ = parseOptionalAddr(sidV6)
 	source.MTU = parseInt(mtu)
+	if adding {
+		choice := "save"
+		if err := prompts.selectValue("Source", []ui.Option{
+			{Label: "Add source", Value: "save"},
+			{Label: "Discard", Value: "discard"},
+		}, &choice); err != nil {
+			return source, false, err
+		}
+		return source, choice == "save", nil
+	}
 	if !adding {
 		remove, err := prompts.confirm("Remove this source", false)
 		if err != nil {

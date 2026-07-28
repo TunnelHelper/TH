@@ -9,7 +9,7 @@ import (
 	"github.com/TunnelHelper/TH/internal/model"
 )
 
-func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel) (model.Tunnel, error) {
+func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel, suggestedName string, managed []model.TunnelView) (model.Tunnel, error) {
 	var record model.Tunnel
 	if existing != nil {
 		copy, err := model.Clone(*existing)
@@ -23,35 +23,37 @@ func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel) (m
 	if record.Kind == "" {
 		record.Kind = kind
 	}
-	defaults := map[model.Kind][2]string{
-		model.KindGRE:        {"gre", "gre0"},
-		model.KindVXLAN:      {"vxlan", "vxlan0"},
-		model.KindWireGuard:  {"wireguard", "wg0"},
-		model.KindAmneziaWG:  {"amneziawg", "awg0"},
-		model.KindXFRMStatic: {"xfrm-static", "xfrm0"},
-		model.KindXFRMIKEv2:  {"xfrm-ikev2", "xfrm0"},
-		model.KindSRv6:       {"srv6", ""},
-	}
 	if record.Name == "" {
-		record.Name = defaults[kind][0]
-	}
-	if record.Interface == "" && kind != model.KindSRv6 {
-		record.Interface = defaults[kind][1]
-	}
-	if err := prompts.input("Name", &record.Name, validateNameInput); err != nil {
-		return model.Tunnel{}, err
-	}
-	if kind != model.KindSRv6 && existing == nil {
-		if err := prompts.input("Interface", &record.Interface, validateInterfaceInput); err != nil {
-			return model.Tunnel{}, err
+		record.Name = suggestedName
+		if record.Name == "" {
+			record.Name = defaultTunnelName(kind)
 		}
 	}
-	enabled, err := prompts.confirm("Enabled", record.Enabled)
-	if err != nil {
+	creating := existing == nil
+	if creating {
+		prompts.section(tunnelKindTitle(kind), "Configure the tunnel first; activation is chosen after review.")
+	}
+	namePrompt := "Tunnel name"
+	if creating && kind != model.KindSRv6 {
+		namePrompt = fmt.Sprintf("Tunnel name (interface: %s<name>)", interfacePrefix(kind))
+	}
+	if err := prompts.input(namePrompt, &record.Name, func(value string) error {
+		if err := validateNameInput(value); err != nil {
+			return err
+		}
+		if creating {
+			return validateNewTunnelIdentity(kind, value, managed)
+		}
+		return nil
+	}); err != nil {
 		return model.Tunnel{}, err
 	}
-	record.Enabled = enabled
+	if creating && kind != model.KindSRv6 {
+		record.Interface = interfaceName(kind, record.Name)
+		prompts.ui.Info("Interface: " + record.Interface)
+	}
 
+	var err error
 	switch kind {
 	case model.KindGRE:
 		err = collectGRE(prompts, &record)
@@ -62,15 +64,67 @@ func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel) (m
 	case model.KindAmneziaWG:
 		err = collectAmneziaWG(prompts, &record)
 	case model.KindXFRMStatic:
-		err = collectStaticXFRM(prompts, &record, existing == nil)
+		err = collectStaticXFRM(prompts, &record, creating)
 	case model.KindXFRMIKEv2:
-		err = collectIKEv2(prompts, &record, existing == nil)
+		err = collectIKEv2(prompts, &record, creating)
 	case model.KindSRv6:
-		err = collectSRv6(prompts, &record, existing == nil)
+		err = collectSRv6(prompts, &record, creating)
 	default:
 		err = fmt.Errorf("unsupported tunnel kind %q", kind)
 	}
 	return record, err
+}
+
+func defaultTunnelName(kind model.Kind) string {
+	if kind == model.KindSRv6 {
+		return "srv6"
+	}
+	if kind == model.KindXFRMStatic {
+		return "static1"
+	}
+	return "prod1"
+}
+
+func interfacePrefix(kind model.Kind) string {
+	switch kind {
+	case model.KindGRE:
+		return "gre-"
+	case model.KindVXLAN:
+		return "vxlan-"
+	case model.KindWireGuard:
+		return "wg-"
+	case model.KindAmneziaWG:
+		return "awg-"
+	case model.KindXFRMStatic, model.KindXFRMIKEv2:
+		return "ipsec-"
+	default:
+		return ""
+	}
+}
+
+func interfaceName(kind model.Kind, name string) string {
+	return interfacePrefix(kind) + name
+}
+
+func tunnelKindTitle(kind model.Kind) string {
+	switch kind {
+	case model.KindGRE:
+		return "GRE tunnel"
+	case model.KindVXLAN:
+		return "VXLAN tunnel"
+	case model.KindWireGuard:
+		return "WireGuard tunnel"
+	case model.KindAmneziaWG:
+		return "AmneziaWG tunnel"
+	case model.KindXFRMStatic:
+		return "Static XFRM tunnel"
+	case model.KindXFRMIKEv2:
+		return "IKEv2 XFRM tunnel"
+	case model.KindSRv6:
+		return "SRv6 routes"
+	default:
+		return string(kind)
+	}
 }
 
 func collectGRE(prompts *prompts, record *model.Tunnel) error {
@@ -81,12 +135,15 @@ func collectGRE(prompts *prompts, record *model.Tunnel) error {
 	}
 	local, remote := spec.Local.String(), spec.Remote.String()
 	if !spec.Local.IsValid() {
-		local = "192.0.2.1"
+		local = ""
 	}
 	if !spec.Remote.IsValid() {
-		remote = "192.0.2.2"
+		remote = ""
 	}
-	addresses := formatPrefixes(spec.Addresses)
+	addresses, err := addressesDefault(prompts, formatPrefixes(spec.Addresses))
+	if err != nil {
+		return err
+	}
 	mtu, ttl := strconv.Itoa(spec.MTU), strconv.Itoa(int(spec.TTL))
 	if spec.MTU == 0 {
 		mtu = "1450"
@@ -94,19 +151,22 @@ func collectGRE(prompts *prompts, record *model.Tunnel) error {
 	if spec.TTL == 0 {
 		ttl = "255"
 	}
-	if err := prompts.input("Local underlay IP", &local, validateAddrInput); err != nil {
-		return err
-	}
 	if err := prompts.input("Remote underlay IP", &remote, validateAddrInput); err != nil {
 		return err
 	}
-	if err := prompts.input("Interface addresses", &addresses, validatePrefixesInput); err != nil {
+	if detected := findUnderlayDefaults(remote); !spec.Local.IsValid() && detected.Local != "" {
+		local = detected.Local
+	}
+	if err := prompts.input("Local underlay IP", &local, validateAddrInput); err != nil {
 		return err
 	}
-	if err := prompts.input("MTU", &mtu, validateInt(68, 65535)); err != nil {
+	if err := prompts.input("Interface addresses", &addresses, validateInterfacePrefixesInput); err != nil {
 		return err
 	}
-	if err := prompts.input("TTL", &ttl, validateInt(1, 255)); err != nil {
+	if err := prompts.input("MTU (68-65535)", &mtu, validateInt(68, 65535)); err != nil {
+		return err
+	}
+	if err := prompts.input("TTL (1-255)", &ttl, validateInt(1, 255)); err != nil {
 		return err
 	}
 	spec.Local, _ = netip.ParseAddr(local)
@@ -122,41 +182,48 @@ func collectVXLAN(prompts *prompts, record *model.Tunnel) error {
 		spec = &model.VXLANSpec{VNI: 100, DestinationPort: 4789, MTU: 1450}
 		record.Spec = model.Spec{VXLAN: spec}
 	}
-	if spec.UnderlayInterface == "" {
-		spec.UnderlayInterface = "eth0"
-	}
 	local, remote := spec.Local.String(), spec.Remote.String()
 	if !spec.Local.IsValid() {
-		local = "192.0.2.1"
+		local = ""
 	}
 	if !spec.Remote.IsValid() {
-		remote = "192.0.2.2"
+		remote = ""
 	}
 	vni, port, mtu := strconv.Itoa(spec.VNI), strconv.Itoa(spec.DestinationPort), strconv.Itoa(spec.MTU)
-	addresses := formatPrefixes(spec.Addresses)
-	if err := prompts.input("Underlay interface", &spec.UnderlayInterface, validateInterfaceInput); err != nil {
+	addresses, err := addressesDefault(prompts, formatPrefixes(spec.Addresses))
+	if err != nil {
 		return err
 	}
 	if err := prompts.input("VNI", &vni, validateInt(1, 16777215)); err != nil {
 		return err
 	}
-	if err := prompts.input("Local underlay IP", &local, validateAddrInput); err != nil {
-		return err
-	}
 	if err := prompts.input("Remote underlay IP", &remote, validateAddrInput); err != nil {
 		return err
 	}
-	if err := prompts.input("Destination port", &port, validateInt(1, 65535)); err != nil {
+	detected := findUnderlayDefaults(remote)
+	if spec.UnderlayInterface == "" {
+		spec.UnderlayInterface = detected.Interface
+	}
+	if !spec.Local.IsValid() && detected.Local != "" {
+		local = detected.Local
+	}
+	if err := prompts.input("Underlay interface", &spec.UnderlayInterface, validateInterfaceInput); err != nil {
+		return err
+	}
+	if err := prompts.input("Local underlay IP", &local, validateAddrInput); err != nil {
+		return err
+	}
+	if err := prompts.input("Destination port (1-65535)", &port, validateInt(1, 65535)); err != nil {
 		return err
 	}
 	learning, err := prompts.confirm("MAC learning", spec.Learning)
 	if err != nil {
 		return err
 	}
-	if err := prompts.input("Interface addresses", &addresses, validatePrefixesInput); err != nil {
+	if err := prompts.input("Interface addresses", &addresses, validateInterfacePrefixesInput); err != nil {
 		return err
 	}
-	if err := prompts.input("MTU", &mtu, validateInt(68, 65535)); err != nil {
+	if err := prompts.input("MTU (68-65535)", &mtu, validateInt(68, 65535)); err != nil {
 		return err
 	}
 	spec.VNI, spec.DestinationPort, spec.MTU = parseInt(vni), parseInt(port), parseInt(mtu)

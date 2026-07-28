@@ -53,6 +53,7 @@ func (p *Prompter) Select(title string, options []Option, value *string) error {
 		return p.newForm(huh.NewGroup(sel)).Run()
 	}
 
+	p.printPending()
 	fmt.Fprintln(p.out, title)
 	for i, opt := range options {
 		fmt.Fprintf(p.out, "  %d) %s\n", i+1, opt.Label)
@@ -91,6 +92,7 @@ func (p *Prompter) Input(title string, value *string, validate func(string) erro
 		return p.newForm(huh.NewGroup(input)).Run()
 	}
 
+	p.printPending()
 	prompt := title
 	if strings.TrimSpace(*value) != "" {
 		prompt = fmt.Sprintf("%s [%s]", title, *value)
@@ -116,11 +118,20 @@ func (p *Prompter) Input(title string, value *string, validate func(string) erro
 func (p *Prompter) Secret(title string, value *string, validate func(string) error) error {
 	if p.ui.TTY {
 		input := huh.NewInput().Title(title).Value(value).EchoMode(huh.EchoModePassword)
+		if p.ui.PendingTitle != "" {
+			input.Title(p.ui.PendingTitle + "\n" + title)
+			if p.ui.PendingDim != "" {
+				input.Description(p.ui.PendingDim)
+			}
+			p.ui.PendingTitle = ""
+			p.ui.PendingDim = ""
+		}
 		if validate != nil {
 			input = input.Validate(func(s string) error { return validate(strings.TrimSpace(s)) })
 		}
 		return p.newForm(huh.NewGroup(input)).Run()
 	}
+	p.printPending()
 	fmt.Fprintf(p.out, "%s: ", title)
 	line, err := p.ui.ReadLine()
 	if err != nil {
@@ -154,6 +165,7 @@ func (p *Prompter) Confirm(title string, value *bool, defaultYes bool) error {
 		return p.newForm(huh.NewGroup(c)).Run()
 	}
 
+	p.printPending()
 	def := "y/N"
 	if defaultYes {
 		def = "Y/n"
@@ -177,4 +189,15 @@ func (p *Prompter) Confirm(title string, value *bool, defaultYes bool) error {
 		return nil
 	}
 	return errors.New("invalid confirmation")
+}
+
+func (p *Prompter) printPending() {
+	if p.ui.PendingTitle != "" {
+		fmt.Fprintln(p.out, p.ui.PendingTitle)
+	}
+	if p.ui.PendingDim != "" {
+		fmt.Fprintln(p.out, p.ui.PendingDim)
+	}
+	p.ui.PendingTitle = ""
+	p.ui.PendingDim = ""
 }
