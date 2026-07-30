@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -15,7 +16,6 @@ func collectSRv6(prompts *prompts, record *model.Tunnel, creating bool) error {
 	if spec == nil {
 		underlay := defaultUnderlayDefaults()
 		spec = &model.SRv6Spec{
-			BaseURL:                "https://cira.moedove.com",
 			UnderlayInterface:      underlay.Interface,
 			Table:                  100,
 			RefreshIntervalSeconds: 3600,
@@ -24,9 +24,6 @@ func collectSRv6(prompts *prompts, record *model.Tunnel, creating bool) error {
 	}
 	table := strconv.Itoa(spec.Table)
 	refresh := strconv.Itoa(spec.RefreshIntervalSeconds)
-	if err := prompts.input("Route source base URL", &spec.BaseURL, validateHTTPURL); err != nil {
-		return err
-	}
 	if err := prompts.input("Underlay interface", &spec.UnderlayInterface, validateInterfaceInput); err != nil {
 		return err
 	}
@@ -53,7 +50,7 @@ func collectSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.S
 	for {
 		options := make([]ui.Option, 0, len(sources)+2)
 		for i, source := range sources {
-			options = append(options, ui.Option{Label: source.Name, Value: strconv.Itoa(i)})
+			options = append(options, ui.Option{Label: srv6SourceOptionLabel(source), Value: strconv.Itoa(i)})
 		}
 		options = append(options, ui.Option{Label: "Add source", Value: "add"})
 		if len(sources) > 0 {
@@ -113,16 +110,8 @@ func suggestedSRv6SourceName(sources []model.SRv6Source) string {
 	for _, source := range sources {
 		used[source.Name] = true
 	}
-	for _, candidate := range []string{"chinamobile", "chinaunicom", "chinatelecom", "cernet_edu"} {
-		if !used[candidate] {
-			return candidate
-		}
-	}
-	if !used["carrier"] {
-		return "carrier"
-	}
-	for suffix := 2; ; suffix++ {
-		candidate := "carrier" + strconv.Itoa(suffix)
+	for suffix := 1; ; suffix++ {
+		candidate := "source" + strconv.Itoa(suffix)
 		if !used[candidate] {
 			return candidate
 		}
@@ -150,43 +139,94 @@ func ensureUniqueSRv6SourceName(prompts *prompts, sources []model.SRv6Source, ex
 }
 
 func collectSRv6Source(prompts *prompts, source model.SRv6Source) (model.SRv6Source, bool, error) {
+	creating := source.Family == ""
+	if creating {
+		family := string(model.SRv6FamilyIPv4)
+		if err := prompts.selectValue("Address family", []ui.Option{
+			{Label: "IPv4 prefixes", Value: string(model.SRv6FamilyIPv4)},
+			{Label: "IPv6 prefixes", Value: string(model.SRv6FamilyIPv6)},
+		}, &family); err != nil {
+			return source, false, err
+		}
+		source.Family = model.SRv6AddressFamily(family)
+		source.Priority = 100
+	}
 	if source.Name == "" {
-		source.Name = "carrier"
+		source.Name = "source1"
 	}
-	sidV4, sidV6 := "", ""
-	if source.SIDv4 != nil {
-		sidV4 = source.SIDv4.String()
+	if source.MTU == 0 {
+		source.MTU = 1500
 	}
-	if source.SIDv6 != nil {
-		sidV6 = source.SIDv6.String()
-	}
-	mtu := strconv.Itoa(source.MTU)
 	if err := prompts.input("Source name", &source.Name, validateNameInput); err != nil {
 		return source, false, err
 	}
-	for {
-		if err := prompts.input("SID for IPv4 routes (blank = none)", &sidV4, validateOptionalIPv6); err != nil {
-			return source, false, err
-		}
-		if err := prompts.input("SID for IPv6 routes (blank = none)", &sidV6, validateOptionalIPv6); err != nil {
-			return source, false, err
-		}
-		if sidV4 != "" || sidV6 != "" {
-			break
-		}
-		prompts.ui.Warn("At least one SID is required")
+	if err := prompts.input(srv6FamilyDisplay(source.Family)+" prefix file URL", &source.PrefixURL, validateHTTPURL); err != nil {
+		return source, false, err
 	}
+	source.PrefixURL = strings.TrimSpace(source.PrefixURL)
+	priority := strconv.Itoa(source.Priority)
+	if err := prompts.input("Priority (higher wins)", &priority, validateInt(0, 2147483647)); err != nil {
+		return source, false, err
+	}
+	sid := srv6SIDInput(source.SID)
+	if err := prompts.input("Route SID", &sid, validateRequiredIPv6); err != nil {
+		return source, false, err
+	}
+	mtu := strconv.Itoa(source.MTU)
 	if err := prompts.input("MTU", &mtu, validateInt(68, 65535)); err != nil {
 		return source, false, err
 	}
-	source.SIDv4, _ = parseOptionalAddr(sidV4)
-	source.SIDv6, _ = parseOptionalAddr(sidV6)
+	source.SID, _ = netip.ParseAddr(strings.TrimSpace(sid))
+	source.Priority = parseInt(priority)
 	source.MTU = parseInt(mtu)
 	save, err := prompts.saveDiscard("Source", "Add source", "Discard source")
 	if err != nil {
 		return source, false, err
 	}
 	return source, save, nil
+}
+
+func validateSRv6SourceFields(source model.SRv6Source) error {
+	switch source.Family {
+	case model.SRv6FamilyIPv4, model.SRv6FamilyIPv6:
+	default:
+		return fmt.Errorf("address family must be IPv4 or IPv6")
+	}
+	if err := validateHTTPURL(source.PrefixURL); err != nil {
+		return fmt.Errorf("prefix file URL: %w", err)
+	}
+	if !source.SID.IsValid() || !source.SID.Is6() || source.SID.IsUnspecified() {
+		return fmt.Errorf("SID must be a specified IPv6 address")
+	}
+	if source.Priority < 0 || source.Priority > 2147483647 {
+		return fmt.Errorf("priority must be between 0 and 2147483647")
+	}
+	return nil
+}
+
+func srv6FamilyDisplay(family model.SRv6AddressFamily) string {
+	if family == model.SRv6FamilyIPv6 {
+		return "IPv6"
+	}
+	return "IPv4"
+}
+
+func srv6SIDInput(sid netip.Addr) string {
+	if !sid.IsValid() {
+		return ""
+	}
+	return sid.String()
+}
+
+func srv6SourceOptionLabel(source model.SRv6Source) string {
+	return fmt.Sprintf("%s [%s] priority %d", source.Name, srv6FamilyDisplay(source.Family), source.Priority)
+}
+
+func validateRequiredIPv6(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("a specified IPv6 address is required")
+	}
+	return validateOptionalIPv6(value)
 }
 
 func validateHTTPURL(value string) error {

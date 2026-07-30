@@ -184,10 +184,6 @@ func validateSRv6(spec *SRv6Spec) error {
 	if len(spec.Sources) > MaxSRv6Sources {
 		return fmt.Errorf("sources exceeds %d entries", MaxSRv6Sources)
 	}
-	u, err := url.Parse(spec.BaseURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return errors.New("base_url must be an absolute HTTP or HTTPS URL")
-	}
 	if err := validateInterface(spec.UnderlayInterface); err != nil {
 		return fmt.Errorf("underlay_interface: %w", err)
 	}
@@ -209,17 +205,34 @@ func validateSRv6(spec *SRv6Spec) error {
 			return fmt.Errorf("duplicate source name %q", source.Name)
 		}
 		seen[source.Name] = struct{}{}
-		if source.SIDv4 == nil && source.SIDv6 == nil {
-			return fmt.Errorf("sources[%d] requires sid_v4 or sid_v6", i)
+		switch source.Family {
+		case SRv6FamilyIPv4, SRv6FamilyIPv6:
+		default:
+			return fmt.Errorf("sources[%d].family must be ipv4 or ipv6", i)
 		}
-		for _, sid := range []*netip.Addr{source.SIDv4, source.SIDv6} {
-			if sid != nil && (!sid.IsValid() || !sid.Is6() || sid.IsUnspecified()) {
-				return fmt.Errorf("sources[%d] SIDs must be specified IPv6 addresses", i)
-			}
+		if err := validateSRv6FeedURL(source.PrefixURL); err != nil {
+			return fmt.Errorf("sources[%d].prefix_url: %w", i, err)
+		}
+		if !source.SID.IsValid() || !source.SID.Is6() || source.SID.IsUnspecified() {
+			return fmt.Errorf("sources[%d].sid must be a specified IPv6 address", i)
+		}
+		if source.Priority < 0 || source.Priority > 2147483647 {
+			return fmt.Errorf("sources[%d].priority must be between 0 and 2147483647", i)
 		}
 		if err := validateMTU(source.MTU); err != nil {
 			return fmt.Errorf("sources[%d]: %w", i, err)
 		}
+	}
+	return nil
+}
+
+func validateSRv6FeedURL(value string) error {
+	if value != strings.TrimSpace(value) {
+		return errors.New("must not contain leading or trailing whitespace")
+	}
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("must be an absolute HTTP or HTTPS URL")
 	}
 	return nil
 }

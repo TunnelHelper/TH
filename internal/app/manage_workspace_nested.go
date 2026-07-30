@@ -350,28 +350,33 @@ func (m manageWorkspaceModel) updateSourceList(key tea.KeyMsg) (tea.Model, tea.C
 		}
 	case "enter", " ":
 		if m.sourceSelected == len(sources) {
-			m.sourceAdding, m.sourceIndex = true, -1
-			m.sourceOriginal = model.SRv6Source{}
-			m.sourceDraft = model.SRv6Source{Name: suggestedSRv6SourceName(sources), MTU: 1500}
+			m.beginSourceAdd(sources)
 		} else {
 			m.sourceAdding, m.sourceIndex = false, m.sourceSelected
 			m.sourceOriginal, m.sourceDraft = sources[m.sourceSelected], sources[m.sourceSelected]
+			m.fieldSelected = 0
+			m.page = workspaceSource
 		}
-		m.fieldSelected = 0
-		m.page = workspaceSource
 		m.notice = ""
 	case "a":
 		m.sourceSelected = len(sources)
-		m.sourceAdding, m.sourceIndex = true, -1
-		m.sourceOriginal = model.SRv6Source{}
-		m.sourceDraft = model.SRv6Source{Name: suggestedSRv6SourceName(sources), MTU: 1500}
-		m.fieldSelected = 0
-		m.page = workspaceSource
+		m.beginSourceAdd(sources)
 	case "q", "esc":
 		m.page = workspaceEdit
 		m.fieldSelected = workspaceFieldIndex(workspaceTunnelFields(m.draft), "srv6.sources")
 	}
 	return m, nil
+}
+
+func (m *manageWorkspaceModel) beginSourceAdd(sources []model.SRv6Source) {
+	m.sourceAdding, m.sourceIndex = true, -1
+	m.sourceOriginal = model.SRv6Source{}
+	m.sourceDraft = model.SRv6Source{Name: suggestedSRv6SourceName(sources), Priority: 100, MTU: 1500}
+	m.fieldSelected = 0
+	m.beginChoice("srv6-source-family", "Address family", "", []workspaceButton{
+		{Label: "IPv4", Value: string(model.SRv6FamilyIPv4)},
+		{Label: "IPv6", Value: string(model.SRv6FamilyIPv6)},
+	}, 0)
 }
 
 func (m manageWorkspaceModel) sourceListView(width int) string {
@@ -388,7 +393,8 @@ func (m manageWorkspaceModel) sourceListView(width int) string {
 			line += "+ Add source"
 		} else {
 			source := sources[index]
-			line += fmt.Sprintf("%-24s  IPv4 %-24s  IPv6 %-24s  MTU %d", source.Name, optionalAddrLabel(source.SIDv4), optionalAddrLabel(source.SIDv6), source.MTU)
+			line += fmt.Sprintf("%-20s  %-4s  priority %-10d  SID %-24s  MTU %d",
+				source.Name, srv6FamilyDisplay(source.Family), source.Priority, srv6SIDInput(source.SID), source.MTU)
 		}
 		line = fit(line, width)
 		if selected {
@@ -471,8 +477,9 @@ func (m manageWorkspaceModel) sourceEditorView(width int) string {
 func workspaceSourceFields(source model.SRv6Source) []workspaceField {
 	return []workspaceField{
 		workspaceTextField("name", "Name", source.Name, validateNameInput),
-		workspaceTextField("sid4", "IPv4 route SID", optionalAddrInput(source.SIDv4), validateOptionalIPv6),
-		workspaceTextField("sid6", "IPv6 route SID", optionalAddrInput(source.SIDv6), validateOptionalIPv6),
+		workspaceTextField("url", srv6FamilyDisplay(source.Family)+" prefix file URL", source.PrefixURL, validateHTTPURL),
+		workspaceTextField("priority", "Priority (higher wins)", strconv.Itoa(source.Priority), validateInt(0, 2147483647)),
+		workspaceTextField("sid", "Route SID", srv6SIDInput(source.SID), validateRequiredIPv6),
 		workspaceTextField("mtu", "MTU", strconv.Itoa(source.MTU), validateInt(68, 65535)),
 	}
 }
@@ -482,13 +489,12 @@ func (m *manageWorkspaceModel) applySourceInput(id string, values []string) erro
 	switch id {
 	case "name":
 		m.sourceDraft.Name = value
-	case "sid4", "sid6":
-		address, _ := parseOptionalAddr(value)
-		if id == "sid4" {
-			m.sourceDraft.SIDv4 = address
-		} else {
-			m.sourceDraft.SIDv6 = address
-		}
+	case "url":
+		m.sourceDraft.PrefixURL = value
+	case "sid":
+		m.sourceDraft.SID, _ = netip.ParseAddr(value)
+	case "priority":
+		m.sourceDraft.Priority = parseInt(value)
 	case "mtu":
 		m.sourceDraft.MTU = parseInt(value)
 	default:
@@ -501,8 +507,11 @@ func (m *manageWorkspaceModel) validateSourceDraft() error {
 	if err := validateNameInput(m.sourceDraft.Name); err != nil {
 		return err
 	}
-	if m.sourceDraft.SIDv4 == nil && m.sourceDraft.SIDv6 == nil {
-		return errors.New("at least one SID is required")
+	if err := validateSRv6SourceFields(m.sourceDraft); err != nil {
+		return err
+	}
+	if m.sourceDraft.MTU < 68 || m.sourceDraft.MTU > 65535 {
+		return errors.New("MTU must be between 68 and 65535")
 	}
 	for index, source := range m.draft.Spec.SRv6.Sources {
 		if index != m.sourceIndex && source.Name == m.sourceDraft.Name {
@@ -572,12 +581,12 @@ func workspaceSourceSaveLabel(adding bool) string {
 
 func workspaceSourceCrumb(source model.SRv6Source, adding bool) string {
 	if adding {
-		return "Add source"
+		return "Add " + srv6FamilyDisplay(source.Family) + " source"
 	}
 	if source.Name == "" {
-		return "Source"
+		return srv6FamilyDisplay(source.Family) + " source"
 	}
-	return source.Name
+	return source.Name + " [" + srv6FamilyDisplay(source.Family) + "]"
 }
 
 func workspaceFieldIndex(fields []workspaceField, id string) int {

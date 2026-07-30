@@ -35,7 +35,15 @@ func showTunnelSummary(output *ui.UI, record model.Tunnel) {
 		fmt.Fprintf(output.Out, "Underlay: %s -> %s via %s\nAuthentication: %s\n", spec.LocalAddress, spec.RemoteAddress, spec.UnderlayInterface, spec.AuthMethod)
 	case model.KindSRv6:
 		spec := record.Spec.SRv6
-		fmt.Fprintf(output.Out, "Route source: %s\nUnderlay: %s\nSources: %d\n", spec.BaseURL, spec.UnderlayInterface, len(spec.Sources))
+		ipv4, ipv6 := 0, 0
+		for _, source := range spec.Sources {
+			if source.Family == model.SRv6FamilyIPv4 {
+				ipv4++
+			} else if source.Family == model.SRv6FamilyIPv6 {
+				ipv6++
+			}
+		}
+		fmt.Fprintf(output.Out, "Underlay: %s\nSources: %d (IPv4: %d, IPv6: %d)\n", spec.UnderlayInterface, len(spec.Sources), ipv4, ipv6)
 	}
 }
 

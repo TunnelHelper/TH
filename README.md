@@ -142,6 +142,13 @@ Resource bounds are enforced at validation time: at most 1024 tunnels, 256
 interface addresses per tunnel, 1024 WireGuard/AmneziaWG peers, 4096
 AllowedIPs per peer (16384 per tunnel), and 64 SRv6 sources.
 
+Each SRv6 source binds exactly one address family (IPv4 or IPv6) to one full
+HTTP(S) prefix-file URL, route SID, MTU, and numeric priority. Higher priority
+wins when files of the same family contain the same normalized CIDR;
+lower-priority duplicates are skipped. Overlapping CIDRs with different prefix
+lengths remain valid, while conflicting actions at the same priority are
+rejected.
+
 `export --redacted` is safe for review and declarative reuse. The root-only
 backup command instead includes every stored private key and PSK, verifies an
 internal SHA-256, and encrypts the archive with the standard age scrypt format.

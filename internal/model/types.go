@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	SchemaVersion = 2
+	SchemaVersion = 3
 	BundleVersion = 1
 
 	MaxTunnelRecords       = 1024
@@ -174,18 +174,26 @@ type XFRMIKEv2Spec struct {
 }
 
 type SRv6Spec struct {
-	BaseURL                string       `json:"base_url"`
 	UnderlayInterface      string       `json:"underlay_interface"`
 	Table                  int          `json:"table"`
 	RefreshIntervalSeconds int          `json:"refresh_interval_seconds"`
 	Sources                []SRv6Source `json:"sources"`
 }
 
+type SRv6AddressFamily string
+
+const (
+	SRv6FamilyIPv4 SRv6AddressFamily = "ipv4"
+	SRv6FamilyIPv6 SRv6AddressFamily = "ipv6"
+)
+
 type SRv6Source struct {
-	Name  string      `json:"name"`
-	SIDv4 *netip.Addr `json:"sid_v4,omitempty"`
-	SIDv6 *netip.Addr `json:"sid_v6,omitempty"`
-	MTU   int         `json:"mtu"`
+	Name      string            `json:"name"`
+	Family    SRv6AddressFamily `json:"family"`
+	PrefixURL string            `json:"prefix_url"`
+	SID       netip.Addr        `json:"sid"`
+	Priority  int               `json:"priority"`
+	MTU       int               `json:"mtu"`
 }
 
 type Phase string

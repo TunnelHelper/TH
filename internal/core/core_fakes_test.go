@@ -180,13 +180,8 @@ func lifecycleInputs(t *testing.T) []model.Tunnel {
 		{Name: "awg", Kind: model.KindAmneziaWG, Interface: "awg0", Spec: model.Spec{AmneziaWG: &model.AmneziaWGSpec{}}},
 		{Name: "static", Kind: model.KindXFRMStatic, Interface: "xs0", Spec: model.Spec{XFRMStatic: &model.XFRMStaticSpec{UnderlayInterface: "eth0", Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2")}}},
 		{Name: "ike", Kind: model.KindXFRMIKEv2, Interface: "xi0", Spec: model.Spec{XFRMIKEv2: &model.XFRMIKEv2Spec{UnderlayInterface: "eth0", LocalAddress: "192.0.2.1", RemoteAddress: "192.0.2.2", LocalID: "left", RemoteID: "right", AuthMethod: model.IKEAuthPSK}}},
-		{Name: "srv6", Kind: model.KindSRv6, Spec: model.Spec{SRv6: &model.SRv6Spec{BaseURL: "https://routes.example/", UnderlayInterface: "eth0", Table: 100, Sources: []model.SRv6Source{{Name: "carrier", SIDv4: coreAddrPointer("2001:db8::1"), MTU: 1500}}}}},
+		{Name: "srv6", Kind: model.KindSRv6, Spec: model.Spec{SRv6: &model.SRv6Spec{UnderlayInterface: "eth0", Table: 100, Sources: []model.SRv6Source{{Name: "source1", Family: model.SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: netip.MustParseAddr("2001:db8::1"), Priority: 100, MTU: 1500}}}}},
 	}
-}
-
-func coreAddrPointer(value string) *netip.Addr {
-	address := netip.MustParseAddr(value)
-	return &address
 }
 
 func waitForCall(t *testing.T, calls <-chan struct{}) {

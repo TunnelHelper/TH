@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -34,9 +36,11 @@ const (
 )
 
 type srv6Route struct {
-	prefix netip.Prefix
-	sid    netip.Addr
-	mtu    int
+	prefix   netip.Prefix
+	sid      netip.Addr
+	mtu      int
+	priority int
+	origin   string
 }
 
 func (b *Backend) applySRv6(ctx context.Context, record model.Tunnel) (core.Observation, error) {
@@ -45,7 +49,7 @@ func (b *Backend) applySRv6(ctx context.Context, record model.Tunnel) (core.Obse
 	if err != nil {
 		return core.Observation{}, fmt.Errorf("lookup SRv6 underlay %s: %w", spec.UnderlayInterface, err)
 	}
-	routes, cacheState, err := b.loadSRv6Feeds(ctx, record)
+	routes, cacheState, skippedPrefixes, err := b.loadSRv6Feeds(ctx, record)
 	if err != nil {
 		return core.Observation{}, err
 	}
@@ -64,17 +68,18 @@ func (b *Backend) applySRv6(ctx context.Context, record model.Tunnel) (core.Obse
 		observation.Details = make(map[string]string)
 	}
 	observation.Details["cache"] = cacheState
+	observation.Details["skipped_prefixes"] = strconv.Itoa(skippedPrefixes)
 	return observation, err
 }
 
-func (b *Backend) loadSRv6Feeds(ctx context.Context, record model.Tunnel) ([]srv6Route, string, error) {
+func (b *Backend) loadSRv6Feeds(ctx context.Context, record model.Tunnel) ([]srv6Route, string, int, error) {
 	spec := record.Spec.SRv6
 	cacheDir := filepath.Join(b.settings.StateDir, "cache", "srv6", record.ID)
 	if err := os.MkdirAll(cacheDir, 0700); err != nil {
-		return nil, "", fmt.Errorf("create SRv6 cache: %w", err)
+		return nil, "", 0, fmt.Errorf("create SRv6 cache: %w", err)
 	}
 	if err := os.Chmod(cacheDir, 0700); err != nil {
-		return nil, "", fmt.Errorf("protect SRv6 cache: %w", err)
+		return nil, "", 0, fmt.Errorf("protect SRv6 cache: %w", err)
 	}
 	client := &http.Client{
 		Timeout: b.settings.RequestTimeout(),
@@ -90,56 +95,67 @@ func (b *Backend) loadSRv6Feeds(ctx context.Context, record model.Tunnel) ([]srv
 	}
 	allRoutes := make([]srv6Route, 0)
 	usedStale := false
-	for _, source := range spec.Sources {
-		feeds := []struct {
-			suffix string
-			sid    *netip.Addr
-			family int
-		}{
-			{suffix: "v4", sid: source.SIDv4, family: 4},
-			{suffix: "v6", sid: source.SIDv6, family: 6},
+	sources := append([]model.SRv6Source(nil), spec.Sources...)
+	sort.SliceStable(sources, func(i, j int) bool {
+		return sources[i].Priority > sources[j].Priority
+	})
+	for _, source := range sources {
+		family := 0
+		switch source.Family {
+		case model.SRv6FamilyIPv4:
+			family = 4
+		case model.SRv6FamilyIPv6:
+			family = 6
+		default:
+			return nil, "", 0, fmt.Errorf("load SRv6 feed %s: unsupported address family %q", source.Name, source.Family)
 		}
-		for _, feed := range feeds {
-			if feed.sid == nil {
-				continue
-			}
-			filename := source.Name + "_" + feed.suffix + ".txt"
-			cachePath := filepath.Join(cacheDir, filename)
-			data, stale, err := fetchOrReadSRv6Feed(ctx, client, spec.BaseURL, filename, cachePath, time.Duration(spec.RefreshIntervalSeconds)*time.Second)
-			if err != nil {
-				return nil, "", fmt.Errorf("load SRv6 feed %s: %w", filename, err)
-			}
-			usedStale = usedStale || stale
-			prefixes, err := parseSRv6Feed(data, feed.family)
-			if err != nil {
-				return nil, "", fmt.Errorf("parse SRv6 feed %s: %w", filename, err)
-			}
-			if len(allRoutes)+len(prefixes) > maxSRv6RoutesTotal {
-				return nil, "", fmt.Errorf("SRv6 feeds exceed %d total routes", maxSRv6RoutesTotal)
-			}
-			for _, prefix := range prefixes {
-				allRoutes = append(allRoutes, srv6Route{prefix: prefix, sid: *feed.sid, mtu: source.MTU})
-			}
+		familyName := string(source.Family)
+		filename := srv6FeedCacheFilename(source.Name, familyName, source.PrefixURL)
+		cachePath := filepath.Join(cacheDir, filename)
+		data, stale, err := fetchOrReadSRv6Feed(ctx, client, source.PrefixURL, cachePath, time.Duration(spec.RefreshIntervalSeconds)*time.Second)
+		if err != nil {
+			return nil, "", 0, fmt.Errorf("load SRv6 feed %s/%s: %w", source.Name, familyName, err)
+		}
+		usedStale = usedStale || stale
+		prefixes, err := parseSRv6Feed(data, family)
+		if err != nil {
+			return nil, "", 0, fmt.Errorf("parse SRv6 feed %s/%s: %w", source.Name, familyName, err)
+		}
+		if len(allRoutes)+len(prefixes) > maxSRv6RoutesTotal {
+			return nil, "", 0, fmt.Errorf("SRv6 feeds exceed %d total routes", maxSRv6RoutesTotal)
+		}
+		for _, prefix := range prefixes {
+			allRoutes = append(allRoutes, srv6Route{
+				prefix: prefix, sid: source.SID, mtu: source.MTU, priority: source.Priority, origin: source.Name + "/" + familyName,
+			})
 		}
 	}
 	state := "fresh"
 	if usedStale {
 		state = "stale-fallback"
 	}
-	return allRoutes, state, nil
+	resolved, skipped, err := resolveSRv6RouteConflicts(allRoutes)
+	if err != nil {
+		return nil, "", 0, err
+	}
+	return resolved, state, skipped, nil
 }
 
-func fetchOrReadSRv6Feed(ctx context.Context, client *http.Client, baseURL, filename, cachePath string, refresh time.Duration) ([]byte, bool, error) {
+func srv6FeedCacheFilename(sourceName, family, feedURL string) string {
+	digest := sha256.Sum256([]byte(feedURL))
+	return fmt.Sprintf("%s_%s_%x.txt", sourceName, family, digest[:8])
+}
+
+func fetchOrReadSRv6Feed(ctx context.Context, client *http.Client, feedURL, cachePath string, refresh time.Duration) ([]byte, bool, error) {
 	if info, err := os.Stat(cachePath); err == nil && time.Since(info.ModTime()) < refresh {
 		data, err := os.ReadFile(cachePath)
 		return data, false, err
 	}
-	base, err := url.Parse(strings.TrimRight(baseURL, "/") + "/")
-	if err != nil {
-		return nil, false, err
+	parsed, err := url.Parse(feedURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, false, errors.New("feed URL must be an absolute HTTP or HTTPS URL")
 	}
-	reference := &url.URL{Path: filename}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base.ResolveReference(reference).String(), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -168,6 +184,31 @@ func fetchOrReadSRv6Feed(ctx context.Context, client *http.Client, baseURL, file
 		return cached, true, nil
 	}
 	return nil, false, errors.Join(fetchErr, cacheErr)
+}
+
+func resolveSRv6RouteConflicts(routes []srv6Route) ([]srv6Route, int, error) {
+	sort.SliceStable(routes, func(i, j int) bool {
+		return routes[i].priority > routes[j].priority
+	})
+	selected := make(map[netip.Prefix]srv6Route, len(routes))
+	result := make([]srv6Route, 0, len(routes))
+	skipped := 0
+	for _, route := range routes {
+		current, exists := selected[route.prefix]
+		if !exists {
+			selected[route.prefix] = route
+			result = append(result, route)
+			continue
+		}
+		if route.priority == current.priority && (route.sid != current.sid || route.mtu != current.mtu) {
+			return nil, 0, fmt.Errorf(
+				"SRv6 prefix %s has conflicting actions at priority %d in %s and %s",
+				route.prefix, route.priority, current.origin, route.origin,
+			)
+		}
+		skipped++
+	}
+	return result, skipped, nil
 }
 
 func writeCacheAtomic(path string, data []byte) error {

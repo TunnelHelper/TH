@@ -126,8 +126,8 @@ func TestValidateRecordSetDetectsRouteConflictsInEitherOrder(t *testing.T) {
 	srv6 := model.Tunnel{
 		Name: "srv6-routes", Kind: model.KindSRv6,
 		Spec: model.Spec{SRv6: &model.SRv6Spec{
-			BaseURL: "https://routes.example/", UnderlayInterface: "eth0", Table: 1000,
-			Sources: []model.SRv6Source{{Name: "carrier", SIDv4: coreAddrPointer("2001:db8::1"), MTU: 1500}},
+			UnderlayInterface: "eth0", Table: 1000,
+			Sources: []model.SRv6Source{{Name: "source1", Family: model.SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: netip.MustParseAddr("2001:db8::1"), Priority: 100, MTU: 1500}},
 		}},
 	}
 	if err := model.PrepareNew(&srv6, time.Now()); err != nil {

@@ -28,7 +28,7 @@ func TestWorkspaceFieldsCoverEveryTunnelKind(t *testing.T) {
 		{workspaceTestTunnel(model.KindAmneziaWG), []string{"name", "wg.peers", "wg.routing", "wg.rotate", "awg.obfuscation"}},
 		{workspaceTestTunnel(model.KindXFRMStatic), []string{"name", "xfrm.spi-in", "xfrm.algorithm", "xfrm.keys"}},
 		{workspaceTestTunnel(model.KindXFRMIKEv2), []string{"name", "ike.auth", "ike.auth-material", "ike.proposals", "ike.encapsulation", "ike.start"}},
-		{workspaceTestTunnel(model.KindSRv6), []string{"name", "srv6.base-url", "srv6.underlay", "srv6.refresh", "srv6.sources"}},
+		{workspaceTestTunnel(model.KindSRv6), []string{"name", "srv6.underlay", "srv6.refresh", "srv6.sources"}},
 	}
 	for _, test := range tests {
 		t.Run(string(test.tunnel.Kind), func(t *testing.T) {
@@ -145,6 +145,53 @@ func TestSRv6SourceEditorPreservesRequiredLastSource(t *testing.T) {
 	}
 	if len(m.draft.Spec.SRv6.Sources) != 1 {
 		t.Fatalf("source count = %d", len(m.draft.Spec.SRv6.Sources))
+	}
+}
+
+func TestSRv6SourceAddChoosesSingleAddressFamily(t *testing.T) {
+	tunnel := workspaceTestTunnel(model.KindSRv6)
+	m := newManageWorkspaceModel(context.Background(), nil, time.Second, "")
+	m.draft = tunnel
+	m.page = workspaceSources
+	m.beginSourceAdd(tunnel.Spec.SRv6.Sources)
+
+	if m.overlay == nil || m.overlay.Action != "srv6-source-family" {
+		t.Fatalf("new source did not open the address family choice: %+v", m.overlay)
+	}
+	if m.sourceDraft.Family != "" || m.page != workspaceSources {
+		t.Fatalf("source editor opened before choosing a family: %+v", m.sourceDraft)
+	}
+	m.overlay = nil
+	if err := m.applyWorkspaceChoice("srv6-source-family", string(model.SRv6FamilyIPv6)); err != nil {
+		t.Fatal(err)
+	}
+	if m.sourceDraft.Family != model.SRv6FamilyIPv6 || m.sourceDraft.Priority != 100 || m.page != workspaceSource {
+		t.Fatalf("chosen source defaults were not applied: %+v, page=%d", m.sourceDraft, m.page)
+	}
+	fields := workspaceSourceFields(m.sourceDraft)
+	for _, id := range []string{"name", "url", "priority", "sid", "mtu"} {
+		found := false
+		for _, field := range fields {
+			found = found || field.ID == id
+		}
+		if !found {
+			t.Fatalf("field %q missing from %+v", id, fields)
+		}
+	}
+	if err := m.validateSourceDraft(); err == nil {
+		t.Fatal("source without a prefix URL and SID was accepted")
+	}
+	if err := m.applySourceInput("url", []string{"https://routes.example/custom-v6.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.applySourceInput("sid", []string{"2001:db8::2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.validateSourceDraft(); err != nil {
+		t.Fatalf("complete source draft was rejected: %v", err)
+	}
+	if crumb := workspaceSourceCrumb(m.sourceDraft, true); !strings.Contains(crumb, "IPv6") {
+		t.Fatalf("source editor does not identify the fixed family: %q", crumb)
 	}
 }
 
@@ -349,7 +396,7 @@ func workspaceTestTunnel(kind model.Kind) model.Tunnel {
 	case model.KindSRv6:
 		tunnel.Interface = ""
 		sid := netip.MustParseAddr("2001:db8::1")
-		tunnel.Spec.SRv6 = &model.SRv6Spec{BaseURL: "https://example.test/routes", UnderlayInterface: "eth0", Table: 100, RefreshIntervalSeconds: 300, Sources: []model.SRv6Source{{Name: "carrier", SIDv4: &sid, MTU: 1500}}}
+		tunnel.Spec.SRv6 = &model.SRv6Spec{UnderlayInterface: "eth0", Table: 100, RefreshIntervalSeconds: 300, Sources: []model.SRv6Source{{Name: "source1", Family: model.SRv6FamilyIPv4, PrefixURL: "https://example.test/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500}}}
 	}
 	return tunnel
 }

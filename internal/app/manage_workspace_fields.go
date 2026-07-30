@@ -193,7 +193,6 @@ func workspaceTunnelFields(tunnel model.Tunnel) []workspaceField {
 	case model.KindSRv6:
 		spec := tunnel.Spec.SRv6
 		fields = append(fields,
-			workspaceTextField("srv6.base-url", "Route source URL", spec.BaseURL, validateHTTPURL),
 			workspaceTextField("srv6.underlay", "Underlay interface", spec.UnderlayInterface, validateInterfaceInput),
 			workspaceTextField("srv6.refresh", "Refresh interval", strconv.Itoa(spec.RefreshIntervalSeconds), validateInt(60, 604800)),
 			workspaceField{ID: "srv6.sources", Label: "Route sources", Value: fmt.Sprintf("%d configured", len(spec.Sources)), Kind: workspaceFieldNavigate},
@@ -370,8 +369,6 @@ func (m *manageWorkspaceModel) applyTunnelInput(id, value string) error {
 		m.draft.Spec.XFRMIKEv2.Addresses, _ = parsePrefixes(value)
 	case "ike.mtu":
 		m.draft.Spec.XFRMIKEv2.MTU = parseInt(value)
-	case "srv6.base-url":
-		m.draft.Spec.SRv6.BaseURL = value
 	case "srv6.underlay":
 		m.draft.Spec.SRv6.UnderlayInterface = value
 	case "srv6.refresh":
@@ -424,6 +421,15 @@ func (m *manageWorkspaceModel) applyWorkspaceChoice(action, value string) error 
 		return nil
 	}
 	switch action {
+	case "srv6-source-family":
+		family := model.SRv6AddressFamily(value)
+		if family != model.SRv6FamilyIPv4 && family != model.SRv6FamilyIPv6 {
+			return fmt.Errorf("unsupported SRv6 address family %q", value)
+		}
+		m.sourceDraft.Family = family
+		m.fieldSelected = 0
+		m.page = workspaceSource
+		m.notice = ""
 	case "ike-proposals":
 		spec := m.draft.Spec.XFRMIKEv2
 		switch value {

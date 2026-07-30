@@ -235,8 +235,9 @@ func humanWorkspaceSegment(value string) string {
 		"local_address": "Local underlay", "remote_address": "Remote underlay", "local_id": "Local identity", "remote_id": "Remote identity",
 		"auth_method": "Authentication", "psk": "Pre-shared key", "local_private_key": "Local private key",
 		"local_public_key": "Local public key", "remote_public_key": "Remote public key", "ike_proposal": "IKE proposal",
-		"esp_proposal": "ESP proposal", "start_action": "Start action", "base_url": "Route source URL",
-		"refresh_interval_seconds": "Refresh interval", "sources": "Route sources", "sid_v4": "IPv4 route SID", "sid_v6": "IPv6 route SID",
+		"esp_proposal": "ESP proposal", "start_action": "Start action", "family": "Address family",
+		"prefix_url": "Prefix file URL", "priority": "Priority", "sid": "Route SID",
+		"refresh_interval_seconds": "Refresh interval", "sources": "Route sources",
 		"jc": "Jc", "jmin": "Jmin", "jmax": "Jmax", "s1": "S1", "s2": "S2", "h1": "H1", "h2": "H2", "h3": "H3", "h4": "H4",
 	}
 	if label := labels[value]; label != "" {

@@ -22,7 +22,7 @@ func TestPrepareNewDefaultsAndValidation(t *testing.T) {
 		{Name: "awg", Kind: KindAmneziaWG, Interface: "awg0", Spec: Spec{AmneziaWG: &AmneziaWGSpec{WireGuardSpec: WireGuardSpec{Peers: []WireGuardPeer{{PublicKey: peerKey.PublicKey().String()}}}}}},
 		{Name: "static", Kind: KindXFRMStatic, Interface: "xfrm0", Spec: Spec{XFRMStatic: &XFRMStaticSpec{UnderlayInterface: "eth0", Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2")}}},
 		{Name: "ike", Kind: KindXFRMIKEv2, Interface: "ipsec0", Spec: Spec{XFRMIKEv2: &XFRMIKEv2Spec{UnderlayInterface: "eth0", LocalAddress: "192.0.2.1", RemoteAddress: "192.0.2.2", LocalID: "left", RemoteID: "right", AuthMethod: IKEAuthPSK}}},
-		{Name: "srv6", Kind: KindSRv6, Spec: Spec{SRv6: &SRv6Spec{BaseURL: "https://routes.example/", UnderlayInterface: "eth0", Table: 100, Sources: []SRv6Source{{Name: "carrier", SIDv4: addrPointer("2001:db8::1"), MTU: 1500}}}}},
+		{Name: "srv6", Kind: KindSRv6, Spec: Spec{SRv6: &SRv6Spec{UnderlayInterface: "eth0", Table: 100, Sources: []SRv6Source{{Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: netip.MustParseAddr("2001:db8::1"), Priority: 100, MTU: 1500}}}}},
 	}
 
 	for i := range records {
@@ -242,7 +242,39 @@ func TestValidationRejectsOversizedCollections(t *testing.T) {
 	}
 }
 
-func addrPointer(value string) *netip.Addr {
-	addr := netip.MustParseAddr(value)
-	return &addr
+func TestSRv6ValidationRequiresSingleFamilySource(t *testing.T) {
+	sid := netip.MustParseAddr("2001:db8::1")
+	valid := func(source SRv6Source) *SRv6Spec {
+		return &SRv6Spec{
+			UnderlayInterface: "eth0", Table: 100, RefreshIntervalSeconds: 300,
+			Sources: []SRv6Source{source},
+		}
+	}
+	if err := validateSRv6(valid(SRv6Source{
+		Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500,
+	})); err != nil {
+		t.Fatalf("valid SRv6 source was rejected: %v", err)
+	}
+	duplicateName := valid(SRv6Source{
+		Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500,
+	})
+	duplicateName.Sources = append(duplicateName.Sources, SRv6Source{
+		Name: "source1", Family: SRv6FamilyIPv6, PrefixURL: "https://routes.example/edge-v6.txt", SID: sid, Priority: 90, MTU: 1500,
+	})
+	if err := validateSRv6(duplicateName); err == nil {
+		t.Fatal("one SRv6 source name was accepted for multiple address families")
+	}
+	for _, source := range []SRv6Source{
+		{Name: "source1", PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500},
+		{Name: "source1", Family: "dual", PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500},
+		{Name: "source1", Family: SRv6FamilyIPv4, SID: sid, Priority: 100, MTU: 1500},
+		{Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "file:///tmp/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500},
+		{Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", Priority: 100, MTU: 1500},
+		{Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: netip.MustParseAddr("192.0.2.1"), Priority: 100, MTU: 1500},
+		{Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: -1, MTU: 1500},
+	} {
+		if err := validateSRv6(valid(source)); err == nil {
+			t.Fatalf("invalid SRv6 source was accepted: %+v", source)
+		}
+	}
 }

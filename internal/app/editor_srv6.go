@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/TunnelHelper/TH/internal/ui"
@@ -11,7 +12,6 @@ import (
 
 func srv6EditOptions(spec *model.SRv6Spec) []ui.Option {
 	return []ui.Option{
-		{Label: "Route source base URL: " + spec.BaseURL, Value: "base-url"},
 		{Label: "Underlay interface: " + spec.UnderlayInterface, Value: "underlay"},
 		{Label: fmt.Sprintf("Refresh interval: %d seconds", spec.RefreshIntervalSeconds), Value: "refresh"},
 		{Label: fmt.Sprintf("Route sources: %d", len(spec.Sources)), Value: "sources"},
@@ -21,8 +21,6 @@ func srv6EditOptions(spec *model.SRv6Spec) []ui.Option {
 func editSRv6Field(prompts *prompts, record *model.Tunnel, field string) error {
 	spec := record.Spec.SRv6
 	switch field {
-	case "base-url":
-		return prompts.input("Route source base URL", &spec.BaseURL, validateHTTPURL)
 	case "underlay":
 		return prompts.input("Underlay interface", &spec.UnderlayInterface, validateInterfaceInput)
 	case "refresh":
@@ -42,7 +40,7 @@ func editSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.SRv6
 	for {
 		options := make([]ui.Option, 0, len(sources)+2)
 		for index, source := range sources {
-			options = append(options, ui.Option{Label: source.Name, Value: strconv.Itoa(index)})
+			options = append(options, ui.Option{Label: srv6SourceOptionLabel(source), Value: strconv.Itoa(index)})
 		}
 		options = append(options, ui.Option{Label: "Add source", Value: "add"}, ui.Option{Label: "Done", Value: "done"})
 		choice := "done"
@@ -100,20 +98,21 @@ func editSRv6Source(prompts *prompts, original model.SRv6Source) (model.SRv6Sour
 	for {
 		options := []ui.Option{
 			{Label: "Name: " + source.Name, Value: "name"},
-			{Label: "IPv4 route SID: " + optionalAddrLabel(source.SIDv4), Value: "sid4"},
-			{Label: "IPv6 route SID: " + optionalAddrLabel(source.SIDv6), Value: "sid6"},
+			{Label: "Prefix file URL: " + source.PrefixURL, Value: "url"},
+			{Label: fmt.Sprintf("Priority: %d", source.Priority), Value: "priority"},
+			{Label: "Route SID: " + srv6SIDInput(source.SID), Value: "sid"},
 			{Label: fmt.Sprintf("MTU: %d", source.MTU), Value: "mtu"},
 			{Label: "Finish editing", Value: "finish"},
 			{Label: "Remove source", Value: "remove"},
 		}
 		choice := "finish"
-		if err := prompts.selectValue("Source field", options, &choice); err != nil {
+		if err := prompts.selectValue(srv6FamilyDisplay(source.Family)+" source field", options, &choice); err != nil {
 			return original, "discard", err
 		}
 		switch choice {
 		case "finish":
-			if source.SIDv4 == nil && source.SIDv6 == nil {
-				prompts.ui.Warn("At least one SID is required")
+			if err := validateSRv6SourceFields(source); err != nil {
+				prompts.ui.Warn(err.Error())
 				continue
 			}
 			save, err := prompts.saveDiscard("Source changes", "Save source", "Discard changes")
@@ -136,39 +135,25 @@ func editSRv6Source(prompts *prompts, original model.SRv6Source) (model.SRv6Sour
 			if err := prompts.input("Source name", &source.Name, validateNameInput); err != nil {
 				return original, "discard", err
 			}
-		case "sid4", "sid6":
-			value := optionalAddrInput(source.SIDv4)
-			label := "SID for IPv4 routes (blank = none)"
-			if field := choice; field == "sid6" {
-				value, label = optionalAddrInput(source.SIDv6), "SID for IPv6 routes (blank = none)"
-			}
-			if err := prompts.input(label, &value, validateOptionalIPv6); err != nil {
+		case "url":
+			if err := prompts.input(srv6FamilyDisplay(source.Family)+" prefix file URL", &source.PrefixURL, validateHTTPURL); err != nil {
 				return original, "discard", err
 			}
-			address, _ := parseOptionalAddr(value)
-			if choice == "sid4" {
-				source.SIDv4 = address
-			} else {
-				source.SIDv6 = address
+			source.PrefixURL = strings.TrimSpace(source.PrefixURL)
+		case "priority":
+			if err := editInt(prompts, "Priority (0-2147483647, higher wins)", &source.Priority, 0, 2147483647); err != nil {
+				return original, "discard", err
 			}
+		case "sid":
+			value := srv6SIDInput(source.SID)
+			if err := prompts.input("Route SID", &value, validateRequiredIPv6); err != nil {
+				return original, "discard", err
+			}
+			source.SID, _ = netip.ParseAddr(strings.TrimSpace(value))
 		case "mtu":
 			if err := editInt(prompts, "MTU (68-65535)", &source.MTU, 68, 65535); err != nil {
 				return original, "discard", err
 			}
 		}
 	}
-}
-
-func optionalAddrLabel(value *netip.Addr) string {
-	if value == nil {
-		return "none"
-	}
-	return value.String()
-}
-
-func optionalAddrInput(value *netip.Addr) string {
-	if value == nil {
-		return ""
-	}
-	return value.String()
 }

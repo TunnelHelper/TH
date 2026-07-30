@@ -212,8 +212,8 @@ func preparedSRv6(t *testing.T, name string, table int) model.Tunnel {
 	record := model.Tunnel{
 		Name: name, Kind: model.KindSRv6,
 		Spec: model.Spec{SRv6: &model.SRv6Spec{
-			BaseURL: "https://routes.example/", UnderlayInterface: "eth0", Table: table,
-			Sources: []model.SRv6Source{{Name: "carrier", SIDv4: &sid, MTU: 1500}},
+			UnderlayInterface: "eth0", Table: table,
+			Sources: []model.SRv6Source{{Name: "source1", Family: model.SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500}},
 		}},
 	}
 	if err := model.PrepareNew(&record, time.Now()); err != nil {

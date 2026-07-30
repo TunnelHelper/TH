@@ -122,7 +122,7 @@ Update uses this envelope and requires the current generation:
 {
   "generation": 4,
   "tunnel": {
-    "schema_version": 2,
+    "schema_version": 3,
     "id": "11111111-2222-4333-8444-555555555555",
     "generation": 4,
     "name": "site-a-gre",

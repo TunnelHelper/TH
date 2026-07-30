@@ -331,6 +331,10 @@ func TestParseSRv6Feed(t *testing.T) {
 	if _, err := parseSRv6Feed([]byte("2001:db8::/32\n"), 4); err == nil {
 		t.Fatal("wrong-family feed was accepted")
 	}
+	ipv6, err := parseSRv6Feed([]byte("2001:db8::1/32\n"), 6)
+	if err != nil || len(ipv6) != 1 || ipv6[0] != netip.MustParsePrefix("2001:db8::/32") {
+		t.Fatalf("parsed IPv6 prefixes = %v, err = %v", ipv6, err)
+	}
 	if _, err := parseSRv6Feed([]byte("not-a-prefix\n"), 4); err == nil || !strings.Contains(err.Error(), "line 1") {
 		t.Fatalf("malformed feed error = %v", err)
 	}
@@ -350,15 +354,15 @@ func TestParseSRv6FeedRejectsTooManyRoutes(t *testing.T) {
 
 func TestSRv6FetchCachesAndFallsBack(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/carrier_v4.txt" {
+		if request.URL.Path != "/feeds/edge-v4.txt" {
 			http.NotFound(response, request)
 			return
 		}
 		_, _ = response.Write([]byte("192.0.2.0/24\n"))
 	}))
-	cachePath := filepath.Join(t.TempDir(), "carrier_v4.txt")
+	cachePath := filepath.Join(t.TempDir(), "source1_v4.txt")
 	client := &http.Client{Timeout: time.Second}
-	data, stale, err := fetchOrReadSRv6Feed(context.Background(), client, server.URL, "carrier_v4.txt", cachePath, time.Hour)
+	data, stale, err := fetchOrReadSRv6Feed(context.Background(), client, server.URL+"/feeds/edge-v4.txt", cachePath, time.Hour)
 	if err != nil || stale || string(data) != "192.0.2.0/24\n" {
 		t.Fatalf("fresh fetch = %q, stale=%t, err=%v", data, stale, err)
 	}
@@ -367,9 +371,68 @@ func TestSRv6FetchCachesAndFallsBack(t *testing.T) {
 		t.Fatalf("cache mode = %v, %v", info, err)
 	}
 	server.Close()
-	data, stale, err = fetchOrReadSRv6Feed(context.Background(), client, server.URL, "carrier_v4.txt", cachePath, -time.Second)
+	data, stale, err = fetchOrReadSRv6Feed(context.Background(), client, server.URL+"/feeds/edge-v4.txt", cachePath, -time.Second)
 	if err != nil || !stale || string(data) != "192.0.2.0/24\n" {
 		t.Fatalf("stale fallback = %q, stale=%t, err=%v", data, stale, err)
+	}
+}
+
+func TestSRv6CacheKeyChangesWithFeedURL(t *testing.T) {
+	first := srv6FeedCacheFilename("source1", "v4", "https://routes.example/first.txt")
+	second := srv6FeedCacheFilename("source1", "v4", "https://routes.example/second.txt")
+	if first == second {
+		t.Fatalf("different feed URLs share cache key %q", first)
+	}
+	if first != srv6FeedCacheFilename("source1", "v4", "https://routes.example/first.txt") {
+		t.Fatal("feed cache key is not stable")
+	}
+}
+
+func TestResolveSRv6RouteConflictsPrefersHigherPriority(t *testing.T) {
+	shared := netip.MustParsePrefix("192.0.2.0/24")
+	narrower := netip.MustParsePrefix("192.0.2.0/25")
+	lowSID := netip.MustParseAddr("2001:db8::1")
+	highSID := netip.MustParseAddr("2001:db8::2")
+	routes, skipped, err := resolveSRv6RouteConflicts([]srv6Route{
+		{prefix: shared, sid: lowSID, mtu: 1500, priority: 10, origin: "low/v4"},
+		{prefix: narrower, sid: lowSID, mtu: 1500, priority: 10, origin: "low/v4"},
+		{prefix: shared, sid: highSID, mtu: 1400, priority: 20, origin: "high/v4"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 1 || len(routes) != 2 {
+		t.Fatalf("resolved routes = %+v, skipped = %d", routes, skipped)
+	}
+	selected := make(map[netip.Prefix]srv6Route, len(routes))
+	for _, route := range routes {
+		selected[route.prefix] = route
+	}
+	if got := selected[shared]; got.sid != highSID || got.mtu != 1400 || got.priority != 20 {
+		t.Fatalf("shared prefix selected route = %+v", got)
+	}
+	if _, ok := selected[narrower]; !ok {
+		t.Fatal("overlapping, non-identical prefix was incorrectly skipped")
+	}
+}
+
+func TestResolveSRv6RouteConflictsRejectsAmbiguousTies(t *testing.T) {
+	prefix := netip.MustParsePrefix("192.0.2.0/24")
+	firstSID := netip.MustParseAddr("2001:db8::1")
+	secondSID := netip.MustParseAddr("2001:db8::2")
+	_, _, err := resolveSRv6RouteConflicts([]srv6Route{
+		{prefix: prefix, sid: firstSID, mtu: 1500, priority: 100, origin: "first/v4"},
+		{prefix: prefix, sid: secondSID, mtu: 1500, priority: 100, origin: "second/v4"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "priority 100") {
+		t.Fatalf("ambiguous equal-priority routes error = %v", err)
+	}
+	routes, skipped, err := resolveSRv6RouteConflicts([]srv6Route{
+		{prefix: prefix, sid: firstSID, mtu: 1500, priority: 100, origin: "first/v4"},
+		{prefix: prefix, sid: firstSID, mtu: 1500, priority: 100, origin: "second/v4"},
+	})
+	if err != nil || len(routes) != 1 || skipped != 1 {
+		t.Fatalf("identical equal-priority routes = %+v, skipped = %d, err = %v", routes, skipped, err)
 	}
 }
 

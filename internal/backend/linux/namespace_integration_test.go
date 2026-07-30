@@ -236,7 +236,7 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 
 	t.Run("srv6", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-			if request.URL.Path != "/carrier_v4.txt" {
+			if request.URL.Path != "/edge-v4.txt" {
 				http.NotFound(response, request)
 				return
 			}
@@ -246,8 +246,8 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 		record := prepareIntegrationRecord(t, model.Tunnel{
 			Name: "srv6", Kind: model.KindSRv6,
 			Spec: model.Spec{SRv6: &model.SRv6Spec{
-				BaseURL: server.URL, UnderlayInterface: "underlay0", Table: 1001,
-				Sources: []model.SRv6Source{{Name: "carrier", SIDv4: integrationAddrPointer("2001:db8:1::1"), MTU: 1400}},
+				UnderlayInterface: "underlay0", Table: 1001,
+				Sources: []model.SRv6Source{{Name: "source1", Family: model.SRv6FamilyIPv4, PrefixURL: server.URL + "/edge-v4.txt", SID: netip.MustParseAddr("2001:db8:1::1"), Priority: 100, MTU: 1400}},
 			}},
 		})
 		underlayLink, err := backend.netlink.LinkByName("underlay0")
@@ -382,11 +382,6 @@ func prepareIntegrationRecord(t *testing.T, record model.Tunnel) model.Tunnel {
 		t.Fatal(err)
 	}
 	return record
-}
-
-func integrationAddrPointer(value string) *netip.Addr {
-	address := netip.MustParseAddr(value)
-	return &address
 }
 
 func assertLifecycle(t *testing.T, backend *Backend, record model.Tunnel) {

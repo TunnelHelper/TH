@@ -209,8 +209,8 @@ func TestPeerEditorSeparatesFinishFromRemoval(t *testing.T) {
 
 func TestSRv6SourceEditorUsesSaveDiscardDecision(t *testing.T) {
 	sid := netip.MustParseAddr("2001:db8::1")
-	original := model.SRv6Source{Name: "carrier", SIDv4: &sid, MTU: 1500}
-	prompts, output := transcriptPrompts("5\n2\n")
+	original := model.SRv6Source{Name: "source1", Family: model.SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500}
+	prompts, output := transcriptPrompts("6\n2\n")
 	source, action, err := editSRv6Source(prompts, original)
 	if err != nil || action != "discard" || source.Name != original.Name {
 		t.Fatalf("source=%+v, action=%q, err=%v", source, action, err)
@@ -219,6 +219,26 @@ func TestSRv6SourceEditorUsesSaveDiscardDecision(t *testing.T) {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("source editor does not contain %q:\n%s", expected, output.String())
 		}
+	}
+}
+
+func TestNewSRv6SourceChoosesAddressFamilyFirst(t *testing.T) {
+	prompts, output := transcriptPrompts("2\n\nhttps://routes.example/edge-v6.txt\n\n2001:db8::2\n\n1\n")
+	source, keep, err := collectSRv6Source(prompts, model.SRv6Source{Name: "source2", MTU: 1500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !keep || source.Family != model.SRv6FamilyIPv6 || source.Priority != 100 || source.PrefixURL != "https://routes.example/edge-v6.txt" {
+		t.Fatalf("new IPv6 source = %+v, keep=%t", source, keep)
+	}
+	transcript := output.String()
+	familyPrompt := strings.Index(transcript, "Address family")
+	namePrompt := strings.Index(transcript, "Source name")
+	if familyPrompt < 0 || namePrompt < 0 || familyPrompt >= namePrompt {
+		t.Fatalf("address family was not selected before source editing:\n%s", transcript)
+	}
+	if !strings.Contains(transcript, "IPv6 prefix file URL") || strings.Contains(transcript, "IPv4 prefix file URL") {
+		t.Fatalf("source form exposed the wrong address family fields:\n%s", transcript)
 	}
 }
 
@@ -278,16 +298,16 @@ func TestPrefixValidationReportsDuplicatesAtTheField(t *testing.T) {
 }
 
 func TestSRv6SourceNamesStayUniqueInsideTheEditor(t *testing.T) {
-	sources := []model.SRv6Source{{Name: "chinamobile"}}
-	if suggested := suggestedSRv6SourceName(sources); suggested != "chinaunicom" {
+	sources := []model.SRv6Source{{Name: "source1"}}
+	if suggested := suggestedSRv6SourceName(sources); suggested != "source2" {
 		t.Fatalf("suggested source name = %q", suggested)
 	}
-	prompts, _ := transcriptPrompts("chinaunicom\n")
-	name := "chinamobile"
+	prompts, _ := transcriptPrompts("source2\n")
+	name := "source1"
 	if err := ensureUniqueSRv6SourceName(prompts, sources, -1, &name); err != nil {
 		t.Fatal(err)
 	}
-	if name != "chinaunicom" {
+	if name != "source2" {
 		t.Fatalf("resolved source name = %q", name)
 	}
 }
