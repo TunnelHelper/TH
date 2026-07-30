@@ -354,9 +354,57 @@ func (r *Reconciler) Observe(ctx context.Context, id string) error {
 	phase := model.PhaseReady
 	if !record.Enabled {
 		phase = model.PhaseDisabled
+	} else if err == nil && record.Interface != "" && !observation.InterfaceExists {
+		err = fmt.Errorf("managed interface %s is missing", record.Interface)
+	} else if err == nil && record.Interface != "" && !observation.InterfaceUp {
+		err = fmt.Errorf("managed interface %s is down", record.Interface)
 	}
 	r.setResult(record, observation, err, phase)
 	return err
+}
+
+func (r *Reconciler) ObserveAll(ctx context.Context) error {
+	records, err := r.store.List()
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return nil
+	}
+	workers := min(4, len(records))
+	jobs := make(chan string)
+	var (
+		workersDone sync.WaitGroup
+		errorsMu    sync.Mutex
+		joined      error
+	)
+	workersDone.Add(workers)
+	for range workers {
+		go func() {
+			defer workersDone.Done()
+			for id := range jobs {
+				if err := r.Observe(ctx, id); err != nil {
+					errorsMu.Lock()
+					joined = errors.Join(joined, fmt.Errorf("%s: %w", id, err))
+					errorsMu.Unlock()
+				}
+			}
+		}()
+	}
+send:
+	for _, record := range records {
+		select {
+		case jobs <- record.ID:
+		case <-ctx.Done():
+			errorsMu.Lock()
+			joined = errors.Join(joined, ctx.Err())
+			errorsMu.Unlock()
+			break send
+		}
+	}
+	close(jobs)
+	workersDone.Wait()
+	return joined
 }
 
 func (r *Reconciler) Status(record model.Tunnel) model.Status {

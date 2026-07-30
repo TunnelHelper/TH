@@ -67,7 +67,7 @@ func editWireGuardField(prompts *prompts, record *model.Tunnel, field string) er
 		}
 		spec.RouteAllowedIPs, spec.RouteTable = enabled, table
 	case "rotate":
-		confirmed, err := prompts.confirm("Rotate the local key and require peers to update", false)
+		confirmed, err := prompts.confirmAction("Rotate the local key and require peers to update", "Rotate key")
 		if err != nil || !confirmed {
 			return err
 		}
@@ -98,7 +98,7 @@ func editWireGuardPeers(prompts *prompts, initial []model.WireGuardPeer) ([]mode
 			return peers, nil
 		}
 		if choice == "add" {
-			peer, keep, err := collectWireGuardPeer(prompts, model.WireGuardPeer{}, true)
+			peer, keep, err := collectWireGuardPeer(prompts, model.WireGuardPeer{})
 			if err != nil {
 				return nil, err
 			}
@@ -142,19 +142,25 @@ func editWireGuardPeer(prompts *prompts, original model.WireGuardPeer) (model.Wi
 			options = append(options, ui.Option{Label: fmt.Sprintf("Keepalive: %d", peer.Keepalive), Value: "keepalive"})
 		}
 		options = append(options,
-			ui.Option{Label: "Save peer", Value: "save"},
+			ui.Option{Label: "Finish editing", Value: "finish"},
 			ui.Option{Label: "Remove peer", Value: "remove"},
-			ui.Option{Label: "Discard peer changes", Value: "discard"},
 		)
-		choice := "save"
+		choice := "finish"
 		if err := prompts.selectValue("Peer field", options, &choice); err != nil {
 			return original, "discard", err
 		}
 		switch choice {
-		case "save", "discard":
-			return peer, choice, nil
+		case "finish":
+			save, err := prompts.saveDiscard("Peer changes", "Save peer", "Discard changes")
+			if err != nil {
+				return original, "discard", err
+			}
+			if save {
+				return peer, "save", nil
+			}
+			return original, "discard", nil
 		case "remove":
-			confirmed, err := prompts.confirm("Remove this peer", false)
+			confirmed, err := prompts.confirmAction("Remove this peer", "Remove peer")
 			if err != nil {
 				return original, "discard", err
 			}

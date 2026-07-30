@@ -177,6 +177,24 @@ func (c *Client) Reconcile(ctx context.Context, id string) (model.TunnelView, er
 	return response, nil
 }
 
+func (c *Client) Observe(ctx context.Context, id string) (model.TunnelView, error) {
+	var response model.TunnelView
+	if err := c.do(ctx, http.MethodPost, "/v1/tunnels/"+id+"/observe", struct{}{}, 0, &response); err != nil {
+		return model.TunnelView{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) ObserveAll(ctx context.Context) ([]model.TunnelView, error) {
+	var response struct {
+		Tunnels []model.TunnelView `json:"tunnels"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/observe", struct{}{}, 0, &response); err != nil {
+		return nil, err
+	}
+	return response.Tunnels, nil
+}
+
 func (c *Client) ReconcileAll(ctx context.Context) ([]model.TunnelView, error) {
 	var response struct {
 		Tunnels []model.TunnelView `json:"tunnels"`

@@ -98,10 +98,9 @@ func collectWireGuardBase(prompts *prompts, spec *model.WireGuardSpec, creating 
 }
 
 func showLocalPublicKey(prompts *prompts, publicKey string) {
-	prompts.ui.HR()
+	fmt.Fprintln(prompts.ui.Out)
 	prompts.ui.Ok("Local public key: " + publicKey)
 	prompts.ui.Dim("Share this key with the peer before adding its public key.")
-	prompts.ui.HR()
 }
 
 func collectWireGuardRouting(prompts *prompts, enabled bool, table int) (bool, int, error) {
@@ -141,7 +140,11 @@ func collectWireGuardPeers(prompts *prompts, initial []model.WireGuardPeer) ([]m
 		for index, peer := range peers {
 			options = append(options, ui.Option{Label: peerLabel(peer), Value: strconv.Itoa(index)})
 		}
-		options = append(options, ui.Option{Label: "Add peer", Value: "add"}, ui.Option{Label: "Done", Value: "done"})
+		addLabel := "Add peer"
+		if len(peers) > 0 {
+			addLabel = "Add another peer"
+		}
+		options = append(options, ui.Option{Label: addLabel, Value: "add"}, ui.Option{Label: "Continue", Value: "done"})
 		choice := "done"
 		if err := prompts.selectValue("Peers", options, &choice); err != nil {
 			return nil, err
@@ -150,7 +153,7 @@ func collectWireGuardPeers(prompts *prompts, initial []model.WireGuardPeer) ([]m
 			return peers, nil
 		}
 		if choice == "add" {
-			peer, keep, err := collectWireGuardPeer(prompts, model.WireGuardPeer{}, true)
+			peer, keep, err := collectWireGuardPeer(prompts, model.WireGuardPeer{})
 			if err != nil {
 				if errors.Is(err, ErrAborted) {
 					return nil, err
@@ -171,23 +174,24 @@ func collectWireGuardPeers(prompts *prompts, initial []model.WireGuardPeer) ([]m
 		if index < 0 || index >= len(peers) {
 			continue
 		}
-		peer, keep, err := collectWireGuardPeer(prompts, peers[index], false)
+		peer, action, err := editWireGuardPeer(prompts, peers[index])
 		if err != nil {
 			return nil, err
 		}
-		if keep {
+		switch action {
+		case "save":
 			if duplicatePeer(peers, peer.PublicKey, index) {
 				prompts.ui.Warn("A peer with that public key already exists")
 				continue
 			}
 			peers[index] = peer
-		} else {
+		case "remove":
 			peers = append(peers[:index], peers[index+1:]...)
 		}
 	}
 }
 
-func collectWireGuardPeer(prompts *prompts, peer model.WireGuardPeer, adding bool) (model.WireGuardPeer, bool, error) {
+func collectWireGuardPeer(prompts *prompts, peer model.WireGuardPeer) (model.WireGuardPeer, bool, error) {
 	if err := prompts.input("Peer public key", &peer.PublicKey, validateWireGuardKey); err != nil {
 		return peer, false, err
 	}
@@ -201,7 +205,7 @@ func collectWireGuardPeer(prompts *prompts, peer model.WireGuardPeer, adding boo
 	peer.Endpoint = endpoint
 	if peer.Endpoint != "" {
 		keepalive := strconv.Itoa(peer.Keepalive)
-		if adding && peer.Keepalive == 0 {
+		if peer.Keepalive == 0 {
 			keepalive = "25"
 		}
 		if err := prompts.input("Persistent keepalive seconds (0 = disabled)", &keepalive, validateInt(0, 65535)); err != nil {
@@ -212,28 +216,18 @@ func collectWireGuardPeer(prompts *prompts, peer model.WireGuardPeer, adding boo
 		peer.Keepalive = 0
 	}
 	allowed := formatPrefixes(peer.AllowedIPs)
-	if adding && allowed == "" {
+	if allowed == "" {
 		allowed = "0.0.0.0/0,::/0"
 	}
 	if err := prompts.input("Allowed IPs (comma separated)", &allowed, validateAllowedPrefixesInput); err != nil {
 		return peer, false, err
 	}
 	peer.AllowedIPs, _ = parsePrefixes(allowed)
-	if adding {
-		choice := "save"
-		if err := prompts.selectValue("Peer", []ui.Option{
-			{Label: "Add peer", Value: "save"},
-			{Label: "Discard", Value: "discard"},
-		}, &choice); err != nil {
-			return peer, false, err
-		}
-		return peer, choice == "save", nil
-	}
-	remove, err := prompts.confirm("Remove this peer", false)
+	save, err := prompts.saveDiscard("Peer", "Save peer", "Discard peer")
 	if err != nil {
 		return peer, false, err
 	}
-	return peer, !remove, nil
+	return peer, save, nil
 }
 
 func collectEndpoint(prompts *prompts, current string) (string, error) {

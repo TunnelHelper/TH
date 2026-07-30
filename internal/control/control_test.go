@@ -34,6 +34,22 @@ func TestServerAPIContracts(t *testing.T) {
 		t.Fatalf("list status/header = %d/%q", response.StatusCode, response.Header.Get("X-TH-API"))
 	}
 	response.Body.Close()
+	response, err = http.Post(server.URL+"/v1/tunnels/"+manager.view.Tunnel.ID+"/observe", "application/json", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || manager.observeCalls != 1 {
+		t.Fatalf("observe status/calls = %d/%d", response.StatusCode, manager.observeCalls)
+	}
+	response, err = http.Post(server.URL+"/v1/observe", "application/json", bytes.NewBufferString(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || manager.observeAllCalls != 1 {
+		t.Fatalf("observe-all status/calls = %d/%d", response.StatusCode, manager.observeAllCalls)
+	}
 
 	request, _ := http.NewRequest(http.MethodDelete, server.URL+"/v1/tunnels/"+manager.view.Tunnel.ID, nil)
 	response, err = http.DefaultClient.Do(request)
@@ -329,13 +345,15 @@ func assertAPIError(t *testing.T, response *http.Response, status int, code stri
 }
 
 type stubManager struct {
-	view           model.TunnelView
-	views          []model.TunnelView
-	health         map[model.Kind]core.BackendHealth
-	events         *core.EventHub
-	getErr         error
-	updateErr      error
-	reconcileCalls int
+	view            model.TunnelView
+	views           []model.TunnelView
+	health          map[model.Kind]core.BackendHealth
+	events          *core.EventHub
+	getErr          error
+	updateErr       error
+	observeCalls    int
+	observeAllCalls int
+	reconcileCalls  int
 }
 
 func (m *stubManager) List() ([]model.TunnelView, error) {
@@ -357,6 +375,14 @@ func (m *stubManager) SetEnabled(context.Context, string, uint64, bool) (model.T
 	return m.view, nil
 }
 func (m *stubManager) Delete(context.Context, string, uint64) error { return nil }
+func (m *stubManager) Observe(context.Context, string) (model.TunnelView, error) {
+	m.observeCalls++
+	return m.view, nil
+}
+func (m *stubManager) ObserveAll(context.Context) ([]model.TunnelView, error) {
+	m.observeAllCalls++
+	return []model.TunnelView{m.view}, nil
+}
 func (m *stubManager) Reconcile(context.Context, string) (model.TunnelView, error) {
 	m.reconcileCalls++
 	return m.view, nil

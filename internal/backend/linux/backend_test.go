@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,20 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
+
+func TestWireGuardKernelClientRequiresLiveContext(t *testing.T) {
+	control := &wireGuardControl{timeout: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client, err := control.kernelClient(ctx)
+	if client != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("kernel client = %v, error = %v", client, err)
+	}
+	if control.client != nil {
+		t.Fatal("wgctrl client was initialized without a successful kernel probe")
+	}
+}
 
 func TestBuildVICIConnectionUsesBinaryRPKValues(t *testing.T) {
 	remotePublic := generatedPublicDER(t)
@@ -142,6 +157,101 @@ func TestWireGuardPeerStatusesExposeOperationalData(t *testing.T) {
 	}
 	if len(status.AllowedIPs) != 1 || status.AllowedIPs[0] != "10.0.0.0/24" || status.ReceiveBytes != 1024 || status.TransmitBytes != 2048 {
 		t.Fatalf("peer operational data = %+v", status)
+	}
+}
+
+func TestWireGuardReconcilePreservesUnchangedPeerRuntimeState(t *testing.T) {
+	privateKey, _ := wgtypes.GeneratePrivateKey()
+	peerKey, _ := wgtypes.GeneratePrivateKey()
+	presharedKey, _ := wgtypes.GenerateKey()
+	handshake := time.Now().Add(-time.Minute).UTC()
+	allowed := netip.MustParsePrefix("10.20.0.0/24")
+	spec := &model.WireGuardSpec{
+		PrivateKey:   privateKey.String(),
+		ListenPort:   51820,
+		FirewallMark: 77,
+		Peers: []model.WireGuardPeer{{
+			PublicKey: peerKey.PublicKey().String(), PresharedKey: presharedKey.String(),
+			Endpoint: "192.0.2.10:51820", Keepalive: 25, AllowedIPs: []netip.Prefix{allowed},
+		}},
+	}
+	current := &wgtypes.Device{
+		PrivateKey: privateKey, ListenPort: spec.ListenPort, FirewallMark: spec.FirewallMark,
+		Peers: []wgtypes.Peer{{
+			PublicKey: peerKey.PublicKey(), PresharedKey: presharedKey,
+			Endpoint:                    &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 51820},
+			PersistentKeepaliveInterval: 25 * time.Second,
+			AllowedIPs:                  []net.IPNet{*prefixToIPNet(allowed)},
+			LastHandshakeTime:           handshake,
+			ReceiveBytes:                123456,
+			TransmitBytes:               654321,
+		}},
+	}
+	record := model.Tunnel{Kind: model.KindWireGuard, Spec: model.Spec{WireGuard: spec}}
+	configuration, err := buildWireGuardConfiguration(context.Background(), record, spec, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wireGuardConfigurationChanges(configuration) || configuration.ReplacePeers {
+		t.Fatalf("unchanged peer produced a destructive configuration: %+v", configuration)
+	}
+
+	spec.Peers[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("10.21.0.0/24")}
+	configuration, err = buildWireGuardConfiguration(context.Background(), record, spec, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.ReplacePeers || len(configuration.Peers) != 1 || !configuration.Peers[0].UpdateOnly || configuration.Peers[0].Remove {
+		t.Fatalf("peer update was not incremental: %+v", configuration)
+	}
+}
+
+func TestAmneziaReconcileUsesIncrementalPeerChanges(t *testing.T) {
+	peerKey, _ := wgtypes.GeneratePrivateKey()
+	allowed := netip.MustParsePrefix("10.20.0.0/24")
+	desired := []model.WireGuardPeer{{
+		PublicKey: peerKey.PublicKey().String(), Keepalive: 25, AllowedIPs: []netip.Prefix{allowed},
+	}}
+	current := []wgtypes.Peer{{
+		PublicKey: peerKey.PublicKey(), PersistentKeepaliveInterval: 25 * time.Second,
+		AllowedIPs:        []net.IPNet{*prefixToIPNet(allowed)},
+		LastHandshakeTime: time.Now().Add(-time.Minute), ReceiveBytes: 123, TransmitBytes: 456,
+	}}
+	changes, err := buildAmneziaPeerChanges(context.Background(), desired, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 0 {
+		t.Fatalf("unchanged AWG peer produced changes: %+v", changes)
+	}
+
+	desired[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("10.21.0.0/24")}
+	changes, err = buildAmneziaPeerChanges(context.Background(), desired, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 || changes[0].flags&awgPeerUpdateOnly == 0 || changes[0].flags&awgPeerReplaceAllowedIPs == 0 || changes[0].flags&awgPeerRemove != 0 {
+		t.Fatalf("AWG peer update was not incremental: %+v", changes)
+	}
+
+	changes, err = buildAmneziaPeerChanges(context.Background(), nil, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 1 || changes[0].flags != awgPeerRemove || !changes[0].configuration.Remove {
+		t.Fatalf("AWG stale peer was not removed explicitly: %+v", changes)
+	}
+}
+
+func TestManagedLinkLocalPrefixIsStableAndUnique(t *testing.T) {
+	first := managedLinkLocalPrefix(model.Tunnel{ID: "11111111-2222-4333-8444-555555555555"})
+	repeated := managedLinkLocalPrefix(model.Tunnel{ID: "11111111-2222-4333-8444-555555555555"})
+	second := managedLinkLocalPrefix(model.Tunnel{ID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"})
+	if first != repeated || first == second {
+		t.Fatalf("managed link-local prefixes are not stable and unique: %s / %s / %s", first, repeated, second)
+	}
+	if first.Bits() != 64 || !first.Addr().IsLinkLocalUnicast() {
+		t.Fatalf("managed address is not an IPv6 /64 link-local prefix: %s", first)
 	}
 }
 

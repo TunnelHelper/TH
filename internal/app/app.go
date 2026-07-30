@@ -11,8 +11,8 @@ import (
 
 	"github.com/TunnelHelper/TH/internal/config"
 	"github.com/TunnelHelper/TH/internal/control"
+	"github.com/TunnelHelper/TH/internal/ui"
 	"github.com/TunnelHelper/TH/internal/version"
-	"github.com/charmbracelet/huh"
 )
 
 var ErrAborted = errors.New("aborted")
@@ -56,7 +56,7 @@ func wrapAbort(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, io.EOF) || errors.Is(err, huh.ErrUserAborted) || strings.Contains(err.Error(), "interrupt") {
+	if errors.Is(err, io.EOF) || errors.Is(err, ui.ErrUserAborted) || strings.Contains(err.Error(), "interrupt") {
 		return ErrAborted
 	}
 	return err

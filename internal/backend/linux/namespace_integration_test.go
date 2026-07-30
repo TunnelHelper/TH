@@ -130,6 +130,7 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 			}
 			t.Fatal(err)
 		}
+		assertIntegrationAddresses(t, backend, record)
 		removed := false
 		defer func() {
 			if !removed {
@@ -403,6 +404,9 @@ func assertLifecycle(t *testing.T, backend *Backend, record model.Tunnel) {
 	} else if !observation.InterfaceExists || !observation.InterfaceUp {
 		t.Fatalf("unexpected apply observation: %+v", observation)
 	}
+	if record.Interface != "" && observation.Details["ipv6_link_local"] != managedLinkLocalPrefix(record).String() {
+		t.Fatalf("apply observation is missing the managed IPv6 link-local address: %+v", observation)
+	}
 	assertIntegrationAddresses(t, backend, record)
 	if _, err := backend.Apply(ctx, record); err != nil {
 		t.Fatalf("idempotent apply: %v", err)
@@ -468,9 +472,10 @@ func assertIntegrationAddresses(t *testing.T, backend *Backend, record model.Tun
 		desired = record.Spec.XFRMStatic.Addresses
 	case model.KindXFRMIKEv2:
 		desired = record.Spec.XFRMIKEv2.Addresses
-	}
-	if len(desired) == 0 {
+	case model.KindSRv6:
 		return
+	default:
+		t.Fatalf("tunnel kind %s does not expose an owned interface", record.Kind)
 	}
 	link, err := backend.netlink.LinkByName(record.Interface)
 	if err != nil {
@@ -490,5 +495,9 @@ func assertIntegrationAddresses(t *testing.T, backend *Backend, record model.Tun
 		if _, ok := present[prefix]; !ok {
 			t.Fatalf("interface %s is missing exact address %s; observed %v", record.Interface, prefix, present)
 		}
+	}
+	managedLinkLocal := managedLinkLocalPrefix(record)
+	if _, ok := present[managedLinkLocal]; !ok {
+		t.Fatalf("interface %s is missing managed IPv6 link-local address %s; observed %v", record.Interface, managedLinkLocal, present)
 	}
 }

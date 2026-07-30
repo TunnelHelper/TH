@@ -216,7 +216,7 @@ func collectVXLAN(prompts *prompts, record *model.Tunnel) error {
 	if err := prompts.input("Destination port (1-65535)", &port, validateInt(1, 65535)); err != nil {
 		return err
 	}
-	learning, err := prompts.confirm("MAC learning", spec.Learning)
+	learning, err := prompts.toggle("MAC learning", spec.Learning)
 	if err != nil {
 		return err
 	}

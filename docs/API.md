@@ -16,7 +16,9 @@ by Unix directory and socket permissions. Responses include
 - `DELETE /v1/tunnels/{id}`
 - `POST /v1/tunnels/{id}/enable`
 - `POST /v1/tunnels/{id}/disable`
+- `POST /v1/tunnels/{id}/observe`
 - `POST /v1/tunnels/{id}/reconcile`
+- `POST /v1/observe`
 - `POST /v1/reconcile`
 - `POST /v1/plan`
 - `POST /v1/apply?wait=true`
@@ -62,6 +64,11 @@ Create, update, enable, and disable persist desired state and normally return a
 to wait for that generation's reconciliation. The CLI exposes the same behavior
 as `--wait`. Delete remains synchronous because its state record cannot be
 discarded until owned runtime objects have been removed safely.
+
+Observe is read-only: it refreshes status from the kernel without reapplying
+desired configuration. The single-tunnel and all-tunnel observe endpoints back
+the TUI status refresh actions. Reconcile may repair or change runtime state and
+is kept as a separate operation.
 
 Plan and apply accept this envelope:
 
@@ -148,6 +155,12 @@ Tunnel responses contain:
 - `status`: desired and observed generation, phase, timestamps, conditions,
   interface state, backend-specific details, and per-peer WireGuard or
   AmneziaWG operational counters.
+
+WireGuard `receive_bytes` and `transmit_bytes` are the sum of the same per-peer
+generic-netlink transfer counters exposed by `wg`. Linux interface counters are
+reported separately as `link_receive_bytes` and `link_transmit_bytes`. TH-owned
+interfaces also receive a stable, record-derived IPv6 link-local `/64` address,
+reported as `ipv6_link_local` after the observer verifies it in the kernel.
 
 Environmental apply failures do not roll back desired state. The response and
 subsequent list/get calls show `phase: error` and a `ReconcileFailed`

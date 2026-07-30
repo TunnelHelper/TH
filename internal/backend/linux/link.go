@@ -3,6 +3,7 @@
 package linux
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -75,7 +76,7 @@ func (b *Backend) configureOwnedLink(record model.Tunnel, link netlink.Link, mtu
 			return fmt.Errorf("set MTU on %s: %w", record.Interface, err)
 		}
 	}
-	if err := b.reconcileAddresses(link, addresses); err != nil {
+	if err := b.reconcileAddresses(record, link, addresses); err != nil {
 		return err
 	}
 	if link.Attrs().Flags&net.FlagUp == 0 {
@@ -86,11 +87,12 @@ func (b *Backend) configureOwnedLink(record model.Tunnel, link netlink.Link, mtu
 	return nil
 }
 
-func (b *Backend) reconcileAddresses(link netlink.Link, desired []netip.Prefix) error {
-	wanted := make(map[netip.Prefix]struct{}, len(desired))
+func (b *Backend) reconcileAddresses(record model.Tunnel, link netlink.Link, desired []netip.Prefix) error {
+	wanted := make(map[netip.Prefix]struct{}, len(desired)+1)
 	for _, prefix := range desired {
 		wanted[prefix] = struct{}{}
 	}
+	wanted[managedLinkLocalPrefix(record)] = struct{}{}
 	current, err := b.netlink.AddrList(link, netlink.FAMILY_ALL)
 	if err != nil {
 		return fmt.Errorf("list addresses on %s: %w", link.Attrs().Name, err)
@@ -98,11 +100,14 @@ func (b *Backend) reconcileAddresses(link netlink.Link, desired []netip.Prefix) 
 	present := make(map[netip.Prefix]struct{}, len(current))
 	for i := range current {
 		prefix, ok := prefixFromIPNet(current[i].IPNet)
-		if !ok || prefix.Addr().IsLinkLocalUnicast() {
+		if !ok {
 			continue
 		}
-		present[prefix] = struct{}{}
 		if _, ok := wanted[prefix]; ok {
+			present[prefix] = struct{}{}
+			continue
+		}
+		if prefix.Addr().IsLinkLocalUnicast() {
 			continue
 		}
 		if err := b.netlink.AddrDel(link, &current[i]); err != nil && !errors.Is(err, syscall.EADDRNOTAVAIL) {
@@ -119,6 +124,15 @@ func (b *Backend) reconcileAddresses(link netlink.Link, desired []netip.Prefix) 
 		}
 	}
 	return nil
+}
+
+func managedLinkLocalPrefix(record model.Tunnel) netip.Prefix {
+	digest := sha256.Sum256([]byte("th-link-local\x00" + record.ID))
+	var address [16]byte
+	address[0], address[1] = 0xfe, 0x80
+	copy(address[8:], digest[:8])
+	address[8] &^= 0x02
+	return netip.PrefixFrom(netip.AddrFrom16(address), 64)
 }
 
 func (b *Backend) assertLinkOwnershipOrMissing(record model.Tunnel) error {
@@ -169,7 +183,20 @@ func (b *Backend) observeLink(record model.Tunnel) (core.Observation, error) {
 	if link.Attrs().Alias != ownershipAlias(record.ID) {
 		return observationFromLink(link), ErrOwnershipConflict
 	}
-	return observationFromLink(link), nil
+	observation := observationFromLink(link)
+	managedLinkLocal := managedLinkLocalPrefix(record)
+	addresses, err := b.netlink.AddrList(link, netlink.FAMILY_V6)
+	if err != nil {
+		return observation, fmt.Errorf("list IPv6 addresses on %s: %w", record.Interface, err)
+	}
+	for _, address := range addresses {
+		prefix, ok := prefixFromIPNet(address.IPNet)
+		if ok && prefix == managedLinkLocal {
+			observation.Details["ipv6_link_local"] = managedLinkLocal.String()
+			return observation, nil
+		}
+	}
+	return observation, fmt.Errorf("managed IPv6 link-local address %s is missing from %s", managedLinkLocal, record.Interface)
 }
 
 func isLinkNotFound(err error) bool {

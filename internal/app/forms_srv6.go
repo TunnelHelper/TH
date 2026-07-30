@@ -72,7 +72,7 @@ func collectSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.S
 		if choice == "add" {
 			source, keep, err := collectSRv6Source(prompts, model.SRv6Source{
 				Name: suggestedSRv6SourceName(sources), MTU: 1500,
-			}, true)
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -88,13 +88,21 @@ func collectSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.S
 		if index < 0 || index >= len(sources) {
 			continue
 		}
-		source, keep, err := collectSRv6Source(prompts, sources[index], false)
+		source, action, err := editSRv6Source(prompts, sources[index])
 		if err != nil {
 			return nil, err
 		}
-		if keep {
+		switch action {
+		case "save":
+			if err := ensureUniqueSRv6SourceName(prompts, sources, index, &source.Name); err != nil {
+				return nil, err
+			}
 			sources[index] = source
-		} else {
+		case "remove":
+			if len(sources) == 1 {
+				prompts.ui.Warn("A tunnel must retain at least one SRv6 source")
+				continue
+			}
 			sources = append(sources[:index], sources[index+1:]...)
 		}
 	}
@@ -141,7 +149,7 @@ func ensureUniqueSRv6SourceName(prompts *prompts, sources []model.SRv6Source, ex
 	return prompts.input("Source name", name, validator)
 }
 
-func collectSRv6Source(prompts *prompts, source model.SRv6Source, adding bool) (model.SRv6Source, bool, error) {
+func collectSRv6Source(prompts *prompts, source model.SRv6Source) (model.SRv6Source, bool, error) {
 	if source.Name == "" {
 		source.Name = "carrier"
 	}
@@ -174,26 +182,11 @@ func collectSRv6Source(prompts *prompts, source model.SRv6Source, adding bool) (
 	source.SIDv4, _ = parseOptionalAddr(sidV4)
 	source.SIDv6, _ = parseOptionalAddr(sidV6)
 	source.MTU = parseInt(mtu)
-	if adding {
-		choice := "save"
-		if err := prompts.selectValue("Source", []ui.Option{
-			{Label: "Add source", Value: "save"},
-			{Label: "Discard", Value: "discard"},
-		}, &choice); err != nil {
-			return source, false, err
-		}
-		return source, choice == "save", nil
+	save, err := prompts.saveDiscard("Source", "Add source", "Discard source")
+	if err != nil {
+		return source, false, err
 	}
-	if !adding {
-		remove, err := prompts.confirm("Remove this source", false)
-		if err != nil {
-			return source, false, err
-		}
-		if remove {
-			return source, false, nil
-		}
-	}
-	return source, true, nil
+	return source, save, nil
 }
 
 func validateHTTPURL(value string) error {

@@ -82,7 +82,7 @@ func TestPassiveWireGuardPeerDoesNotAskForKeepalive(t *testing.T) {
 	}
 	input := peerKey.PublicKey().String() + "\n\n\n\n1\n"
 	prompts, output := transcriptPrompts(input)
-	peer, keep, err := collectWireGuardPeer(prompts, model.WireGuardPeer{}, true)
+	peer, keep, err := collectWireGuardPeer(prompts, model.WireGuardPeer{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,9 @@ func TestPassiveWireGuardPeerDoesNotAskForKeepalive(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "keepalive") {
 		t.Fatalf("passive peer was asked for keepalive:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "Save peer") || strings.Contains(output.String(), "Add peer") {
+		t.Fatalf("peer completion action is ambiguous:\n%s", output.String())
 	}
 }
 
@@ -138,15 +141,84 @@ func TestEditTunnelSaveAndDiscardAreExplicit(t *testing.T) {
 			Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2"), MTU: 1450, TTL: 255,
 		}},
 	}
-	prompts, _ := transcriptPrompts("8\n")
+	prompts, output := transcriptPrompts("7\n2\n")
 	discarded, saved, err := editTunnel(prompts, current)
 	if err != nil || saved || discarded.Name != current.Name {
 		t.Fatalf("discard result = %+v, saved=%t, err=%v", discarded, saved, err)
 	}
-	prompts, _ = transcriptPrompts("1\nrenamed\n7\n")
+	if transcript := output.String(); !strings.Contains(transcript, "Finish editing") || !strings.Contains(transcript, "Save changes") || !strings.Contains(transcript, "Discard changes") {
+		t.Fatalf("edit completion is not an explicit decision:\n%s", transcript)
+	}
+	prompts, _ = transcriptPrompts("1\nrenamed\n7\n1\n")
 	updated, saved, err := editTunnel(prompts, current)
 	if err != nil || !saved || updated.Name != "renamed" || updated.Enabled != current.Enabled {
 		t.Fatalf("save result = %+v, saved=%t, err=%v", updated, saved, err)
+	}
+}
+
+func TestActionConfirmationDefaultsToCancel(t *testing.T) {
+	prompts, output := transcriptPrompts("\n")
+	confirmed, err := prompts.confirmAction("Delete tunnel", "Delete tunnel")
+	if err != nil || confirmed {
+		t.Fatalf("confirmed=%t, err=%v", confirmed, err)
+	}
+	if transcript := output.String(); !strings.Contains(transcript, "Delete tunnel") || !strings.Contains(transcript, "Cancel") || !strings.Contains(transcript, "> [2]") {
+		t.Fatalf("destructive confirmation does not default to Cancel:\n%s", transcript)
+	}
+}
+
+func TestToggleUsesEnabledDisabledButtons(t *testing.T) {
+	prompts, output := transcriptPrompts("\n")
+	enabled, err := prompts.toggle("MAC learning", true)
+	if err != nil || !enabled {
+		t.Fatalf("enabled=%t, err=%v", enabled, err)
+	}
+	if transcript := output.String(); !strings.Contains(transcript, "Enabled") || !strings.Contains(transcript, "Disabled") || !strings.Contains(transcript, "> [1]") {
+		t.Fatalf("toggle is not rendered as a binary decision:\n%s", transcript)
+	}
+}
+
+func TestPeerEditorSeparatesFinishFromRemoval(t *testing.T) {
+	privateKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := model.WireGuardPeer{
+		PublicKey: privateKey.PublicKey().String(),
+		AllowedIPs: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.0/24"),
+		},
+	}
+	prompts, output := transcriptPrompts("5\n2\n")
+	peer, action, err := editWireGuardPeer(prompts, original)
+	if err != nil || action != "discard" || peer.PublicKey != original.PublicKey {
+		t.Fatalf("peer=%+v, action=%q, err=%v", peer, action, err)
+	}
+	for _, expected := range []string{"Finish editing", "Remove peer", "Save peer", "Discard changes"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("peer editor does not contain %q:\n%s", expected, output.String())
+		}
+	}
+
+	prompts, _ = transcriptPrompts("6\n1\n")
+	_, action, err = editWireGuardPeer(prompts, original)
+	if err != nil || action != "remove" {
+		t.Fatalf("remove action=%q, err=%v", action, err)
+	}
+}
+
+func TestSRv6SourceEditorUsesSaveDiscardDecision(t *testing.T) {
+	sid := netip.MustParseAddr("2001:db8::1")
+	original := model.SRv6Source{Name: "carrier", SIDv4: &sid, MTU: 1500}
+	prompts, output := transcriptPrompts("5\n2\n")
+	source, action, err := editSRv6Source(prompts, original)
+	if err != nil || action != "discard" || source.Name != original.Name {
+		t.Fatalf("source=%+v, action=%q, err=%v", source, action, err)
+	}
+	for _, expected := range []string{"Finish editing", "Remove source", "Save source", "Discard changes"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("source editor does not contain %q:\n%s", expected, output.String())
+		}
 	}
 }
 

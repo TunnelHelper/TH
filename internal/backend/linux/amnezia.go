@@ -78,10 +78,6 @@ const (
 )
 
 const (
-	awgDeviceReplacePeers uint32 = 1 << iota
-)
-
-const (
 	awgPeerRemove uint32 = 1 << iota
 	awgPeerReplaceAllowedIPs
 	awgPeerUpdateOnly
@@ -109,6 +105,11 @@ type amneziaDevice struct {
 	H2           string
 	H3           string
 	H4           string
+}
+
+type amneziaPeerChange struct {
+	configuration wgtypes.PeerConfig
+	flags         uint32
 }
 
 func newAmneziaClient(timeout time.Duration) (*amneziaClient, error) {
@@ -189,41 +190,88 @@ func (c *amneziaClient) Configure(ctx context.Context, name string, spec *model.
 	if err != nil {
 		return err
 	}
+	current, err := c.Device(ctx, name)
+	if err != nil {
+		return fmt.Errorf("read AmneziaWG device before configuration: %w", err)
+	}
 	family, err := c.family(ctx)
 	if err != nil {
 		return err
 	}
 	encoder := mdnetlink.NewAttributeEncoder()
 	encoder.String(awgDeviceIfName, name)
-	encoder.Bytes(awgDevicePrivateKey, privateKey[:])
-	encoder.Uint16(awgDeviceListenPort, uint16(spec.ListenPort))
-	encoder.Uint32(awgDeviceFirewallMark, uint32(effectiveFirewallMark(record, &spec.WireGuardSpec)))
-	encoder.Uint32(awgDeviceFlags, awgDeviceReplacePeers)
-	encoder.Uint16(awgDeviceJC, uint16(spec.JunkPacketCount))
-	encoder.Uint16(awgDeviceJMin, uint16(spec.JunkPacketMinSize))
-	encoder.Uint16(awgDeviceJMax, uint16(spec.JunkPacketMaxSize))
-	encoder.Uint16(awgDeviceS1, uint16(spec.InitPacketJunkSize))
-	encoder.Uint16(awgDeviceS2, uint16(spec.ResponsePacketJunkSize))
-	for attribute, value := range map[uint16]string{
-		awgDeviceH1: spec.InitMagicHeader,
-		awgDeviceH2: spec.ResponseMagicHeader,
-		awgDeviceH3: spec.UnderloadMagicHeader,
-		awgDeviceH4: spec.TransportMagicHeader,
+	changed := false
+	if current.PublicKey != privateKey.PublicKey() {
+		encoder.Bytes(awgDevicePrivateKey, privateKey[:])
+		changed = true
+	}
+	if spec.ListenPort != 0 {
+		if current.ListenPort != spec.ListenPort {
+			encoder.Uint16(awgDeviceListenPort, uint16(spec.ListenPort))
+			changed = true
+		}
+	} else if current.ListenPort == 0 {
+		encoder.Uint16(awgDeviceListenPort, 0)
+		changed = true
+	}
+	firewallMark := effectiveFirewallMark(record, &spec.WireGuardSpec)
+	if current.FirewallMark != firewallMark {
+		encoder.Uint32(awgDeviceFirewallMark, uint32(firewallMark))
+		changed = true
+	}
+	for _, value := range []struct {
+		attribute uint16
+		desired   int
+		current   int
+	}{
+		{awgDeviceJC, spec.JunkPacketCount, current.JunkCount},
+		{awgDeviceJMin, spec.JunkPacketMinSize, current.JunkMin},
+		{awgDeviceJMax, spec.JunkPacketMaxSize, current.JunkMax},
+		{awgDeviceS1, spec.InitPacketJunkSize, current.S1},
+		{awgDeviceS2, spec.ResponsePacketJunkSize, current.S2},
 	} {
-		if err := encodeAmneziaHeader(encoder, attribute, value, family.Version); err != nil {
-			return err
+		if value.desired != value.current {
+			encoder.Uint16(value.attribute, uint16(value.desired))
+			changed = true
 		}
 	}
-	if len(spec.Peers) > 0 {
+	for _, value := range []struct {
+		attribute uint16
+		desired   string
+		current   string
+	}{
+		{awgDeviceH1, spec.InitMagicHeader, current.H1},
+		{awgDeviceH2, spec.ResponseMagicHeader, current.H2},
+		{awgDeviceH3, spec.UnderloadMagicHeader, current.H3},
+		{awgDeviceH4, spec.TransportMagicHeader, current.H4},
+	} {
+		if value.desired == value.current {
+			continue
+		}
+		if err := encodeAmneziaHeader(encoder, value.attribute, value.desired, family.Version); err != nil {
+			return err
+		}
+		changed = true
+	}
+
+	peerChanges, err := buildAmneziaPeerChanges(ctx, spec.Peers, current.Peers)
+	if err != nil {
+		return err
+	}
+	if len(peerChanges) > 0 {
 		encoder.Nested(awgDevicePeers, func(peers *mdnetlink.AttributeEncoder) error {
-			for i, peer := range spec.Peers {
-				peer := peer
+			for i, change := range peerChanges {
+				change := change
 				peers.Nested(uint16(i), func(attributes *mdnetlink.AttributeEncoder) error {
-					return encodeAmneziaPeer(ctx, attributes, peer)
+					return encodeAmneziaPeerConfiguration(attributes, change.configuration, change.flags)
 				})
 			}
 			return nil
 		})
+		changed = true
+	}
+	if !changed {
+		return nil
 	}
 	data, err := encoder.Encode()
 	if err != nil {
@@ -231,6 +279,36 @@ func (c *amneziaClient) Configure(ctx context.Context, name string, spec *model.
 	}
 	_, _, err = c.execute(ctx, awgCommandSetDevice, mdnetlink.Request|mdnetlink.Acknowledge, data)
 	return err
+}
+
+func buildAmneziaPeerChanges(ctx context.Context, desired []model.WireGuardPeer, current []wgtypes.Peer) ([]amneziaPeerChange, error) {
+	currentPeers := make(map[wgtypes.Key]wgtypes.Peer, len(current))
+	for _, peer := range current {
+		currentPeers[peer.PublicKey] = peer
+	}
+	changes := make([]amneziaPeerChange, 0, len(desired)+len(current))
+	for _, peer := range desired {
+		configuration, err := buildWireGuardPeerConfiguration(ctx, peer)
+		if err != nil {
+			return nil, err
+		}
+		currentPeer, exists := currentPeers[configuration.PublicKey]
+		if !exists || !wireGuardPeerConfigurationMatches(currentPeer, configuration) {
+			flags := uint32(awgPeerReplaceAllowedIPs | awgPeerHasAWG)
+			if exists {
+				flags |= awgPeerUpdateOnly
+			}
+			changes = append(changes, amneziaPeerChange{configuration: configuration, flags: flags})
+		}
+		delete(currentPeers, configuration.PublicKey)
+	}
+	for publicKey := range currentPeers {
+		changes = append(changes, amneziaPeerChange{
+			configuration: wgtypes.PeerConfig{PublicKey: publicKey, Remove: true},
+			flags:         awgPeerRemove,
+		})
+	}
+	return changes, nil
 }
 
 func encodeAmneziaHeader(encoder *mdnetlink.AttributeEncoder, attribute uint16, value string, version uint8) error {
@@ -247,32 +325,39 @@ func encodeAmneziaHeader(encoder *mdnetlink.AttributeEncoder, attribute uint16, 
 }
 
 func encodeAmneziaPeer(ctx context.Context, encoder *mdnetlink.AttributeEncoder, peer model.WireGuardPeer) error {
-	publicKey, err := wgtypes.ParseKey(peer.PublicKey)
+	configuration, err := buildWireGuardPeerConfiguration(ctx, peer)
 	if err != nil {
 		return err
 	}
-	encoder.Bytes(awgPeerPublicKey, publicKey[:])
-	encoder.Uint32(awgPeerFlags, awgPeerReplaceAllowedIPs|awgPeerHasAWG)
-	encoder.Flag(awgPeerAWG, true)
-	if peer.PresharedKey != "" {
-		key, err := wgtypes.ParseKey(peer.PresharedKey)
-		if err != nil {
-			return err
-		}
-		encoder.Bytes(awgPeerPresharedKey, key[:])
+	return encodeAmneziaPeerConfiguration(encoder, configuration, awgPeerReplaceAllowedIPs|awgPeerHasAWG)
+}
+
+func encodeAmneziaPeerConfiguration(encoder *mdnetlink.AttributeEncoder, configuration wgtypes.PeerConfig, flags uint32) error {
+	encoder.Bytes(awgPeerPublicKey, configuration.PublicKey[:])
+	encoder.Uint32(awgPeerFlags, flags)
+	if flags&awgPeerHasAWG != 0 {
+		encoder.Flag(awgPeerAWG, true)
 	}
-	if peer.Endpoint != "" {
-		endpoint, err := resolveEndpoint(ctx, peer.Endpoint)
-		if err != nil {
-			return err
-		}
-		encoder.Do(awgPeerEndpoint, encodeAmneziaSockaddr(*endpoint))
+	if configuration.Remove {
+		return nil
 	}
-	encoder.Uint16(awgPeerKeepalive, uint16(peer.Keepalive))
-	if len(peer.AllowedIPs) > 0 {
+	if configuration.PresharedKey != nil {
+		encoder.Bytes(awgPeerPresharedKey, configuration.PresharedKey[:])
+	}
+	if configuration.Endpoint != nil {
+		encoder.Do(awgPeerEndpoint, encodeAmneziaSockaddr(*configuration.Endpoint))
+	}
+	if configuration.PersistentKeepaliveInterval != nil {
+		encoder.Uint16(awgPeerKeepalive, uint16(*configuration.PersistentKeepaliveInterval/time.Second))
+	}
+	if len(configuration.AllowedIPs) > 0 {
 		encoder.Nested(awgPeerAllowedIPs, func(allowed *mdnetlink.AttributeEncoder) error {
-			for i, prefix := range peer.AllowedIPs {
-				prefix := prefix.Masked()
+			for i, network := range configuration.AllowedIPs {
+				prefix, ok := prefixFromIPNet(&network)
+				if !ok {
+					return errors.New("invalid AmneziaWG allowed IP")
+				}
+				prefix = prefix.Masked()
 				allowed.Nested(uint16(i), func(attributes *mdnetlink.AttributeEncoder) error {
 					family := uint16(unix.AF_INET6)
 					address := prefix.Addr().AsSlice()

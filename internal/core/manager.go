@@ -243,6 +243,28 @@ func (m *Manager) ReconcileAll(ctx context.Context) ([]model.TunnelView, error) 
 	return m.listLocked()
 }
 
+func (m *Manager) Observe(ctx context.Context, id string) (model.TunnelView, error) {
+	m.mutationMu.RLock()
+	defer m.mutationMu.RUnlock()
+
+	if err := m.reconciler.Observe(ctx, id); err != nil && !IsNotFound(err) {
+		view, getErr := m.getLocked(id)
+		if getErr != nil {
+			return model.TunnelView{}, err
+		}
+		return view, nil
+	}
+	return m.getLocked(id)
+}
+
+func (m *Manager) ObserveAll(ctx context.Context) ([]model.TunnelView, error) {
+	m.mutationMu.RLock()
+	defer m.mutationMu.RUnlock()
+
+	_ = m.reconciler.ObserveAll(ctx)
+	return m.listLocked()
+}
+
 func (m *Manager) Health(ctx context.Context) map[model.Kind]BackendHealth {
 	return m.reconciler.Health(ctx)
 }

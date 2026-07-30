@@ -38,6 +38,11 @@ The daemon is the only writer of V2 state. Kernel objects created by the
 daemon are tagged or placed in reserved ownership namespaces, and deletion is
 refused when ownership cannot be proven.
 
+WireGuard requires the in-kernel `wireguard` generic-netlink family. TH checks
+that kernel API directly and controls it through its embedded Go libraries;
+the `wireguard-tools` package, `wg`, and `wg-quick` are not runtime
+dependencies.
+
 ## Install
 
 The recommended installer detects Debian-family and RPM-family systems,
@@ -149,7 +154,18 @@ and configured-tunnel readiness separately.
 
 The TUI live-status view and `th watch` consume an NDJSON event stream over the
 same Unix socket. WireGuard and AmneziaWG status includes per-peer endpoints,
-handshake times, AllowedIPs, and traffic counters without exposing key material.
+handshake times, AllowedIPs, protocol transfer counters, and separate Linux link
+counters without exposing key material. Status refresh is a read-only kernel
+observation and does not reapply tunnel configuration. Every TH-owned tunnel
+interface receives a stable IPv6 link-local address.
+
+The TUI management view is a persistent workspace rather than a sequence of
+prompts. Tunnel, WireGuard peer, and SRv6 source editors keep changes in a local
+draft, show breadcrumbs and a redacted field-level diff, and use the same
+keyboard-selectable Save/Discard confirmation component. Nothing is sent to the
+daemon until the tunnel-level Save action is confirmed. All interactive controls
+are Bubble Tea components rendered inline with a compact height limit; the client
+does not switch to an alternate full-screen buffer.
 
 Use `-` instead of a filename for JSON on stdin. Updates require the current
 `id` and `generation`, so a stale client cannot overwrite a newer record.

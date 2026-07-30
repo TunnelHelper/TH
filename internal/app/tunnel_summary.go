@@ -10,7 +10,7 @@ import (
 )
 
 func showTunnelSummary(output *ui.UI, record model.Tunnel) {
-	output.HR()
+	fmt.Fprintln(output.Out)
 	output.Title("Review")
 	fmt.Fprintf(output.Out, "Name: %s\nKind: %s\n", record.Name, record.Kind)
 	if record.Interface != "" {
@@ -37,7 +37,6 @@ func showTunnelSummary(output *ui.UI, record model.Tunnel) {
 		spec := record.Spec.SRv6
 		fmt.Fprintf(output.Out, "Route source: %s\nUnderlay: %s\nSources: %d\n", spec.BaseURL, spec.UnderlayInterface, len(spec.Sources))
 	}
-	output.HR()
 }
 
 func showWireGuardSummary(output *ui.UI, spec *model.WireGuardSpec) {

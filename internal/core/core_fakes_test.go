@@ -12,17 +12,20 @@ import (
 )
 
 type fakeBackend struct {
-	mu          sync.Mutex
-	applyCalls  int
-	removeCalls int
-	active      int
-	maxActive   int
-	applyErr    error
-	removeErr   error
-	block       chan struct{}
-	called      chan struct{}
-	events      chan BackendEvent
-	applyByID   map[string]int
+	mu           sync.Mutex
+	applyCalls   int
+	removeCalls  int
+	observeCalls int
+	active       int
+	maxActive    int
+	applyErr     error
+	removeErr    error
+	observe      *Observation
+	observeErr   error
+	block        chan struct{}
+	called       chan struct{}
+	events       chan BackendEvent
+	applyByID    map[string]int
 }
 
 func newFakeBackend() *fakeBackend {
@@ -64,6 +67,17 @@ func (b *fakeBackend) Remove(context.Context, model.Tunnel) (Observation, error)
 }
 
 func (b *fakeBackend) Observe(context.Context, model.Tunnel) (Observation, error) {
+	b.mu.Lock()
+	b.observeCalls++
+	observation := b.observe
+	err := b.observeErr
+	b.mu.Unlock()
+	if observation != nil {
+		return *observation, err
+	}
+	if err != nil {
+		return Observation{}, err
+	}
 	return Observation{InterfaceExists: true, InterfaceUp: true}, nil
 }
 

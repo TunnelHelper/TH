@@ -193,7 +193,7 @@ func collectIKEv2(prompts *prompts, record *model.Tunnel, creating bool) error {
 	if err := collectIKEProposals(prompts, spec); err != nil {
 		return err
 	}
-	encapsulation, err := prompts.confirm("UDP encapsulation", spec.Encapsulation)
+	encapsulation, err := prompts.toggle("UDP encapsulation", spec.Encapsulation)
 	if err != nil {
 		return err
 	}
@@ -209,10 +209,9 @@ func collectIKEv2(prompts *prompts, record *model.Tunnel, creating bool) error {
 }
 
 func showLocalRPK(prompts *prompts, publicKey string) {
-	prompts.ui.HR()
+	fmt.Fprintln(prompts.ui.Out)
 	prompts.ui.Ok("Local raw public key: " + publicKey)
 	prompts.ui.Dim("Share this key with the peer before entering its public key.")
-	prompts.ui.HR()
 }
 
 func validAddrText(address netip.Addr) string {

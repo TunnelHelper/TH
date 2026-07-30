@@ -15,7 +15,6 @@ import (
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
-	"golang.zx2c4.com/wireguard/wgctrl"
 )
 
 const managedRouteProtocol = 242
@@ -37,8 +36,7 @@ func legacyExpectedRoute(route netlink.Route, expectedKeys map[string]netlink.Ro
 type Backend struct {
 	settings config.Settings
 	netlink  *netlink.Handle
-	wg       *wgctrl.Client
-	wgErr    error
+	wg       *wireGuardControl
 	awg      *amneziaClient
 	awgErr   error
 	vici     *viciController
@@ -58,14 +56,12 @@ func New(settings config.Settings) (*Backend, error) {
 		handle.Close()
 		return nil, fmt.Errorf("set netlink timeout: %w", err)
 	}
-	wg, wgErr := wgctrl.New()
 	awg, awgErr := newAmneziaClient(settings.RequestTimeout())
 	eventCtx, eventEnd := context.WithCancel(context.Background())
 	backend := &Backend{
 		settings: settings,
 		netlink:  handle,
-		wg:       wg,
-		wgErr:    wgErr,
+		wg:       newWireGuardControl(settings.RequestTimeout()),
 		awg:      awg,
 		awgErr:   awgErr,
 		vici:     newVICIController(settings.VICISocketPath, settings.RequestTimeout()),
@@ -137,7 +133,7 @@ func (b *Backend) Observe(ctx context.Context, record model.Tunnel) (core.Observ
 	case model.KindSRv6:
 		return b.observeSRv6(record)
 	case model.KindWireGuard:
-		return b.observeWireGuard(record)
+		return b.observeWireGuard(ctx, record)
 	case model.KindAmneziaWG:
 		return b.observeAmneziaWG(ctx, record)
 	case model.KindXFRMStatic:
@@ -154,8 +150,8 @@ func (b *Backend) Health(ctx context.Context) map[model.Kind]core.BackendHealth 
 	for _, kind := range model.Kinds {
 		health[kind] = core.BackendHealth{Available: true}
 	}
-	if b.wgErr != nil {
-		health[model.KindWireGuard] = core.BackendHealth{Available: false, Message: b.wgErr.Error()}
+	if err := b.wg.health(ctx); err != nil {
+		health[model.KindWireGuard] = core.BackendHealth{Available: false, Message: err.Error()}
 	}
 	if b.awgErr != nil {
 		health[model.KindAmneziaWG] = core.BackendHealth{Available: false, Message: b.awgErr.Error()}
@@ -194,12 +190,20 @@ func observationFromLink(link netlink.Link) core.Observation {
 		return core.Observation{}
 	}
 	attrs := link.Attrs()
+	details := map[string]string{
+		"link_type": link.Type(),
+		"mtu":       strconv.Itoa(attrs.MTU),
+	}
+	if statistics := attrs.Statistics; statistics != nil {
+		details["link_receive_bytes"] = strconv.FormatUint(statistics.RxBytes, 10)
+		details["link_transmit_bytes"] = strconv.FormatUint(statistics.TxBytes, 10)
+		details["receive_bytes"] = details["link_receive_bytes"]
+		details["transmit_bytes"] = details["link_transmit_bytes"]
+		details["counter_source"] = "link"
+	}
 	return core.Observation{
 		InterfaceExists: true,
 		InterfaceUp:     attrs.Flags&net.FlagUp != 0,
-		Details: map[string]string{
-			"link_type": link.Type(),
-			"mtu":       strconv.Itoa(attrs.MTU),
-		},
+		Details:         details,
 	}
 }

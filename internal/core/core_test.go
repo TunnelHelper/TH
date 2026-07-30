@@ -3,7 +3,9 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,6 +75,80 @@ func TestManagerLifecycleAndSecretRedaction(t *testing.T) {
 	}
 	if _, err := records.Get(raw.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("record remains after delete: %v", err)
+	}
+}
+
+func TestManagerObserveRefreshesStatusWithoutApplyingDesiredState(t *testing.T) {
+	records := newMemoryStore()
+	backend := newFakeBackend()
+	manager := NewManager(records, NewReconciler(records, backend, time.Hour))
+	created, err := manager.Create(context.Background(), model.Tunnel{
+		Name: "observe", Kind: model.KindGRE, Interface: "gre-observe", Enabled: true,
+		Spec: model.Spec{GRE: &model.GRESpec{
+			Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2"),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := manager.Observe(context.Background(), created.Tunnel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.observeCalls != 1 || backend.applyCalls != 0 || observed.Status.Phase != model.PhaseReady {
+		t.Fatalf("observe/apply/status = %d/%d/%s", backend.observeCalls, backend.applyCalls, observed.Status.Phase)
+	}
+}
+
+func TestManagerObserveAllRefreshesEveryStatusWithoutApplyingDesiredState(t *testing.T) {
+	records := newMemoryStore()
+	backend := newFakeBackend()
+	manager := NewManager(records, NewReconciler(records, backend, time.Hour))
+	for index, name := range []string{"observe-one", "observe-two"} {
+		_, err := manager.Create(context.Background(), model.Tunnel{
+			Name: name, Kind: model.KindGRE, Interface: fmt.Sprintf("gre-observe-%d", index), Enabled: true,
+			Spec: model.Spec{GRE: &model.GRESpec{
+				Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2"),
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	observed, err := manager.ObserveAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.observeCalls != 2 || backend.applyCalls != 0 || len(observed) != 2 {
+		t.Fatalf("observe/apply/views = %d/%d/%d", backend.observeCalls, backend.applyCalls, len(observed))
+	}
+	for _, view := range observed {
+		if view.Status.Phase != model.PhaseReady {
+			t.Fatalf("observed status = %s", view.Status.Phase)
+		}
+	}
+}
+
+func TestManagerObserveReportsMissingManagedInterface(t *testing.T) {
+	records := newMemoryStore()
+	backend := newFakeBackend()
+	backend.observe = &Observation{}
+	manager := NewManager(records, NewReconciler(records, backend, time.Hour))
+	created, err := manager.Create(context.Background(), model.Tunnel{
+		Name: "missing", Kind: model.KindGRE, Interface: "gre-missing", Enabled: true,
+		Spec: model.Spec{GRE: &model.GRESpec{
+			Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2"),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := manager.Observe(context.Background(), created.Tunnel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Status.Phase != model.PhaseError || len(observed.Status.Conditions) == 0 || !strings.Contains(observed.Status.Conditions[0].Message, "is missing") {
+		t.Fatalf("missing-interface status = %+v", observed.Status)
 	}
 }
 

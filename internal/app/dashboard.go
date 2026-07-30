@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/TunnelHelper/TH/internal/control"
 	"github.com/TunnelHelper/TH/internal/core"
@@ -16,6 +15,7 @@ import (
 	"github.com/TunnelHelper/TH/internal/ui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	ansi "github.com/charmbracelet/x/ansi"
 )
 
 type dashboardModel struct {
@@ -47,6 +47,8 @@ type dashboardReconnectMsg struct {
 	err          error
 }
 
+const dashboardMaxInlineHeight = 20
+
 func runDashboard(client *control.Client, timeout time.Duration, output *ui.UI) error {
 	if !output.TTY {
 		return errors.New("live status requires a terminal")
@@ -62,7 +64,6 @@ func runDashboard(client *control.Client, timeout time.Duration, output *ui.UI) 
 		events: events, streamErrors: streamErrors,
 	}
 	program := tea.NewProgram(model,
-		tea.WithAltScreen(),
 		tea.WithInput(output.Input),
 		tea.WithOutput(output.Out),
 	)
@@ -109,13 +110,13 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch event.Type {
 		case core.EventStatus:
 			if !m.applyStatusEvent(event) {
-				return m, tea.Batch(m.loadViews(), waitDashboardEvent(m.events, m.streamErrors))
+				return m, tea.Batch(m.listViews(), waitDashboardEvent(m.events, m.streamErrors))
 			}
 		case core.EventDeleted:
 			m.remove(event.TunnelID)
 		case core.EventConnected:
 			if event.Message != "" {
-				return m, tea.Batch(m.loadViews(), waitDashboardEvent(m.events, m.streamErrors))
+				return m, tea.Batch(m.listViews(), waitDashboardEvent(m.events, m.streamErrors))
 			}
 		}
 		return m, waitDashboardEvent(m.events, m.streamErrors)
@@ -139,9 +140,12 @@ func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m dashboardModel) View() string {
+	height := m.inlineHeight()
 	width := m.width
-	if width < 40 {
-		width = 40
+	if width <= 0 {
+		width = 80
+	} else {
+		width = max(20, width)
 	}
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")).Render("TH live status")
 	lines := []string{title, ""}
@@ -154,17 +158,31 @@ func (m dashboardModel) View() string {
 			lines = append(lines, m.tableRow(index, width))
 		}
 		lines = append(lines, "")
-		lines = append(lines, m.peerLines(width)...)
+		detailBudget := height - len(lines) - 3
+		if m.err != nil {
+			detailBudget -= 2
+		}
+		detailBudget = max(0, detailBudget)
+		lines = append(lines, m.peerLinesWithin(width, detailBudget)...)
 	}
 	if m.err != nil {
 		lines = append(lines, "", lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(fit(m.err.Error(), width)))
 	}
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	lines = append(lines, "", hintStyle.Render(fit("up/down or j/k: select   r: refresh", width)), hintStyle.Render("q/esc: back"))
-	return strings.Join(lines, "\n")
+	return fitWorkspaceHeight(strings.Join(lines, "\n"), height)
 }
 
 func (m dashboardModel) loadViews() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, m.timeout)
+		defer cancel()
+		views, err := m.client.ObserveAll(ctx)
+		return dashboardViewsMsg{views: views, err: err}
+	}
+}
+
+func (m dashboardModel) listViews() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, m.timeout)
 		defer cancel()
@@ -261,8 +279,11 @@ func sortDashboardViews(views []model.TunnelView) {
 
 func (m dashboardModel) visibleRange() (int, int) {
 	rows := len(m.views)
-	maxRows := m.height - 15
-	if maxRows < 1 || maxRows > rows {
+	maxRows := m.inlineHeight() - 15
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	if maxRows > rows {
 		maxRows = rows
 	}
 	start := 0
@@ -273,12 +294,19 @@ func (m dashboardModel) visibleRange() (int, int) {
 	return start, end
 }
 
+func (m dashboardModel) inlineHeight() int {
+	if m.height <= 0 {
+		return dashboardMaxInlineHeight
+	}
+	return min(m.height, dashboardMaxInlineHeight)
+}
+
 func (m dashboardModel) tableHeader(width int) string {
 	nameWidth := dashboardNameWidth(width)
 	if width < 78 {
-		return fmt.Sprintf("  %-*s %-12s %-9s", nameWidth, "NAME", "KIND", "STATE")
+		return fit(fmt.Sprintf("  %-*s %-12s %-9s", nameWidth, "NAME", "KIND", "STATE"), width)
 	}
-	return fmt.Sprintf("  %-*s %-12s %-9s %-10s %10s %10s", nameWidth, "NAME", "KIND", "STATE", "HANDSHAKE", "RX", "TX")
+	return fit(fmt.Sprintf("  %-*s %-12s %-9s %-10s %10s %10s", nameWidth, "NAME", "KIND", "STATE", "HANDSHAKE", "RX", "TX"), width)
 }
 
 func (m dashboardModel) tableRow(index, width int) string {
@@ -298,7 +326,7 @@ func (m dashboardModel) tableRow(index, width int) string {
 	} else {
 		row = fmt.Sprintf("%s %-*s %-12s %-9s %-10s %10s %10s",
 			marker, nameWidth, fit(view.Tunnel.Name, nameWidth), fit(string(view.Tunnel.Kind), 12), fit(state, 9),
-			fit(handshakeAge(view), 10), fitRight(formatBytes(detailInt64(view, "receive_bytes")), 10), fitRight(formatBytes(detailInt64(view, "transmit_bytes")), 10))
+			fit(handshakeAge(view), 10), fitRight(detailBytes(view, "receive_bytes"), 10), fitRight(detailBytes(view, "transmit_bytes"), 10))
 	}
 	color := lipgloss.Color("2")
 	switch view.Status.Phase {
@@ -313,18 +341,50 @@ func (m dashboardModel) tableRow(index, width int) string {
 }
 
 func (m dashboardModel) peerLines(width int) []string {
+	return m.peerLinesWithin(width, -1)
+}
+
+func (m dashboardModel) peerLinesWithin(width, maxLines int) []string {
+	if maxLines == 0 {
+		return nil
+	}
 	if len(m.views) == 0 || m.selected >= len(m.views) {
 		return nil
 	}
 	view := m.views[m.selected]
 	lines := []string{lipgloss.NewStyle().Bold(true).Render(fit(view.Tunnel.Name, width))}
+	if linkLocal := view.Status.Details["ipv6_link_local"]; linkLocal != "" {
+		lines = append(lines, fit("IPv6 LLA: "+linkLocal, width))
+	}
+	if view.Tunnel.Kind == model.KindWireGuard || view.Tunnel.Kind == model.KindAmneziaWG {
+		if _, ok := view.Status.Details["link_receive_bytes"]; ok {
+			lines = append(lines, fit(fmt.Sprintf("Interface link: rx %s  tx %s",
+				detailBytes(view, "link_receive_bytes"), detailBytes(view, "link_transmit_bytes")), width))
+		} else {
+			lines = append(lines, "Interface link: unavailable")
+		}
+	}
+	if maxLines > 0 && len(lines) >= maxLines {
+		return lines[:maxLines]
+	}
 	if len(view.Status.Peers) == 0 {
 		if message := statusMessage(view); message != "" {
 			lines = append(lines, fit(message, width))
 		}
 		return lines
 	}
-	for _, peer := range view.Status.Peers {
+	completePeers := 0
+	for index, peer := range view.Status.Peers {
+		if maxLines >= 0 && len(lines)+3 > maxLines {
+			if len(lines) < maxLines {
+				lines = append(lines, fit(fmt.Sprintf("... %d more peers", len(view.Status.Peers)-index), width))
+			}
+			break
+		}
+		if maxLines >= 0 && completePeers > 0 && index+1 < len(view.Status.Peers) && len(lines)+3 == maxLines {
+			lines = append(lines, fit(fmt.Sprintf("... %d more peers", len(view.Status.Peers)-index), width))
+			break
+		}
 		key := peer.PublicKey
 		if len(key) > 12 {
 			key = key[:12]
@@ -333,12 +393,20 @@ func (m dashboardModel) peerLines(width int) []string {
 		if endpoint == "" {
 			endpoint = "-"
 		}
+		lines = append(lines, fit(fmt.Sprintf("Peer %s  %s", key, endpoint), width))
 		handshake := "never"
 		if peer.LastHandshakeTime != nil {
-			handshake = formatDuration(time.Since(*peer.LastHandshakeTime))
+			handshake = formatHandshakeTime(*peer.LastHandshakeTime)
 		}
-		line := fmt.Sprintf("%s  %s  %s  rx %s  tx %s", key, endpoint, handshake, formatBytes(peer.ReceiveBytes), formatBytes(peer.TransmitBytes))
-		lines = append(lines, fit(line, width))
+		transferLabel := "WG transfer"
+		if view.Tunnel.Kind == model.KindAmneziaWG {
+			transferLabel = "AWG transfer"
+		}
+		lines = append(lines,
+			fit("  Handshake: "+handshake, width),
+			fit(fmt.Sprintf("  %s: rx %s  tx %s", transferLabel, formatBytes(peer.ReceiveBytes), formatBytes(peer.TransmitBytes)), width),
+		)
+		completePeers++
 	}
 	return lines
 }
@@ -350,9 +418,9 @@ func dashboardNameWidth(width int) int {
 	return max(8, min(28, width-62))
 }
 
-func detailInt64(view model.TunnelView, key string) int64 {
-	value, _ := strconv.ParseInt(view.Status.Details[key], 10, 64)
-	return value
+func detailBytes(view model.TunnelView, key string) string {
+	value, _ := strconv.ParseUint(view.Status.Details[key], 10, 64)
+	return formatByteCount(value)
 }
 
 func handshakeAge(view model.TunnelView) string {
@@ -383,7 +451,18 @@ func formatDuration(value time.Duration) string {
 	return fmt.Sprintf("%dd", int(value.Hours()/24))
 }
 
+func formatHandshakeTime(value time.Time) string {
+	return fmt.Sprintf("%s (%s ago)", value.UTC().Format(time.RFC3339), formatDuration(time.Since(value)))
+}
+
 func formatBytes(value int64) string {
+	if value < 0 {
+		value = 0
+	}
+	return formatByteCount(uint64(value))
+}
+
+func formatByteCount(value uint64) string {
 	if value < 1024 {
 		return fmt.Sprintf("%d B", value)
 	}
@@ -413,17 +492,16 @@ func fit(value string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if utf8.RuneCountInString(value) <= width {
+	if ansi.StringWidth(value) <= width {
 		return value
 	}
-	runes := []rune(value)
 	if width <= 3 {
-		return string(runes[:width])
+		return ansi.Truncate(value, width, "")
 	}
-	return string(runes[:width-3]) + "..."
+	return ansi.Truncate(value, width, "...")
 }
 
 func fitRight(value string, width int) string {
 	value = fit(value, width)
-	return strings.Repeat(" ", max(0, width-utf8.RuneCountInString(value))) + value
+	return strings.Repeat(" ", max(0, width-ansi.StringWidth(value))) + value
 }

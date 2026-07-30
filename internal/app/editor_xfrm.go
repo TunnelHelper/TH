@@ -36,7 +36,7 @@ func ikeEditOptions(spec *model.XFRMIKEv2Spec) []ui.Option {
 		{Label: "Authentication: " + string(spec.AuthMethod), Value: "auth"},
 		{Label: "Replace authentication material", Value: "auth-material"},
 		{Label: "IKE / ESP proposals", Value: "proposals"},
-		{Label: fmt.Sprintf("UDP encapsulation: %t", spec.Encapsulation), Value: "encapsulation"},
+		{Label: "UDP encapsulation: " + enabledState(spec.Encapsulation), Value: "encapsulation"},
 		{Label: "Start action: " + spec.StartAction, Value: "start"},
 	}
 }
@@ -142,7 +142,7 @@ func editIKEField(prompts *prompts, spec *model.XFRMIKEv2Spec, field string) err
 	case "proposals":
 		return collectIKEProposals(prompts, spec)
 	case "encapsulation":
-		value, err := prompts.confirm("UDP encapsulation", spec.Encapsulation)
+		value, err := prompts.toggle("UDP encapsulation", spec.Encapsulation)
 		if err != nil {
 			return err
 		}

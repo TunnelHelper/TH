@@ -89,6 +89,9 @@ func (b *Backend) observeAmneziaWG(ctx context.Context, record model.Tunnel) (co
 	if err != nil || !observation.InterfaceExists {
 		return observation, err
 	}
+	if b.awgErr != nil {
+		return observation, b.awgErr
+	}
 	device, err := b.awg.Device(ctx, record.Interface)
 	if err != nil {
 		return observation, err
@@ -110,6 +113,7 @@ func (b *Backend) observeAmneziaWG(ctx context.Context, record model.Tunnel) (co
 	}
 	observation.Details["receive_bytes"] = strconv.FormatInt(rx, 10)
 	observation.Details["transmit_bytes"] = strconv.FormatInt(tx, 10)
+	observation.Details["counter_source"] = "amneziawg"
 	observation.Peers = wireGuardPeerStatuses(device.Peers)
 	if !latest.IsZero() {
 		observation.Details["latest_handshake"] = latest.UTC().Format(time.RFC3339)

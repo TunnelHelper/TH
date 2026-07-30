@@ -26,10 +26,17 @@ func vxlanEditOptions(spec *model.VXLANSpec) []ui.Option {
 		{Label: "Local underlay: " + spec.Local.String(), Value: "local"},
 		{Label: "Underlay interface: " + spec.UnderlayInterface, Value: "underlay"},
 		{Label: fmt.Sprintf("Destination port: %d", spec.DestinationPort), Value: "port"},
-		{Label: fmt.Sprintf("MAC learning: %t", spec.Learning), Value: "learning"},
+		{Label: "MAC learning: " + enabledState(spec.Learning), Value: "learning"},
 		{Label: "Interface addresses: " + formatPrefixes(spec.Addresses), Value: "addresses"},
 		{Label: fmt.Sprintf("MTU: %d", spec.MTU), Value: "mtu"},
 	}
+}
+
+func enabledState(enabled bool) string {
+	if enabled {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 func editBasicTunnelField(prompts *prompts, record *model.Tunnel, field string) error {
@@ -98,7 +105,7 @@ func editVXLANField(prompts *prompts, spec *model.VXLANSpec, field string) error
 	case "port":
 		return editInt(prompts, "Destination port (1-65535)", &spec.DestinationPort, 1, 65535)
 	case "learning":
-		value, err := prompts.confirm("MAC learning", spec.Learning)
+		value, err := prompts.toggle("MAC learning", spec.Learning)
 		if err != nil {
 			return err
 		}

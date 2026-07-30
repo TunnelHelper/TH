@@ -53,24 +53,12 @@ func New(out, err io.Writer, in io.Reader) *UI {
 	return u
 }
 
-func (u *UI) HR() {
-	fmt.Fprintln(u.Out, u.dim.Render(strings.Repeat("-", 60)))
-}
-
 func (u *UI) Title(s string) {
 	u.PendingTitle = s
 }
 
 func (u *UI) Dim(s string) {
 	u.PendingDim = s
-}
-
-func (u *UI) Clear() {
-	// 由 huh 自动处理渲染周期
-}
-
-func (u *UI) ClearLines(n int) {
-	// 废弃
 }
 
 func (u *UI) Info(s string) {

@@ -15,14 +15,16 @@ import (
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
+	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 func (b *Backend) applyWireGuard(ctx context.Context, record model.Tunnel) (core.Observation, error) {
-	if b.wgErr != nil {
-		return core.Observation{}, fmt.Errorf("open WireGuard generic netlink: %w", b.wgErr)
-	}
 	if err := ctx.Err(); err != nil {
+		return core.Observation{}, err
+	}
+	client, err := b.wg.kernelClient(ctx)
+	if err != nil {
 		return core.Observation{}, err
 	}
 	spec := record.Spec.WireGuard
@@ -36,12 +38,14 @@ func (b *Backend) applyWireGuard(ctx context.Context, record model.Tunnel) (core
 	if err != nil {
 		return core.Observation{}, err
 	}
-	configuration, err := b.wireGuardConfiguration(ctx, record, spec)
+	configuration, err := b.wireGuardConfiguration(ctx, client, record, spec)
 	if err != nil {
 		return observationFromLink(link), err
 	}
-	if err := b.wg.ConfigureDevice(record.Interface, configuration); err != nil {
-		return observationFromLink(link), fmt.Errorf("configure WireGuard device: %w", err)
+	if wireGuardConfigurationChanges(configuration) {
+		if err := client.ConfigureDevice(record.Interface, configuration); err != nil {
+			return observationFromLink(link), fmt.Errorf("configure WireGuard device: %w", err)
+		}
 	}
 	if err := b.configureOwnedLink(record, link, spec.MTU, spec.Addresses); err != nil {
 		return observationFromLink(link), err
@@ -49,55 +53,135 @@ func (b *Backend) applyWireGuard(ctx context.Context, record model.Tunnel) (core
 	if err := b.reconcileWireGuardRoutes(record, spec, link); err != nil {
 		return observationFromLink(link), err
 	}
-	return b.observeWireGuard(record)
+	return b.observeWireGuardWithClient(record, client)
 }
 
-func (b *Backend) wireGuardConfiguration(ctx context.Context, record model.Tunnel, spec *model.WireGuardSpec) (wgtypes.Config, error) {
+func (b *Backend) wireGuardConfiguration(ctx context.Context, client *wgctrl.Client, record model.Tunnel, spec *model.WireGuardSpec) (wgtypes.Config, error) {
+	current, err := client.Device(record.Interface)
+	if err != nil {
+		return wgtypes.Config{}, fmt.Errorf("read WireGuard device before configuration: %w", err)
+	}
+	return buildWireGuardConfiguration(ctx, record, spec, current)
+}
+
+func buildWireGuardConfiguration(ctx context.Context, record model.Tunnel, spec *model.WireGuardSpec, current *wgtypes.Device) (wgtypes.Config, error) {
 	privateKey, err := wgtypes.ParseKey(spec.PrivateKey)
 	if err != nil {
 		return wgtypes.Config{}, err
 	}
-	listenPort := spec.ListenPort
 	firewallMark := effectiveFirewallMark(record, spec)
-	configuration := wgtypes.Config{
-		PrivateKey:   &privateKey,
-		ListenPort:   &listenPort,
-		FirewallMark: &firewallMark,
-		ReplacePeers: true,
-		Peers:        make([]wgtypes.PeerConfig, 0, len(spec.Peers)),
+	configuration := wgtypes.Config{Peers: make([]wgtypes.PeerConfig, 0, len(spec.Peers)+len(current.Peers))}
+	if current.PrivateKey != privateKey {
+		configuration.PrivateKey = &privateKey
+	}
+	if spec.ListenPort != 0 {
+		if current.ListenPort != spec.ListenPort {
+			listenPort := spec.ListenPort
+			configuration.ListenPort = &listenPort
+		}
+	} else if current.ListenPort == 0 {
+		listenPort := 0
+		configuration.ListenPort = &listenPort
+	}
+	if current.FirewallMark != firewallMark {
+		configuration.FirewallMark = &firewallMark
+	}
+
+	currentPeers := make(map[wgtypes.Key]wgtypes.Peer, len(current.Peers))
+	for _, peer := range current.Peers {
+		currentPeers[peer.PublicKey] = peer
 	}
 	for _, peer := range spec.Peers {
-		publicKey, err := wgtypes.ParseKey(peer.PublicKey)
+		peerConfig, err := buildWireGuardPeerConfiguration(ctx, peer)
 		if err != nil {
 			return wgtypes.Config{}, err
 		}
-		keepalive := time.Duration(peer.Keepalive) * time.Second
-		peerConfig := wgtypes.PeerConfig{
-			PublicKey:                   publicKey,
-			ReplaceAllowedIPs:           true,
-			PersistentKeepaliveInterval: &keepalive,
-			AllowedIPs:                  make([]net.IPNet, 0, len(peer.AllowedIPs)),
+		currentPeer, exists := currentPeers[peerConfig.PublicKey]
+		if !exists || !wireGuardPeerConfigurationMatches(currentPeer, peerConfig) {
+			peerConfig.UpdateOnly = exists
+			configuration.Peers = append(configuration.Peers, peerConfig)
 		}
-		if peer.PresharedKey != "" {
-			key, err := wgtypes.ParseKey(peer.PresharedKey)
-			if err != nil {
-				return wgtypes.Config{}, err
-			}
-			peerConfig.PresharedKey = &key
-		}
-		if peer.Endpoint != "" {
-			endpoint, err := resolveEndpoint(ctx, peer.Endpoint)
-			if err != nil {
-				return wgtypes.Config{}, fmt.Errorf("resolve endpoint %q: %w", peer.Endpoint, err)
-			}
-			peerConfig.Endpoint = endpoint
-		}
-		for _, prefix := range peer.AllowedIPs {
-			peerConfig.AllowedIPs = append(peerConfig.AllowedIPs, *prefixToIPNet(prefix.Masked()))
-		}
-		configuration.Peers = append(configuration.Peers, peerConfig)
+		delete(currentPeers, peerConfig.PublicKey)
+	}
+	for publicKey := range currentPeers {
+		configuration.Peers = append(configuration.Peers, wgtypes.PeerConfig{PublicKey: publicKey, Remove: true})
 	}
 	return configuration, nil
+}
+
+func buildWireGuardPeerConfiguration(ctx context.Context, peer model.WireGuardPeer) (wgtypes.PeerConfig, error) {
+	publicKey, err := wgtypes.ParseKey(peer.PublicKey)
+	if err != nil {
+		return wgtypes.PeerConfig{}, err
+	}
+	keepalive := time.Duration(peer.Keepalive) * time.Second
+	presharedKey := wgtypes.Key{}
+	if peer.PresharedKey != "" {
+		presharedKey, err = wgtypes.ParseKey(peer.PresharedKey)
+		if err != nil {
+			return wgtypes.PeerConfig{}, err
+		}
+	}
+	configuration := wgtypes.PeerConfig{
+		PublicKey:                   publicKey,
+		PresharedKey:                &presharedKey,
+		ReplaceAllowedIPs:           true,
+		PersistentKeepaliveInterval: &keepalive,
+		AllowedIPs:                  make([]net.IPNet, 0, len(peer.AllowedIPs)),
+	}
+	if peer.Endpoint != "" {
+		endpoint, err := resolveEndpoint(ctx, peer.Endpoint)
+		if err != nil {
+			return wgtypes.PeerConfig{}, fmt.Errorf("resolve endpoint %q: %w", peer.Endpoint, err)
+		}
+		configuration.Endpoint = endpoint
+	}
+	for _, prefix := range peer.AllowedIPs {
+		configuration.AllowedIPs = append(configuration.AllowedIPs, *prefixToIPNet(prefix.Masked()))
+	}
+	return configuration, nil
+}
+
+func wireGuardConfigurationChanges(configuration wgtypes.Config) bool {
+	return configuration.PrivateKey != nil || configuration.ListenPort != nil || configuration.FirewallMark != nil || len(configuration.Peers) != 0
+}
+
+func wireGuardPeerConfigurationMatches(current wgtypes.Peer, desired wgtypes.PeerConfig) bool {
+	if desired.PresharedKey == nil || current.PresharedKey != *desired.PresharedKey {
+		return false
+	}
+	if desired.PersistentKeepaliveInterval == nil || current.PersistentKeepaliveInterval != *desired.PersistentKeepaliveInterval {
+		return false
+	}
+	if desired.Endpoint != nil && !equalUDPEndpoint(current.Endpoint, desired.Endpoint) {
+		return false
+	}
+	return equalIPNetworks(current.AllowedIPs, desired.AllowedIPs)
+}
+
+func equalUDPEndpoint(a, b *net.UDPAddr) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Port == b.Port && a.Zone == b.Zone && a.IP.Equal(b.IP)
+}
+
+func equalIPNetworks(a, b []net.IPNet) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	values := make(map[string]int, len(a))
+	for _, prefix := range a {
+		values[prefix.String()]++
+	}
+	for _, prefix := range b {
+		key := prefix.String()
+		if values[key] == 0 {
+			return false
+		}
+		values[key]--
+	}
+	return true
 }
 
 func resolveEndpoint(ctx context.Context, endpoint string) (*net.UDPAddr, error) {
@@ -122,12 +206,34 @@ func resolveEndpoint(ctx context.Context, endpoint string) (*net.UDPAddr, error)
 	return &net.UDPAddr{IP: net.IP(addresses[0].AsSlice()), Port: port}, nil
 }
 
-func (b *Backend) observeWireGuard(record model.Tunnel) (core.Observation, error) {
+func (b *Backend) observeWireGuard(ctx context.Context, record model.Tunnel) (core.Observation, error) {
 	observation, err := b.observeLink(record)
-	if err != nil || !observation.InterfaceExists || b.wgErr != nil {
+	if err != nil || !observation.InterfaceExists {
 		return observation, err
 	}
-	device, err := b.wg.Device(record.Interface)
+	if observation.Details["link_type"] != "wireguard" {
+		return observation, fmt.Errorf("link %s has type %q, not kernel WireGuard", record.Interface, observation.Details["link_type"])
+	}
+	client, err := b.wg.kernelClient(ctx)
+	if err != nil {
+		return observation, err
+	}
+	return b.observeWireGuardDevice(observation, record, client)
+}
+
+func (b *Backend) observeWireGuardWithClient(record model.Tunnel, client *wgctrl.Client) (core.Observation, error) {
+	observation, err := b.observeLink(record)
+	if err != nil || !observation.InterfaceExists {
+		return observation, err
+	}
+	if observation.Details["link_type"] != "wireguard" {
+		return observation, fmt.Errorf("link %s has type %q, not kernel WireGuard", record.Interface, observation.Details["link_type"])
+	}
+	return b.observeWireGuardDevice(observation, record, client)
+}
+
+func (b *Backend) observeWireGuardDevice(observation core.Observation, record model.Tunnel, client *wgctrl.Client) (core.Observation, error) {
+	device, err := client.Device(record.Interface)
 	if err != nil {
 		return observation, fmt.Errorf("read WireGuard device: %w", err)
 	}
@@ -148,6 +254,7 @@ func (b *Backend) observeWireGuard(record model.Tunnel) (core.Observation, error
 	}
 	observation.Details["receive_bytes"] = strconv.FormatInt(rx, 10)
 	observation.Details["transmit_bytes"] = strconv.FormatInt(tx, 10)
+	observation.Details["counter_source"] = "wireguard"
 	observation.Peers = wireGuardPeerStatuses(device.Peers)
 	if !latest.IsZero() {
 		observation.Details["latest_handshake"] = latest.UTC().Format(time.RFC3339)

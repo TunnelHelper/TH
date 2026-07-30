@@ -68,18 +68,49 @@ func (p *prompts) secret(title string, value *string, validate func(string) erro
 	}
 }
 
-func (p *prompts) confirm(title string, defaultValue bool) (bool, error) {
+func (p *prompts) decision(title string, primary, secondary ui.Option, defaultValue string) (string, error) {
 	value := defaultValue
 	for {
-		err := p.prompter.Confirm(title, &value, defaultValue)
+		err := p.prompter.Decision(title, primary, secondary, &value)
 		if err == nil {
 			return value, nil
 		}
 		if wrapped := wrapAbort(err); errors.Is(wrapped, ErrAborted) {
-			return false, wrapped
+			return "", wrapped
 		}
 		p.ui.Warn(err.Error())
 	}
+}
+
+func (p *prompts) saveDiscard(title, saveLabel, discardLabel string) (bool, error) {
+	value, err := p.decision(title,
+		ui.Option{Label: saveLabel, Value: "save"},
+		ui.Option{Label: discardLabel, Value: "discard", Destructive: true},
+		"save",
+	)
+	return value == "save", err
+}
+
+func (p *prompts) confirmAction(title, actionLabel string) (bool, error) {
+	value, err := p.decision(title,
+		ui.Option{Label: actionLabel, Value: "confirm", Destructive: true},
+		ui.Option{Label: "Cancel", Value: "cancel"},
+		"cancel",
+	)
+	return value == "confirm", err
+}
+
+func (p *prompts) toggle(title string, enabled bool) (bool, error) {
+	defaultValue := "disabled"
+	if enabled {
+		defaultValue = "enabled"
+	}
+	value, err := p.decision(title,
+		ui.Option{Label: "Enabled", Value: "enabled"},
+		ui.Option{Label: "Disabled", Value: "disabled"},
+		defaultValue,
+	)
+	return value == "enabled", err
 }
 
 func required(value string) error {

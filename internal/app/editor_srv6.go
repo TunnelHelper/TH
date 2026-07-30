@@ -59,7 +59,7 @@ func editSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.SRv6
 		if choice == "add" {
 			source, keep, err := collectSRv6Source(prompts, model.SRv6Source{
 				Name: suggestedSRv6SourceName(sources), MTU: 1500,
-			}, true)
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -103,25 +103,29 @@ func editSRv6Source(prompts *prompts, original model.SRv6Source) (model.SRv6Sour
 			{Label: "IPv4 route SID: " + optionalAddrLabel(source.SIDv4), Value: "sid4"},
 			{Label: "IPv6 route SID: " + optionalAddrLabel(source.SIDv6), Value: "sid6"},
 			{Label: fmt.Sprintf("MTU: %d", source.MTU), Value: "mtu"},
-			{Label: "Save source", Value: "save"},
+			{Label: "Finish editing", Value: "finish"},
 			{Label: "Remove source", Value: "remove"},
-			{Label: "Discard source changes", Value: "discard"},
 		}
-		choice := "save"
+		choice := "finish"
 		if err := prompts.selectValue("Source field", options, &choice); err != nil {
 			return original, "discard", err
 		}
 		switch choice {
-		case "save":
+		case "finish":
 			if source.SIDv4 == nil && source.SIDv6 == nil {
 				prompts.ui.Warn("At least one SID is required")
 				continue
 			}
-			return source, "save", nil
-		case "discard":
+			save, err := prompts.saveDiscard("Source changes", "Save source", "Discard changes")
+			if err != nil {
+				return original, "discard", err
+			}
+			if save {
+				return source, "save", nil
+			}
 			return original, "discard", nil
 		case "remove":
-			confirmed, err := prompts.confirm("Remove this source", false)
+			confirmed, err := prompts.confirmAction("Remove this source", "Remove source")
 			if err != nil {
 				return original, "discard", err
 			}

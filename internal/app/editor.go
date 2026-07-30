@@ -12,23 +12,25 @@ func editTunnel(prompts *prompts, current model.Tunnel) (model.Tunnel, bool, err
 	if err != nil {
 		return model.Tunnel{}, false, err
 	}
-	prompts.section("Edit "+current.Name, "Choose individual fields. Nothing is sent until Save changes is selected.")
+	prompts.section("Edit "+current.Name, "Changes remain local until they are reviewed and saved.")
 	for {
 		options := []ui.Option{{Label: "Name: " + updated.Name, Value: "name"}}
 		options = append(options, tunnelEditOptions(updated)...)
-		options = append(options,
-			ui.Option{Label: "Save changes", Value: "save"},
-			ui.Option{Label: "Discard changes", Value: "discard"},
-		)
-		choice := "save"
+		options = append(options, ui.Option{Label: "Finish editing", Value: "finish"})
+		choice := "finish"
 		if err := prompts.selectValue("Field to edit", options, &choice); err != nil {
 			return model.Tunnel{}, false, err
 		}
 		switch choice {
-		case "save":
+		case "finish":
 			showTunnelSummary(prompts.ui, updated)
-			return updated, true, nil
-		case "discard":
+			save, err := prompts.saveDiscard("Tunnel changes", "Save changes", "Discard changes")
+			if err != nil {
+				return model.Tunnel{}, false, err
+			}
+			if save {
+				return updated, true, nil
+			}
 			return current, false, nil
 		case "name":
 			if err := prompts.input("Tunnel name", &updated.Name, validateNameInput); err != nil {

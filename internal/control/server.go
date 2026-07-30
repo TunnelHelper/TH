@@ -24,6 +24,8 @@ type Manager interface {
 	Update(context.Context, string, uint64, model.Tunnel) (model.TunnelView, error)
 	SetEnabled(context.Context, string, uint64, bool) (model.TunnelView, error)
 	Delete(context.Context, string, uint64) error
+	Observe(context.Context, string) (model.TunnelView, error)
+	ObserveAll(context.Context) ([]model.TunnelView, error)
 	Reconcile(context.Context, string) (model.TunnelView, error)
 	ReconcileAll(context.Context) ([]model.TunnelView, error)
 	Health(context.Context) map[model.Kind]core.BackendHealth
@@ -97,6 +99,8 @@ func NewServer(manager Manager) *Server {
 	server.mux.HandleFunc("POST /v1/tunnels/{id}/enable", server.enable)
 	server.mux.HandleFunc("POST /v1/tunnels/{id}/disable", server.disable)
 	server.mux.HandleFunc("POST /v1/tunnels/{id}/reconcile", server.reconcile)
+	server.mux.HandleFunc("POST /v1/tunnels/{id}/observe", server.observe)
+	server.mux.HandleFunc("POST /v1/observe", server.observeAll)
 	server.mux.HandleFunc("POST /v1/reconcile", server.reconcileAll)
 	server.mux.HandleFunc("POST /v1/plan", server.planBundle)
 	server.mux.HandleFunc("POST /v1/apply", server.applyBundle)
@@ -472,6 +476,24 @@ func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) observe(w http.ResponseWriter, r *http.Request) {
+	view, err := s.manager.Observe(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) observeAll(w http.ResponseWriter, r *http.Request) {
+	views, err := s.manager.ObserveAll(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tunnels": views})
 }
 
 func (s *Server) reconcileAll(w http.ResponseWriter, r *http.Request) {
