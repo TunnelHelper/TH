@@ -1,6 +1,6 @@
-# TH V2
+# TH
 
-TH V2 is a Linux tunnel management daemon with a non-root TUI and
+TH is a Linux tunnel management daemon with a non-root TUI and
 CLI. The daemon stores desired state in its own private directory and
 reconciles links, addresses, routes, rules, and XFRM objects through netlink.
 It does not generate distribution-specific network configuration files or run
@@ -16,9 +16,9 @@ Supported tunnel kinds:
 - IKEv2 XFRM controlled through strongSwan VICI
 - SRv6 route sets
 
-V2 is a clean break. It has no old-format importer, compatibility parser, or
-automatic cleanup workflow. Remove or disable old tunnel definitions before
-enabling V2 records that use the same names.
+The current architecture is a clean break. It has no old-format importer,
+compatibility parser, or automatic cleanup workflow. Remove or disable old
+tunnel definitions before enabling TH records that use the same names.
 
 ## Architecture
 
@@ -34,7 +34,7 @@ thd (root)
   `-- strongSwan VICI
 ```
 
-The daemon is the only writer of V2 state. Kernel objects created by the
+The daemon is the only writer of TH state. Kernel objects created by the
 daemon are tagged or placed in reserved ownership namespaces, and deletion is
 refused when ownership cannot be proven.
 
@@ -194,7 +194,7 @@ daemon connects directly to `/run/charon.vici` by default and loads connection
 and credential objects through VICI; it does not use credential files.
 
 See [Operations](docs/OPERATIONS.md), [Local API](docs/API.md), and the
-[V2 roadmap](docs/ROADMAP.md) for detailed requirements and invariants.
+[roadmap](docs/ROADMAP.md) for detailed requirements and invariants.
 
 ## Development
 

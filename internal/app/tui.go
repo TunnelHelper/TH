@@ -14,6 +14,7 @@ import (
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/TunnelHelper/TH/internal/ui"
+	"github.com/TunnelHelper/TH/internal/version"
 )
 
 const tuiHealthTimeout = time.Second
@@ -34,7 +35,8 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 	}
 	for {
 		choice := "manage"
-		output.Title("TH V2")
+		output.Title("TH")
+		output.Dim(version.Current().Label())
 		err := app.prompts.selectValue("Action", app.mainMenuOptions(), &choice)
 		if errors.Is(err, ErrAborted) || choice == "exit" {
 			return nil

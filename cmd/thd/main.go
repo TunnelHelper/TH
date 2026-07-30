@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -82,7 +83,7 @@ func run(args []string) error {
 		return err
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := newDaemonLogger(os.Stderr)
 	records, err := store.Open(settings.StateDir)
 	if err != nil {
 		return err
@@ -109,4 +110,16 @@ func run(args []string) error {
 	workers.Wait()
 	closeErr := reconciler.Close()
 	return errors.Join(serveErr, closeErr)
+}
+
+func newDaemonLogger(output io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(output, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+			if attr.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return attr
+		},
+	}))
 }

@@ -1,4 +1,4 @@
-# V2 Operations
+# TH Operations
 
 ## Daemon Settings
 
@@ -62,8 +62,9 @@ Enable the strongSwan VICI plugin and make its Unix socket reachable by the
 daemon. The default is `/run/charon.vici`; change `vici_socket_path` when the
 distribution uses another location.
 
-Each V2 connection name contains the record UUID. PSKs have a stable unique
-credential ID, and RPK private keys are loaded as in-memory VICI credentials.
+Each managed connection name contains the record UUID. PSKs have a stable
+unique credential ID, and RPK private keys are loaded as in-memory VICI
+credentials.
 Raw public keys are sent as binary DER values in the connection message.
 Disabling or deleting a record terminates its SAs and unloads only its named
 connection and credentials. An IKEv2 update first unloads the previous VICI
@@ -114,7 +115,7 @@ For a consistent offline backup:
    ownership, permissions, and timestamps.
 3. Restart the daemon.
 
-Restore onto the same or a compatible V2 schema version. Stop the daemon,
+Restore onto the same or a compatible TH schema version. Stop the daemon,
 restore both directories with root ownership, ensure the state directory is
 `0700` and record files are `0600`, then start the daemon. Enabled records are
 reconciled from desired state on startup.
@@ -125,7 +126,7 @@ access to administrators, and rotate credentials after suspected disclosure.
 ## Recovery
 
 - A name conflict is never adopted. Remove or rename the pre-existing kernel
-  object, or change the V2 record before enabling it.
+  object, or change the TH record before enabling it.
 - A backend error leaves desired state stored and visible with a structured
   condition. Fix the host dependency and request reconcile, or wait for the
   periodic repair loop.
@@ -135,6 +136,6 @@ access to administrators, and rotate credentials after suspected disclosure.
   backup or move it aside while the daemon is stopped, then investigate before
   recreating it through the API.
 
-V2 never scans, imports, edits, or removes configuration from another network
+TH never scans, imports, edits, or removes configuration from another network
 manager. Operators are responsible for removing old definitions and avoiding
 two owners for the same interface.

@@ -1,8 +1,8 @@
 APP := th
 DAEMON := thd
 BIN_DIR := ./bin
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+VERSION ?= dev
+COMMIT ?= unknown
 VERSION_PACKAGE := github.com/TunnelHelper/TH/internal/version
 LDFLAGS := -X $(VERSION_PACKAGE).Version=$(VERSION) -X $(VERSION_PACKAGE).Commit=$(COMMIT)
 BUILD_FLAGS := -trimpath -ldflags "$(LDFLAGS)"
@@ -76,7 +76,7 @@ build-linux-armv7:
 build-linux: build-linux-amd64 build-linux-arm64 build-linux-armv7
 
 package:
-	goreleaser release --snapshot --clean
+	TH_VERSION=$(VERSION) goreleaser release --snapshot --clean
 
 install: build
 	install -Dm0755 $(BIN_DIR)/$(APP) $(DESTDIR)$(BINDIR)/$(APP)

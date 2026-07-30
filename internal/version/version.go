@@ -1,6 +1,9 @@
 package version
 
-import "runtime"
+import (
+	"runtime"
+	"strings"
+)
 
 var (
 	Version = "dev"
@@ -26,4 +29,20 @@ func Current() Info {
 		OS:        runtime.GOOS,
 		Arch:      runtime.GOARCH,
 	}
+}
+
+// Label returns compact build metadata for secondary UI text.
+func (i Info) Label() string {
+	productVersion := strings.TrimSpace(i.Version)
+	if productVersion == "" {
+		productVersion = "dev"
+	}
+	commit := strings.TrimSpace(i.Commit)
+	if commit == "" || commit == "unknown" {
+		return productVersion
+	}
+	if len(commit) > 12 {
+		commit = commit[:12]
+	}
+	return productVersion + "  " + commit
 }

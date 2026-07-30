@@ -60,3 +60,5 @@ jobs:
           printf '%s  %s\n' "$GORELEASER_SHA256" "$archive" | sha256sum -c -
           tar -xzf "$archive" -C "$RUNNER_TEMP" goreleaser
           "$RUNNER_TEMP/goreleaser" release --snapshot --clean
+        env:
+          TH_VERSION: dev

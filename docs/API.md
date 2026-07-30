@@ -1,4 +1,4 @@
-# Local V2 API
+# Local API
 
 The client and daemon use HTTP/1.1 with JSON over
 `/run/th/control.sock`. This is a local administrative API protected

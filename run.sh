@@ -13,7 +13,7 @@ for arg in "$@"; do
 done
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "TH V2 supports Linux only." >&2
+  echo "TH supports Linux only." >&2
   exit 1
 fi
 
@@ -96,7 +96,7 @@ if [[ "$INSTALL" -eq 0 ]]; then
   client="$workdir/th"
   daemon="$workdir/thd"
   if [[ ! -x "$client" || ! -x "$daemon" ]]; then
-    echo "Release archive does not contain both V2 binaries." >&2
+    echo "Release archive does not contain both TH binaries." >&2
     exit 1
   fi
   "$client" "${args[@]}"

@@ -1,21 +1,21 @@
-# TH V2 TODO
+# TH TODO
 
-This checklist is the durable progress record for the V2 migration. Update it
-as each item is completed. The scope and acceptance rules are defined in
-`docs/ROADMAP.md`.
+This checklist is the durable progress record for the current architecture.
+Update it as each item is completed. The scope and acceptance rules are
+defined in `docs/ROADMAP.md`.
 
 Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
 
 ## 0. Scope and Design
 
-- [x] Record the V2 objective and non-negotiable invariants.
-- [x] Remove OpenVPN from the V2 supported-kind list.
+- [x] Record the current objective and non-negotiable invariants.
+- [x] Remove OpenVPN from the supported-kind list.
 - [x] Define process, filesystem, API, ownership, and reconciliation design.
 - [x] Define backend choices and completion audit.
 
 ## 1. Foundation
 
-- [x] Upgrade the Go toolchain level needed by current V2 dependencies.
+- [x] Upgrade the Go toolchain level needed by current dependencies.
 - [x] Add versioned common tunnel metadata and typed specs.
 - [x] Add strict validation and secret-redacted API representations.
 - [x] Implement crash-safe per-record storage and schema handling.
@@ -74,7 +74,7 @@ Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
 
 ### SRv6
 
-- [x] Move SRv6 configuration and cache into the V2 store layout.
+- [x] Move SRv6 configuration and cache into the TH store layout.
 - [x] Fetch sources with timeouts, size limits, and atomic caching.
 - [x] Validate every downloaded route prefix.
 - [x] Reconcile exact tables, rules, SID reachability, and SEG6 routes.
@@ -107,9 +107,9 @@ Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
 - [x] Delete interfaces/swanctl/WireGuard/Amnezia config generators.
 - [x] Delete package installation and service-manager runtime flows.
 - [x] Stop scanning external configuration directories as desired state.
-- [x] Define V2 as a clean break with no V1 importer or compatibility parser.
+- [x] Define TH as a clean break with no V1 importer or compatibility parser.
 - [x] Report pre-existing kernel-object ownership conflicts without adopting them.
-- [x] Rewrite README for V2 clean-break operation.
+- [x] Rewrite README for clean-break operation.
 
 ## 6. Packaging and Operations
 

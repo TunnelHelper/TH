@@ -24,8 +24,8 @@ builds:
     ldflags:
       - >-
         -s -w
-        -X github.com/TunnelHelper/TH/internal/version.Version={{ .Version }}
-        -X github.com/TunnelHelper/TH/internal/version.Commit={{ .Commit }}
+        -X github.com/TunnelHelper/TH/internal/version.Version={{ .Env.TH_VERSION }}
+        -X github.com/TunnelHelper/TH/internal/version.Commit={{ .ShortCommit }}
         -X github.com/TunnelHelper/TH/internal/version.Date={{ .Date }}
     binary: th
   - id: thd
@@ -45,8 +45,8 @@ builds:
     ldflags:
       - >-
         -s -w
-        -X github.com/TunnelHelper/TH/internal/version.Version={{ .Version }}
-        -X github.com/TunnelHelper/TH/internal/version.Commit={{ .Commit }}
+        -X github.com/TunnelHelper/TH/internal/version.Version={{ .Env.TH_VERSION }}
+        -X github.com/TunnelHelper/TH/internal/version.Commit={{ .ShortCommit }}
         -X github.com/TunnelHelper/TH/internal/version.Date={{ .Date }}
     binary: thd
 

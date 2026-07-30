@@ -1,5 +1,5 @@
 [Unit]
-Description=TH V2 network tunnel daemon
+Description=TH network tunnel daemon
 Wants=network-online.target
 After=network-online.target
 

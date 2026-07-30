@@ -1,14 +1,14 @@
-# TH V2 Roadmap
+# TH Roadmap
 
 ## Objective
 
-V2 turns TH into a Linux tunnel management service instead of a
+TH is a Linux tunnel management service instead of a
 configuration-file generator. The privileged daemon owns desired state and
 reconciles it directly with kernel and control-plane APIs. The TUI is an
 unprivileged client of that daemon.
 
-This document is the authoritative scope for the V2 migration. `docs/TODO.md`
-tracks implementation progress.
+This document is the authoritative scope for the current architecture.
+`docs/TODO.md` tracks implementation progress.
 
 ## Non-negotiable Invariants
 
@@ -20,13 +20,13 @@ tracks implementation progress.
    configuration in `/etc/network/interfaces*`, Netplan, NetworkManager,
    systemd-networkd, `/etc/wireguard`, `/etc/amnezia`, `/etc/swanctl`, or
    `/etc/openvpn`.
-3. OpenVPN support is removed from V2. No OpenVPN menu, model, backend,
+3. OpenVPN support is removed from TH. No OpenVPN menu, model, backend,
    migration target, dependency check, operational documentation, or runtime
    path remains.
 4. Linux links, addresses, routes, rules, and static XFRM state/policy are
    managed through netlink APIs.
 5. WireGuard and AmneziaWG device configuration uses generic netlink APIs.
-6. strongSwan is controlled exclusively through the VICI protocol. V2 never
+6. strongSwan is controlled exclusively through the VICI protocol. TH never
    invokes `swanctl` and never writes swanctl configuration or credential files.
 7. The daemon-owned desired-state store is the sole source of truth. Scanning
    unrelated system configuration directories is not a management mechanism.
@@ -34,9 +34,9 @@ tracks implementation progress.
 9. All apply/delete operations are idempotent and delete only objects proven to
    be owned by TH. Broad route or XFRM flushes are forbidden.
 10. Missing kernel modules, VICI, or protocol families are reported as
-    structured health/errors. V2 does not install dependencies itself.
+    structured health/errors. TH does not install dependencies itself.
 
-## Supported V2 Tunnel Kinds
+## Supported Tunnel Kinds
 
 - GRE over IPv4 and IPv6
 - VXLAN with unicast remote endpoint
@@ -187,9 +187,9 @@ repository also provides `sysusers.d` and `tmpfiles.d` assets where useful.
 
 ## Clean Break From V1
 
-V2 has no V1 importer, parser, compatibility mode, directory scanner, or
+TH has no V1 importer, parser, compatibility mode, directory scanner, or
 automatic cleanup path. Operators remove or disable old configuration and
-services themselves before enabling a V2 record with the same kernel object
+services themselves before enabling a TH record with the same kernel object
 names. Ownership conflicts are reported by the daemon and never adopted.
 
 ## Test Strategy
@@ -218,15 +218,15 @@ names. Ownership conflicts are reported by the daemon and never adopted.
 7. Remove all V1 execution/config-generation code and pass the completion
    audit below.
 
-## V2 Completion Audit
+## Completion Audit
 
-V2 is complete only when all of the following are proven from the current
-worktree and test output:
+The migration is complete only when all of the following are proven from the
+current worktree and test output:
 
 - Both binaries build and the daemon restores enabled tunnels after restart.
 - Every supported kind can be created, observed, disabled, re-enabled, updated,
   and deleted through the daemon API.
-- TUI management lists only records from the V2 store and works without root.
+- TUI management lists only records from the TH store and works without root.
 - OpenVPN and V1 external-file management code are absent.
 - Production code has no external command execution path.
 - No production code touches forbidden system configuration paths.

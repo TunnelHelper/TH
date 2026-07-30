@@ -49,3 +49,4 @@ jobs:
           "$RUNNER_TEMP/goreleaser" release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TH_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
