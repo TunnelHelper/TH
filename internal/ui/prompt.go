@@ -38,7 +38,7 @@ const (
 	promptDecision
 )
 
-const promptMaxVisibleOptions = 8
+const promptMaxVisibleOptions = 10
 
 type promptModel struct {
 	ui          *UI
