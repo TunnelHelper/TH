@@ -112,6 +112,35 @@ func TestPromptModelKeepsValidationErrorInline(t *testing.T) {
 	}
 }
 
+func TestPromptModelRendersFixedPrefixBeforeInput(t *testing.T) {
+	userInterface := New(&bytes.Buffer{}, &bytes.Buffer{}, strings.NewReader(""))
+	userInterface.TTY = true
+	model := newInputPromptWithPrefix(userInterface, "Tunnel name", "", "ipsec-", "edge", false, nil)
+
+	if model.text.Prompt != "ipsec-" {
+		t.Fatalf("input prompt = %q, want fixed interface prefix", model.text.Prompt)
+	}
+	if !strings.Contains(model.View(), "ipsec-") || !strings.Contains(model.View(), "edge") {
+		t.Fatalf("fixed prefix and editable name were not rendered together:\n%s", model.View())
+	}
+	if model.text.Width != 74 {
+		t.Fatalf("input width = %d, want terminal width minus prefix", model.text.Width)
+	}
+}
+
+func TestPromptModelWarnsWhenPrefixAndInputExceedLimit(t *testing.T) {
+	userInterface := New(&bytes.Buffer{}, &bytes.Buffer{}, strings.NewReader(""))
+	userInterface.TTY = true
+	model := newInputPromptWithPrefixLimit(userInterface, "Tunnel name", "", "ipsec-", 15, "1234567890", false, nil)
+
+	if model.warning == nil || !strings.Contains(model.warning.Error(), "16/15") {
+		t.Fatalf("missing combined length warning: %v", model.warning)
+	}
+	if !strings.Contains(model.View(), "combined name exceeds 15 characters") {
+		t.Fatalf("combined length warning was not rendered below input:\n%s", model.View())
+	}
+}
+
 func TestPromptModelEscAborts(t *testing.T) {
 	userInterface := New(&bytes.Buffer{}, &bytes.Buffer{}, strings.NewReader(""))
 	model := newSelectPrompt(userInterface, promptSelect, "Choose", "", []Option{{Label: "One", Value: "one"}}, "one")

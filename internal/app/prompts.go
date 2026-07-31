@@ -18,6 +18,8 @@ type prompts struct {
 	prompter *ui.Prompter
 }
 
+const maxInterfaceNameLength = 15
+
 func newPrompts(output *ui.UI) *prompts {
 	return &prompts{ui: output, prompter: ui.NewPrompter(output)}
 }
@@ -41,8 +43,17 @@ func (p *prompts) selectValue(title string, options []ui.Option, value *string) 
 }
 
 func (p *prompts) input(title string, value *string, validate func(string) error) error {
+	return p.inputWithPrefix(title, "", value, validate)
+}
+
+func (p *prompts) inputWithPrefix(title, prefix string, value *string, validate func(string) error) error {
 	for {
-		err := p.prompter.Input(title, value, validate)
+		var err error
+		if prefix == "" {
+			err = p.prompter.Input(title, value, validate)
+		} else {
+			err = p.prompter.InputWithPrefixLimit(title, prefix, maxInterfaceNameLength, value, validate)
+		}
 		if err == nil {
 			*value = strings.TrimSpace(*value)
 			return nil
@@ -128,6 +139,14 @@ func validateInterfaceInput(value string) error {
 		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.') {
 			return errors.New("interface name contains unsupported characters")
 		}
+	}
+	return nil
+}
+
+func validateInterfaceNameLength(prefix, name string) error {
+	total := len(prefix) + len(name)
+	if total > maxInterfaceNameLength {
+		return fmt.Errorf("interface name must contain at most %d characters (prefix + name: %d)", maxInterfaceNameLength, total)
 	}
 	return nil
 }

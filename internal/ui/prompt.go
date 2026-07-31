@@ -41,19 +41,21 @@ const (
 const promptMaxVisibleOptions = 10
 
 type promptModel struct {
-	ui          *UI
-	kind        promptKind
-	title       string
-	description string
-	options     []Option
-	selected    int
-	text        textinput.Model
-	validate    func(string) error
-	value       string
-	err         error
-	width       int
-	done        bool
-	aborted     bool
+	ui           *UI
+	kind         promptKind
+	title        string
+	description  string
+	options      []Option
+	selected     int
+	text         textinput.Model
+	validate     func(string) error
+	liveValidate func(string) error
+	value        string
+	err          error
+	warning      error
+	width        int
+	done         bool
+	aborted      bool
 }
 
 func newSelectPrompt(output *UI, kind promptKind, title, description string, options []Option, value string) promptModel {
@@ -71,6 +73,14 @@ func newSelectPrompt(output *UI, kind promptKind, title, description string, opt
 }
 
 func newInputPrompt(output *UI, title, description, value string, secret bool, validate func(string) error) promptModel {
+	return newInputPromptWithPrefix(output, title, description, "", value, secret, validate)
+}
+
+func newInputPromptWithPrefix(output *UI, title, description, prefix, value string, secret bool, validate func(string) error) promptModel {
+	return newInputPromptWithPrefixLimit(output, title, description, prefix, 0, value, secret, validate)
+}
+
+func newInputPromptWithPrefixLimit(output *UI, title, description, prefix string, maxTotal int, value string, secret bool, validate func(string) error) promptModel {
 	input := textinput.New()
 	input.Prompt = "> "
 	input.PromptStyle = output.head
@@ -83,10 +93,44 @@ func newInputPrompt(output *UI, title, description, value string, secret bool, v
 	if secret {
 		input.EchoMode = textinput.EchoPassword
 	}
+	if prefix != "" {
+		input.Prompt = prefix
+		input.PromptStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("15")).
+			Background(lipgloss.Color("4")).
+			Bold(true)
+	}
 	_ = input.Focus()
-	return promptModel{
+	model := promptModel{
 		ui: output, kind: promptInput, title: title, description: description,
 		text: input, validate: validate, value: value, width: 80,
+	}
+	if maxTotal > 0 {
+		model.liveValidate = func(value string) error {
+			total := len(prefix) + len(value)
+			if total > maxTotal {
+				return fmt.Errorf("combined name exceeds %d characters (%d/%d)", maxTotal, total, maxTotal)
+			}
+			return nil
+		}
+	}
+	model.resizeInput()
+	model.refreshWarning()
+	return model
+}
+
+func (m *promptModel) resizeInput() {
+	width := m.width - lipgloss.Width(m.text.Prompt)
+	if width < 1 {
+		width = 1
+	}
+	m.text.Width = width
+}
+
+func (m *promptModel) refreshWarning() {
+	m.warning = nil
+	if m.liveValidate != nil {
+		m.warning = m.liveValidate(m.text.Value())
 	}
 }
 
@@ -101,7 +145,7 @@ func (m promptModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if size, ok := message.(tea.WindowSizeMsg); ok {
 		m.width = max(20, size.Width)
 		if m.kind == promptInput {
-			m.text.Width = max(10, m.width-2)
+			m.resizeInput()
 		}
 		return m, nil
 	}
@@ -110,6 +154,7 @@ func (m promptModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.kind == promptInput {
 			var command tea.Cmd
 			m.text, command = m.text.Update(message)
+			m.refreshWarning()
 			return m, command
 		}
 		return m, nil
@@ -127,6 +172,7 @@ func (m promptModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if m.validate != nil {
 				if err := m.validate(value); err != nil {
 					m.err = err
+					m.warning = nil
 					return m, nil
 				}
 			}
@@ -138,6 +184,7 @@ func (m promptModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		var command tea.Cmd
 		m.text, command = m.text.Update(message)
+		m.refreshWarning()
 		return m, command
 	}
 
@@ -204,6 +251,8 @@ func (m promptModel) View() string {
 
 	if m.err != nil {
 		lines = append(lines, m.ui.err.Render(fitPrompt(m.err.Error(), width)))
+	} else if m.warning != nil {
+		lines = append(lines, m.ui.warn.Render(fitPrompt(m.warning.Error(), width)))
 	}
 	if !m.done && !m.aborted {
 		hint := "arrows/tab  Select    enter  Apply    esc  Cancel"
@@ -295,20 +344,31 @@ func (p *Prompter) Select(title string, options []Option, value *string) error {
 }
 
 func (p *Prompter) Input(title string, value *string, validate func(string) error) error {
-	return p.input(title, value, false, validate)
+	return p.input(title, "", 0, value, false, validate)
+}
+
+// InputWithPrefix renders a fixed prefix directly before the editable input.
+func (p *Prompter) InputWithPrefix(title, prefix string, value *string, validate func(string) error) error {
+	return p.input(title, prefix, 0, value, false, validate)
+}
+
+// InputWithPrefixLimit renders a fixed prefix and warns when their combined
+// value exceeds maxTotal. The supplied validator still controls submission.
+func (p *Prompter) InputWithPrefixLimit(title, prefix string, maxTotal int, value *string, validate func(string) error) error {
+	return p.input(title, prefix, maxTotal, value, false, validate)
 }
 
 func (p *Prompter) Secret(title string, value *string, validate func(string) error) error {
-	return p.input(title, value, true, validate)
+	return p.input(title, "", 0, value, true, validate)
 }
 
-func (p *Prompter) input(title string, value *string, secret bool, validate func(string) error) error {
+func (p *Prompter) input(title, prefix string, maxTotal int, value *string, secret bool, validate func(string) error) error {
 	if value == nil {
 		return errors.New("invalid input configuration")
 	}
 	if p.ui.TTY {
 		fieldTitle, description := p.consumePending(title)
-		result, err := p.run(newInputPrompt(p.ui, fieldTitle, description, *value, secret, validate))
+		result, err := p.run(newInputPromptWithPrefixLimit(p.ui, fieldTitle, description, prefix, maxTotal, *value, secret, validate))
 		if err != nil {
 			return err
 		}
@@ -318,8 +378,11 @@ func (p *Prompter) input(title string, value *string, secret bool, validate func
 
 	p.printPending()
 	prompt := title
+	if prefix != "" {
+		prompt = fmt.Sprintf("%s (interface: %s<name>)", title, prefix)
+	}
 	if !secret && strings.TrimSpace(*value) != "" {
-		prompt = fmt.Sprintf("%s [%s]", title, *value)
+		prompt = fmt.Sprintf("%s [%s]", prompt, *value)
 	}
 	fmt.Fprintf(p.out, "%s: ", prompt)
 	line, err := p.ui.ReadLine()

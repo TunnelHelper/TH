@@ -34,12 +34,18 @@ func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel, su
 		prompts.section(tunnelKindTitle(kind), "Configure the tunnel first; activation is chosen after review.")
 	}
 	namePrompt := "Tunnel name"
+	namePrefix := ""
 	if creating && kind != model.KindSRv6 {
-		namePrompt = fmt.Sprintf("Tunnel name (interface: %s<name>)", interfacePrefix(kind))
+		namePrefix = interfacePrefix(kind)
 	}
-	if err := prompts.input(namePrompt, &record.Name, func(value string) error {
+	if err := prompts.inputWithPrefix(namePrompt, namePrefix, &record.Name, func(value string) error {
 		if err := validateNameInput(value); err != nil {
 			return err
+		}
+		if namePrefix != "" {
+			if err := validateInterfaceNameLength(namePrefix, value); err != nil {
+				return err
+			}
 		}
 		if creating {
 			return validateNewTunnelIdentity(kind, value, managed)
