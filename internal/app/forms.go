@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
-	"strings"
 
 	"github.com/TunnelHelper/TH/internal/model"
 )
@@ -96,20 +95,7 @@ func defaultTunnelName(kind model.Kind) string {
 }
 
 func interfacePrefix(kind model.Kind) string {
-	switch kind {
-	case model.KindGRE:
-		return "gre-"
-	case model.KindVXLAN:
-		return "vxlan-"
-	case model.KindWireGuard:
-		return "wg-"
-	case model.KindAmneziaWG:
-		return "awg-"
-	case model.KindXFRMStatic, model.KindXFRMIKEv2:
-		return "ipsec-"
-	default:
-		return ""
-	}
+	return model.TunnelNamePrefix(kind)
 }
 
 func interfaceName(kind model.Kind, name string) string {
@@ -117,11 +103,7 @@ func interfaceName(kind model.Kind, name string) string {
 }
 
 func prefixedTunnelName(kind model.Kind, name string) string {
-	prefix := interfacePrefix(kind)
-	if prefix == "" || strings.HasPrefix(name, prefix) {
-		return name
-	}
-	return prefix + name
+	return model.PrefixedTunnelName(kind, name)
 }
 
 func tunnelKindTitle(kind model.Kind) string {

@@ -41,6 +41,7 @@ func run(args []string) error {
 	socketGID := flags.Int("socket-gid", -1, "override control socket group ID")
 	reconcileInterval := flags.Duration("reconcile-interval", 0, "override reconcile interval")
 	showVersion := flags.Bool("version", false, "show daemon version")
+	migrateOnly := flags.Bool("migrate", false, "migrate persistent tunnel records and exit")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -87,6 +88,24 @@ func run(args []string) error {
 	records, err := store.Open(settings.StateDir)
 	if err != nil {
 		return err
+	}
+	for _, migration := range records.Migrations() {
+		if migration.PreviousName != "" {
+			logger.Info("normalized tunnel record name",
+				"record_id", migration.RecordID,
+				"from", migration.PreviousName,
+				"to", migration.Name,
+			)
+			continue
+		}
+		logger.Info("migrated tunnel record schema",
+			"record_id", migration.RecordID,
+			"from", migration.From,
+			"to", migration.To,
+		)
+	}
+	if *migrateOnly {
+		return nil
 	}
 	backend, err := linuxbackend.New(settings)
 	if err != nil {

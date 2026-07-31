@@ -25,6 +25,7 @@ type FileStore struct {
 	stateDir      string
 	dir           string
 	syncDirectory func(string) error
+	migrations    []SchemaMigration
 }
 
 func Open(stateDir string) (*FileStore, error) {
@@ -42,10 +43,19 @@ func Open(stateDir string) (*FileStore, error) {
 		return nil, fmt.Errorf("prepare tunnel store: %w", err)
 	}
 	store := &FileStore{stateDir: stateDir, dir: dir, syncDirectory: syncDir}
+	if err := store.migrateRecords(); err != nil {
+		return nil, err
+	}
 	if _, err := store.List(); err != nil {
 		return nil, err
 	}
 	return store, nil
+}
+
+func (s *FileStore) Migrations() []SchemaMigration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]SchemaMigration(nil), s.migrations...)
 }
 
 func ensurePrivateDirectory(path string) error {
