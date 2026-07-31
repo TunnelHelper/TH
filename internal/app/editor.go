@@ -12,7 +12,8 @@ func editTunnel(prompts *prompts, current model.Tunnel) (model.Tunnel, bool, err
 	if err != nil {
 		return model.Tunnel{}, false, err
 	}
-	prompts.section("Edit "+current.Name, "Changes remain local until they are reviewed and saved.")
+	updated.Name = prefixedTunnelName(updated.Kind, updated.Name)
+	prompts.section("Edit "+updated.Name, "Changes remain local until they are reviewed and saved.")
 	for {
 		options := []ui.Option{{Label: "Name: " + updated.Name, Value: "name"}}
 		options = append(options, tunnelEditOptions(updated)...)
@@ -36,6 +37,7 @@ func editTunnel(prompts *prompts, current model.Tunnel) (model.Tunnel, bool, err
 			if err := prompts.input("Tunnel name", &updated.Name, validateNameInput); err != nil {
 				return model.Tunnel{}, false, err
 			}
+			updated.Name = prefixedTunnelName(updated.Kind, updated.Name)
 		default:
 			if err := editTunnelField(prompts, &updated, choice); err != nil {
 				return model.Tunnel{}, false, err

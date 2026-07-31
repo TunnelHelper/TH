@@ -24,6 +24,9 @@ func TestCreateFormDefersEnableChoiceUntilReview(t *testing.T) {
 	if !record.Enabled {
 		t.Fatal("new record did not retain the internal enabled default")
 	}
+	if record.Name != "wg-ux-wg" || record.Interface != "wg-ux-wg" {
+		t.Fatalf("new tunnel identity = name %q, interface %q; want both wg-ux-wg", record.Name, record.Interface)
+	}
 	options := createActionOptions()
 	if len(options) != 3 || options[0].Value != "enable" || options[1].Value != "disable" || options[2].Value != "back" {
 		t.Fatalf("final create choices = %+v", options)
@@ -151,7 +154,7 @@ func TestEditTunnelSaveAndDiscardAreExplicit(t *testing.T) {
 	}
 	prompts, _ = transcriptPrompts("1\nrenamed\n7\n1\n")
 	updated, saved, err := editTunnel(prompts, current)
-	if err != nil || !saved || updated.Name != "renamed" || updated.Enabled != current.Enabled {
+	if err != nil || !saved || updated.Name != "gre-renamed" || updated.Enabled != current.Enabled {
 		t.Fatalf("save result = %+v, saved=%t, err=%v", updated, saved, err)
 	}
 }
@@ -264,6 +267,34 @@ func TestNewTunnelIdentityRejectsManagedConflicts(t *testing.T) {
 	}
 	if err := validateNewTunnelIdentity(model.KindWireGuard, "new", managed); err == nil || !strings.Contains(err.Error(), "interface") {
 		t.Fatalf("managed interface conflict = %v", err)
+	}
+}
+
+func TestSuggestedTunnelNameAccountsForStoredPrefix(t *testing.T) {
+	views := []model.TunnelView{{Tunnel: model.Tunnel{Name: "wg-prod1", Interface: "wg-prod1"}}}
+	if got := suggestedTunnelName(model.KindWireGuard, views); got != "prod12" {
+		t.Fatalf("suggested WireGuard name = %q, want prod12", got)
+	}
+}
+
+func TestPrefixedTunnelNamesAreStoredOnce(t *testing.T) {
+	for _, test := range []struct {
+		kind model.Kind
+		name string
+		want string
+	}{
+		{kind: model.KindAmneziaWG, name: "rfc-tyo", want: "awg-rfc-tyo"},
+		{kind: model.KindXFRMIKEv2, name: "rfc-tyo", want: "ipsec-rfc-tyo"},
+		{kind: model.KindXFRMIKEv2, name: "ipsec-rfc-tyo", want: "ipsec-rfc-tyo"},
+	} {
+		t.Run(string(test.kind)+"/"+test.name, func(t *testing.T) {
+			if got := prefixedTunnelName(test.kind, test.name); got != test.want {
+				t.Fatalf("prefixed name = %q, want %q", got, test.want)
+			}
+			if got := interfaceName(test.kind, test.want); got != test.want {
+				t.Fatalf("interface name = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

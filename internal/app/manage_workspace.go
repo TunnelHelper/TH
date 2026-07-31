@@ -314,6 +314,7 @@ func (m *manageWorkspaceModel) beginTunnelEdit() error {
 	if err != nil {
 		return err
 	}
+	draft.Name = prefixedTunnelName(draft.Kind, draft.Name)
 	m.original, m.draft = original, draft
 	m.page = workspaceEdit
 	m.fieldSelected = 0

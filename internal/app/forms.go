@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 
 	"github.com/TunnelHelper/TH/internal/model"
 )
@@ -48,11 +49,14 @@ func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel, su
 			}
 		}
 		if creating {
-			return validateNewTunnelIdentity(kind, value, managed)
+			return validateNewTunnelIdentity(kind, prefixedTunnelName(kind, value), managed)
 		}
 		return nil
 	}); err != nil {
 		return model.Tunnel{}, err
+	}
+	if creating {
+		record.Name = prefixedTunnelName(kind, record.Name)
 	}
 	if creating && kind != model.KindSRv6 {
 		record.Interface = interfaceName(kind, record.Name)
@@ -109,7 +113,15 @@ func interfacePrefix(kind model.Kind) string {
 }
 
 func interfaceName(kind model.Kind, name string) string {
-	return interfacePrefix(kind) + name
+	return prefixedTunnelName(kind, name)
+}
+
+func prefixedTunnelName(kind model.Kind, name string) string {
+	prefix := interfacePrefix(kind)
+	if prefix == "" || strings.HasPrefix(name, prefix) {
+		return name
+	}
+	return prefix + name
 }
 
 func tunnelKindTitle(kind model.Kind) string {

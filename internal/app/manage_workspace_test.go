@@ -42,6 +42,24 @@ func TestWorkspaceFieldsCoverEveryTunnelKind(t *testing.T) {
 	}
 }
 
+func TestWorkspaceEditPreparesLegacyNameMigration(t *testing.T) {
+	legacy := workspaceTestTunnel(model.KindXFRMIKEv2)
+	legacy.Name = "rfc-tyo"
+	legacy.Interface = "ipsec-rfc-tyo"
+	workspace := newManageWorkspaceModel(context.Background(), nil, time.Second, "")
+	workspace.view = model.TunnelView{Tunnel: legacy}
+
+	if err := workspace.beginTunnelEdit(); err != nil {
+		t.Fatal(err)
+	}
+	if workspace.original.Name != "rfc-tyo" || workspace.draft.Name != "ipsec-rfc-tyo" {
+		t.Fatalf("legacy name migration = original %q, draft %q", workspace.original.Name, workspace.draft.Name)
+	}
+	if workspace.draft.Interface != legacy.Interface {
+		t.Fatalf("migration changed interface to %q", workspace.draft.Interface)
+	}
+}
+
 func TestWorkspaceViewShowsBreadcrumbDirtyStateAndDiff(t *testing.T) {
 	tunnel := workspaceTestTunnel(model.KindGRE)
 	m := newManageWorkspaceModel(context.Background(), nil, time.Second, "")

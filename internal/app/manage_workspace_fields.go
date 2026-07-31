@@ -297,7 +297,7 @@ func (m *manageWorkspaceModel) applyTunnelInput(id, value string) error {
 	value = strings.TrimSpace(value)
 	switch id {
 	case "name":
-		m.draft.Name = value
+		m.draft.Name = prefixedTunnelName(m.draft.Kind, value)
 	case "gre.remote", "gre.local":
 		address, _ := netip.ParseAddr(value)
 		if id == "gre.remote" {

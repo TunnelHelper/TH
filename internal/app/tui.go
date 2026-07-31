@@ -188,12 +188,12 @@ func suggestedTunnelName(kind model.Kind, views []model.TunnelView) string {
 	for _, view := range views {
 		used[view.Tunnel.Name] = true
 	}
-	if !used[base] {
+	if !used[prefixedTunnelName(kind, base)] {
 		return base
 	}
 	for suffix := 2; ; suffix++ {
 		candidate := base + strconv.Itoa(suffix)
-		if !used[candidate] {
+		if !used[prefixedTunnelName(kind, candidate)] {
 			return candidate
 		}
 	}
