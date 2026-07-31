@@ -209,7 +209,6 @@ func collectIKEv2(prompts *prompts, record *model.Tunnel, creating bool) error {
 }
 
 func showLocalRPK(prompts *prompts, publicKey string) {
-	fmt.Fprintln(prompts.ui.Out)
 	prompts.ui.Ok("Local raw public key: " + publicKey)
 	prompts.ui.Dim("Share this key with the peer before entering its public key.")
 }

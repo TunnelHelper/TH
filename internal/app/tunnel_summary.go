@@ -10,7 +10,6 @@ import (
 )
 
 func showTunnelSummary(output *ui.UI, record model.Tunnel) {
-	fmt.Fprintln(output.Out)
 	output.Title("Review")
 	fmt.Fprintf(output.Out, "Name: %s\nKind: %s\n", record.Name, record.Kind)
 	if record.Interface != "" {

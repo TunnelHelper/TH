@@ -140,7 +140,6 @@ func (a *tuiApp) create(kind model.Kind) error {
 		return err
 	}
 	if record.Kind == model.KindXFRMStatic {
-		fmt.Fprintln(a.ui.Out)
 		showStaticXFRMPairing(a.ui, record.Spec.XFRMStatic)
 	}
 	showTunnelSummary(a.ui, record)
@@ -339,7 +338,6 @@ func statusDetailLabel(key string) string {
 }
 
 func showCreatedMaterial(output *ui.UI, record model.Tunnel, view model.TunnelView) {
-	fmt.Fprintln(output.Out)
 	switch record.Kind {
 	case model.KindWireGuard:
 		showWireGuardPeerReference(output, record.Spec.WireGuard, "")

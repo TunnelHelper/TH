@@ -98,7 +98,6 @@ func collectWireGuardBase(prompts *prompts, spec *model.WireGuardSpec, creating 
 }
 
 func showLocalPublicKey(prompts *prompts, publicKey string) {
-	fmt.Fprintln(prompts.ui.Out)
 	prompts.ui.Ok("Local public key: " + publicKey)
 	prompts.ui.Dim("Share this key with the peer before adding its public key.")
 }
