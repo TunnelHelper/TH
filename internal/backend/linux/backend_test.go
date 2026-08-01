@@ -388,19 +388,16 @@ func TestSRv6CacheKeyChangesWithFeedURL(t *testing.T) {
 	}
 }
 
-func TestResolveSRv6RouteConflictsPrefersHigherPriority(t *testing.T) {
+func TestResolveSRv6RouteConflictsPrefersLowerPriority(t *testing.T) {
 	shared := netip.MustParsePrefix("192.0.2.0/24")
 	narrower := netip.MustParsePrefix("192.0.2.0/25")
 	lowSID := netip.MustParseAddr("2001:db8::1")
 	highSID := netip.MustParseAddr("2001:db8::2")
-	routes, skipped, err := resolveSRv6RouteConflicts([]srv6Route{
-		{prefix: shared, sid: lowSID, mtu: 1500, priority: 10, origin: "low/v4"},
-		{prefix: narrower, sid: lowSID, mtu: 1500, priority: 10, origin: "low/v4"},
-		{prefix: shared, sid: highSID, mtu: 1400, priority: 20, origin: "high/v4"},
+	routes, skipped := resolveSRv6RouteConflicts([]srv6Route{
+		{prefix: shared, sid: lowSID, mtu: 1500, priority: 10},
+		{prefix: narrower, sid: lowSID, mtu: 1500, priority: 10},
+		{prefix: shared, sid: highSID, mtu: 1400, priority: 20},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if skipped != 1 || len(routes) != 2 {
 		t.Fatalf("resolved routes = %+v, skipped = %d", routes, skipped)
 	}
@@ -408,7 +405,7 @@ func TestResolveSRv6RouteConflictsPrefersHigherPriority(t *testing.T) {
 	for _, route := range routes {
 		selected[route.prefix] = route
 	}
-	if got := selected[shared]; got.sid != highSID || got.mtu != 1400 || got.priority != 20 {
+	if got := selected[shared]; got.sid != lowSID || got.mtu != 1500 || got.priority != 10 {
 		t.Fatalf("shared prefix selected route = %+v", got)
 	}
 	if _, ok := selected[narrower]; !ok {
@@ -416,23 +413,16 @@ func TestResolveSRv6RouteConflictsPrefersHigherPriority(t *testing.T) {
 	}
 }
 
-func TestResolveSRv6RouteConflictsRejectsAmbiguousTies(t *testing.T) {
+func TestResolveSRv6RouteConflictsUsesStableOrderForDefensiveTies(t *testing.T) {
 	prefix := netip.MustParsePrefix("192.0.2.0/24")
 	firstSID := netip.MustParseAddr("2001:db8::1")
 	secondSID := netip.MustParseAddr("2001:db8::2")
-	_, _, err := resolveSRv6RouteConflicts([]srv6Route{
-		{prefix: prefix, sid: firstSID, mtu: 1500, priority: 100, origin: "first/v4"},
-		{prefix: prefix, sid: secondSID, mtu: 1500, priority: 100, origin: "second/v4"},
+	routes, skipped := resolveSRv6RouteConflicts([]srv6Route{
+		{prefix: prefix, sid: firstSID, mtu: 1500, priority: 100},
+		{prefix: prefix, sid: secondSID, mtu: 1500, priority: 100},
 	})
-	if err == nil || !strings.Contains(err.Error(), "priority 100") {
-		t.Fatalf("ambiguous equal-priority routes error = %v", err)
-	}
-	routes, skipped, err := resolveSRv6RouteConflicts([]srv6Route{
-		{prefix: prefix, sid: firstSID, mtu: 1500, priority: 100, origin: "first/v4"},
-		{prefix: prefix, sid: firstSID, mtu: 1500, priority: 100, origin: "second/v4"},
-	})
-	if err != nil || len(routes) != 1 || skipped != 1 {
-		t.Fatalf("identical equal-priority routes = %+v, skipped = %d, err = %v", routes, skipped, err)
+	if len(routes) != 1 || skipped != 1 || routes[0].sid != firstSID {
+		t.Fatalf("equal-priority routes = %+v, skipped = %d", routes, skipped)
 	}
 }
 
@@ -481,6 +471,35 @@ func TestManagedRouteEqualityIncludesSEG6(t *testing.T) {
 	copy.Encap = &netlink.SEG6Encap{Mode: 1, Segments: []net.IP{net.ParseIP("2001:db8::2")}}
 	if equalManagedRoute(route, copy) {
 		t.Fatal("different SEG6 routes compare equal")
+	}
+}
+
+func TestSRv6IPv6RouteComparisonToleratesKernelRealmLoss(t *testing.T) {
+	record := model.Tunnel{ID: "11111111-2222-4333-8444-555555555555"}
+	desired := netlink.Route{
+		LinkIndex: 2, Dst: prefixToIPNet(netip.MustParsePrefix("2001:db8::/48")), Table: 100,
+		Protocol: managedRouteProtocol, Realm: model.ManagedRouteRealm(record), Scope: netlink.SCOPE_LINK,
+	}
+	current := desired
+	current.Realm = 0
+	if !equalSRv6ManagedRoute(current, desired) {
+		t.Fatal("IPv6 route was treated as drift only because the kernel dropped its realm")
+	}
+	wanted := map[string]netlink.Route{routeKey(desired): desired}
+	if !srv6RouteOwnedForDesired(record, current, wanted) {
+		t.Fatal("expected protocol-242 IPv6 route with a dropped realm was not recognized")
+	}
+	unrelated := current
+	unrelated.Dst = prefixToIPNet(netip.MustParsePrefix("2001:db9::/48"))
+	if srv6RouteOwnedForDesired(record, unrelated, wanted) {
+		t.Fatal("unrelated realm-less IPv6 route was treated as record-owned")
+	}
+	ipv4 := desired
+	ipv4.Dst = prefixToIPNet(netip.MustParsePrefix("192.0.2.0/24"))
+	currentIPv4 := ipv4
+	currentIPv4.Realm = 0
+	if equalSRv6ManagedRoute(currentIPv4, ipv4) {
+		t.Fatal("IPv4 route unexpectedly tolerated a missing ownership realm")
 	}
 }
 

@@ -183,7 +183,7 @@ func TestSRv6SourceAddChoosesSingleAddressFamily(t *testing.T) {
 	if err := m.applyWorkspaceChoice("srv6-source-family", string(model.SRv6FamilyIPv6)); err != nil {
 		t.Fatal(err)
 	}
-	if m.sourceDraft.Family != model.SRv6FamilyIPv6 || m.sourceDraft.Priority != 100 || m.page != workspaceSource {
+	if m.sourceDraft.Family != model.SRv6FamilyIPv6 || m.sourceDraft.Priority != 101 || m.page != workspaceSource {
 		t.Fatalf("chosen source defaults were not applied: %+v, page=%d", m.sourceDraft, m.page)
 	}
 	fields := workspaceSourceFields(m.sourceDraft)
@@ -414,7 +414,7 @@ func workspaceTestTunnel(kind model.Kind) model.Tunnel {
 	case model.KindSRv6:
 		tunnel.Interface = ""
 		sid := netip.MustParseAddr("2001:db8::1")
-		tunnel.Spec.SRv6 = &model.SRv6Spec{UnderlayInterface: "eth0", Table: 100, RefreshIntervalSeconds: 300, Sources: []model.SRv6Source{{Name: "source1", Family: model.SRv6FamilyIPv4, PrefixURL: "https://example.test/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500}}}
+		tunnel.Spec.SRv6 = &model.SRv6Spec{UnderlayInterface: "eth0", Table: 100, RulePriority: 20000, RefreshIntervalSeconds: 300, Sources: []model.SRv6Source{{Name: "source1", Family: model.SRv6FamilyIPv4, PrefixURL: "https://example.test/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500}}}
 	}
 	return tunnel
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -16,9 +17,11 @@ import (
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/config"
+	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -266,8 +269,76 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = backend.netlink.RouteDel(&foreignRoute) }()
-		assertLifecycleOrSkipUnsupported(t, backend, record)
-		routes, err := backend.netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{Table: record.Spec.SRv6.Table}, netlink.RT_FILTER_TABLE)
+		mainDefault := netlink.Route{
+			LinkIndex: underlayLink.Attrs().Index,
+			Dst:       prefixToIPNet(netip.MustParsePrefix("0.0.0.0/0")),
+			Table:     unix.RT_TABLE_MAIN,
+			Scope:     netlink.SCOPE_LINK,
+			Priority:  100,
+		}
+		if err := backend.netlink.RouteAdd(&mainDefault); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = backend.netlink.RouteDel(&mainDefault) }()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		observation, err := backend.Apply(ctx, record)
+		if err != nil {
+			if unsupportedKernelError(err) {
+				_, _ = backend.Remove(ctx, record)
+				t.Skipf("kernel does not support %s in this environment: %v", record.Kind, err)
+			}
+			t.Fatal(err)
+		}
+		removed := false
+		defer func() {
+			if !removed {
+				_, _ = backend.Remove(context.Background(), record)
+			}
+		}()
+		if observation.Details["managed_routes"] == "0" {
+			t.Fatalf("unexpected SRv6 observation: %+v", observation)
+		}
+		lookups, err := backend.netlink.RouteGet(net.ParseIP("203.0.113.42"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		selectedSRv6 := false
+		for _, route := range lookups {
+			_, isSEG6 := route.Encap.(*netlink.SEG6Encap)
+			selectedSRv6 = selectedSRv6 || route.Table == record.Spec.SRv6.Table && isSEG6
+		}
+		if !selectedSRv6 {
+			t.Fatalf("policy lookup bypassed SRv6 table: %+v", lookups)
+		}
+		rules, err := backend.netlink.RuleList(netlink.FAMILY_V4)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deletedRule := false
+		for i := range rules {
+			if rules[i].Priority == record.Spec.SRv6.RulePriority && rules[i].Table == record.Spec.SRv6.Table {
+				if err := backend.netlink.RuleDel(&rules[i]); err != nil {
+					t.Fatal(err)
+				}
+				deletedRule = true
+				break
+			}
+		}
+		if !deletedRule {
+			t.Fatal("managed IPv4 SRv6 policy rule was not found")
+		}
+		if _, err := backend.Observe(ctx, record); !errors.Is(err, core.ErrDriftDetected) {
+			t.Fatalf("observe after policy-rule deletion = %v, want drift", err)
+		}
+		if _, err := backend.Apply(ctx, record); err != nil {
+			t.Fatalf("restore observed drift: %v", err)
+		}
+		if _, err := backend.Remove(ctx, record); err != nil {
+			t.Fatal(err)
+		}
+		removed = true
+		routes, err := backend.netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{Table: record.Spec.SRv6.Table}, netlink.RT_FILTER_TABLE)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -275,7 +346,9 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 		for _, route := range routes {
 			if routeKey(route) == routeKey(foreignRoute) && route.Realm == foreignRoute.Realm {
 				preserved = true
-				break
+			}
+			if routeDestinationKey(route) == "2001:db8:1::1/128" && route.Protocol == managedRouteProtocol {
+				t.Fatal("realm-less IPv6 SID route survived SRv6 removal")
 			}
 		}
 		if !preserved {

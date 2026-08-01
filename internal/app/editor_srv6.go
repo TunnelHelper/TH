@@ -56,13 +56,16 @@ func editSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.SRv6
 		}
 		if choice == "add" {
 			source, keep, err := collectSRv6Source(prompts, model.SRv6Source{
-				Name: suggestedSRv6SourceName(sources), MTU: 1500,
+				Name: suggestedSRv6SourceName(sources), Priority: model.NextSRv6SourcePriority(sources), MTU: 1500,
 			})
 			if err != nil {
 				return nil, err
 			}
 			if keep {
 				if err := ensureUniqueSRv6SourceName(prompts, sources, -1, &source.Name); err != nil {
+					return nil, err
+				}
+				if err := ensureUniqueSRv6SourcePriority(prompts, sources, -1, &source.Priority); err != nil {
 					return nil, err
 				}
 				sources = append(sources, source)
@@ -80,6 +83,9 @@ func editSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.SRv6
 		switch action {
 		case "save":
 			if err := ensureUniqueSRv6SourceName(prompts, sources, index, &source.Name); err != nil {
+				return nil, err
+			}
+			if err := ensureUniqueSRv6SourcePriority(prompts, sources, index, &source.Priority); err != nil {
 				return nil, err
 			}
 			sources[index] = source
@@ -141,7 +147,7 @@ func editSRv6Source(prompts *prompts, original model.SRv6Source) (model.SRv6Sour
 			}
 			source.PrefixURL = strings.TrimSpace(source.PrefixURL)
 		case "priority":
-			if err := editInt(prompts, "Priority (0-2147483647, higher wins)", &source.Priority, 0, 2147483647); err != nil {
+			if err := editInt(prompts, "Priority (1-32765, lower wins)", &source.Priority, model.SRv6RulePriorityMin, model.SRv6RulePriorityMax); err != nil {
 				return original, "discard", err
 			}
 		case "sid":

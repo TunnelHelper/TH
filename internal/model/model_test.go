@@ -174,7 +174,7 @@ func TestIKECredentialModeSwitchDropsOldSecrets(t *testing.T) {
 func TestManagedRulePrioritiesAreStableAndSeparated(t *testing.T) {
 	id := "11111111-2222-4333-8444-555555555555"
 	wg := Tunnel{ID: id, Kind: KindWireGuard}
-	srv6 := Tunnel{ID: id, Kind: KindSRv6}
+	srv6 := Tunnel{ID: id, Kind: KindSRv6, Spec: Spec{SRv6: &SRv6Spec{RulePriority: 20000}}}
 	first := ManagedRulePriorities(wg)
 	second := ManagedRulePriorities(wg)
 	if !slices.Equal(first, second) || len(first) != 2 || first[1] != first[0]+1 {
@@ -182,6 +182,17 @@ func TestManagedRulePrioritiesAreStableAndSeparated(t *testing.T) {
 	}
 	if slices.Contains(first, ManagedRulePriorities(srv6)[0]) {
 		t.Fatal("WireGuard and SRv6 priority ranges overlap")
+	}
+	if priority := ManagedRulePriorities(srv6)[0]; priority >= MainRulePriority {
+		t.Fatalf("SRv6 priority %d does not precede main priority %d", priority, MainRulePriority)
+	}
+}
+
+func TestAllocateSRv6RulePriorityUsesFirstFreeReservedPriority(t *testing.T) {
+	used := map[int]struct{}{SRv6AutoRulePriorityMin: {}}
+	priority, err := AllocateSRv6RulePriority(used)
+	if err != nil || priority != SRv6AutoRulePriorityMin+1 {
+		t.Fatalf("allocated priority = %d, %v", priority, err)
 	}
 }
 
@@ -246,7 +257,7 @@ func TestSRv6ValidationRequiresSingleFamilySource(t *testing.T) {
 	sid := netip.MustParseAddr("2001:db8::1")
 	valid := func(source SRv6Source) *SRv6Spec {
 		return &SRv6Spec{
-			UnderlayInterface: "eth0", Table: 100, RefreshIntervalSeconds: 300,
+			UnderlayInterface: "eth0", Table: 100, RulePriority: 20000, RefreshIntervalSeconds: 300,
 			Sources: []SRv6Source{source},
 		}
 	}
@@ -263,6 +274,27 @@ func TestSRv6ValidationRequiresSingleFamilySource(t *testing.T) {
 	})
 	if err := validateSRv6(duplicateName); err == nil {
 		t.Fatal("one SRv6 source name was accepted for multiple address families")
+	}
+	duplicatePriority := valid(SRv6Source{
+		Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500,
+	})
+	duplicatePriority.Sources = append(duplicatePriority.Sources, SRv6Source{
+		Name: "source2", Family: SRv6FamilyIPv6, PrefixURL: "https://routes.example/edge-v6.txt", SID: sid, Priority: 100, MTU: 1500,
+	})
+	if err := validateSRv6(duplicatePriority); err == nil {
+		t.Fatal("duplicate SRv6 source priorities were accepted")
+	}
+	if err := validateSRv6(valid(SRv6Source{
+		Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: SRv6RulePriorityMax, MTU: 1500,
+	})); err != nil {
+		t.Fatalf("maximum SRv6 source priority was rejected: %v", err)
+	}
+	mainPriority := valid(SRv6Source{
+		Name: "source1", Family: SRv6FamilyIPv4, PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500,
+	})
+	mainPriority.RulePriority = MainRulePriority
+	if err := validateSRv6(mainPriority); err == nil {
+		t.Fatal("SRv6 rule priority at the kernel main rule was accepted")
 	}
 	for _, source := range []SRv6Source{
 		{Name: "source1", PrefixURL: "https://routes.example/edge-v4.txt", SID: sid, Priority: 100, MTU: 1500},

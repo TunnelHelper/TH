@@ -343,6 +343,18 @@ func TestSRv6SourceNamesStayUniqueInsideTheEditor(t *testing.T) {
 	}
 }
 
+func TestSRv6SourcePrioritiesStayUniqueInsideTheEditor(t *testing.T) {
+	sources := []model.SRv6Source{{Name: "source1", Priority: 100}}
+	prompts, _ := transcriptPrompts("101\n")
+	priority := 100
+	if err := ensureUniqueSRv6SourcePriority(prompts, sources, -1, &priority); err != nil {
+		t.Fatal(err)
+	}
+	if priority != 101 {
+		t.Fatalf("resolved source priority = %d", priority)
+	}
+}
+
 func transcriptPrompts(input string) (*prompts, *bytes.Buffer) {
 	output := &bytes.Buffer{}
 	userInterface := ui.New(output, output, strings.NewReader(input))

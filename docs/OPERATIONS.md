@@ -76,16 +76,18 @@ failure.
 
 `/var/lib/th` and its tunnel files are forced to modes `0700` and
 `0600`. Writes use a same-directory temporary file, file sync, atomic rename,
-and directory sync. On startup, schema 2 records are validated and migrated to
-schema 3 before the daemon begins reconciliation. Legacy tunnel names receive
-the same protocol prefix used by the current TUI; names already carrying that
-prefix and SRv6 names are unchanged. This name repair also applies to schema 3
-records created by releases before v2.1.5. All records are preflighted before
-any are rewritten. Each migrated record is committed through a synced
-same-directory temporary file, atomic rename, and directory sync; no migration
-backup files are retained. A record with an unsafe mode, invalid filename,
-unknown field, unsupported schema, or more than one JSON value stops store
-loading without rewriting any record.
+and directory sync. On startup, schema 2 and 3 records are validated and
+migrated to schema 4 before the daemon begins reconciliation. The migration
+assigns every SRv6 tunnel a unique policy-rule priority below the kernel `main`
+rule and converts schema 3 source priorities from high-value-first to
+low-value-first without changing which source wins a duplicate prefix. Legacy
+tunnel names receive the same protocol prefix used by the current TUI; names
+already carrying that prefix and SRv6 names are unchanged. All records are
+preflighted before any are rewritten. Each migrated record is committed through
+a synced same-directory temporary file, atomic rename, and directory sync; no
+migration backup files are retained. A record with an unsafe mode, invalid
+filename, unknown field, unsupported schema, or more than one JSON value stops
+store loading without rewriting any record.
 
 After installing a daemon version that supports the target schema, migration
 can be run without starting any network reconciliation:

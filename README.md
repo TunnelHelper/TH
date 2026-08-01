@@ -143,11 +143,13 @@ interface addresses per tunnel, 1024 WireGuard/AmneziaWG peers, 4096
 AllowedIPs per peer (16384 per tunnel), and 64 SRv6 sources.
 
 Each SRv6 source binds exactly one address family (IPv4 or IPv6) to one full
-HTTP(S) prefix-file URL, route SID, MTU, and numeric priority. Higher priority
-wins when files of the same family contain the same normalized CIDR;
-lower-priority duplicates are skipped. Overlapping CIDRs with different prefix
-lengths remain valid, while conflicting actions at the same priority are
-rejected.
+HTTP(S) prefix-file URL, route SID, MTU, and numeric priority. Priorities use
+Linux policy-rule ordering throughout: lower numbers win, values must be unique
+within a tunnel, and the maximum is 32765 so TH's SRv6 lookup always precedes
+the kernel `main` rule at 32766. The daemon assigns each SRv6 tunnel a stable
+table-rule priority; sources are evaluated from lowest to highest and later
+duplicates of the same normalized CIDR are skipped. Overlapping CIDRs with
+different prefix lengths remain valid and use normal longest-prefix matching.
 
 `export --redacted` is safe for review and declarative reuse. The root-only
 backup command instead includes every stored private key and PSK, verifies an
@@ -160,11 +162,13 @@ required by enabled records. `th health` reports daemon, API, schema, backend,
 and configured-tunnel readiness separately.
 
 The TUI live-status view and `th watch` consume an NDJSON event stream over the
-same Unix socket. WireGuard and AmneziaWG status includes per-peer endpoints,
-handshake times, AllowedIPs, protocol transfer counters, and separate Linux link
-counters without exposing key material. Status refresh is a read-only kernel
-observation and does not reapply tunnel configuration. Every TH-owned tunnel
-interface receives a stable IPv6 link-local address.
+same Unix socket. Dashboard refreshes only reload the daemon's current status;
+they never observe or reconcile network state. WireGuard and AmneziaWG status
+includes per-peer endpoints, handshake times, AllowedIPs, protocol transfer
+counters, and separate Linux link counters without exposing key material.
+Explicit observation is a read-only kernel check and does not reapply tunnel
+configuration. Every TH-owned tunnel interface receives a stable IPv6
+link-local address.
 
 The TUI management view is a persistent workspace rather than a sequence of
 prompts. Tunnel, WireGuard peer, and SRv6 source editors keep changes in a local

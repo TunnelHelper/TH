@@ -68,13 +68,16 @@ func collectSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.S
 		}
 		if choice == "add" {
 			source, keep, err := collectSRv6Source(prompts, model.SRv6Source{
-				Name: suggestedSRv6SourceName(sources), MTU: 1500,
+				Name: suggestedSRv6SourceName(sources), Priority: model.NextSRv6SourcePriority(sources), MTU: 1500,
 			})
 			if err != nil {
 				return nil, err
 			}
 			if keep {
 				if err := ensureUniqueSRv6SourceName(prompts, sources, -1, &source.Name); err != nil {
+					return nil, err
+				}
+				if err := ensureUniqueSRv6SourcePriority(prompts, sources, -1, &source.Priority); err != nil {
 					return nil, err
 				}
 				sources = append(sources, source)
@@ -92,6 +95,9 @@ func collectSRv6Sources(prompts *prompts, initial []model.SRv6Source) ([]model.S
 		switch action {
 		case "save":
 			if err := ensureUniqueSRv6SourceName(prompts, sources, index, &source.Name); err != nil {
+				return nil, err
+			}
+			if err := ensureUniqueSRv6SourcePriority(prompts, sources, index, &source.Priority); err != nil {
 				return nil, err
 			}
 			sources[index] = source
@@ -138,6 +144,32 @@ func ensureUniqueSRv6SourceName(prompts *prompts, sources []model.SRv6Source, ex
 	return prompts.input("Source name", name, validator)
 }
 
+func ensureUniqueSRv6SourcePriority(prompts *prompts, sources []model.SRv6Source, except int, priority *int) error {
+	validator := func(value string) error {
+		if err := validateInt(model.SRv6RulePriorityMin, model.SRv6RulePriorityMax)(value); err != nil {
+			return err
+		}
+		candidate := parseInt(value)
+		for index, source := range sources {
+			if index != except && source.Priority == candidate {
+				return fmt.Errorf("source priority %d is already in use", candidate)
+			}
+		}
+		return nil
+	}
+	value := strconv.Itoa(*priority)
+	if err := validator(value); err == nil {
+		return nil
+	} else {
+		prompts.ui.Warn(err.Error())
+	}
+	if err := prompts.input("Priority (1-32765, lower wins)", &value, validator); err != nil {
+		return err
+	}
+	*priority = parseInt(value)
+	return nil
+}
+
 func collectSRv6Source(prompts *prompts, source model.SRv6Source) (model.SRv6Source, bool, error) {
 	creating := source.Family == ""
 	if creating {
@@ -149,7 +181,9 @@ func collectSRv6Source(prompts *prompts, source model.SRv6Source) (model.SRv6Sou
 			return source, false, err
 		}
 		source.Family = model.SRv6AddressFamily(family)
-		source.Priority = 100
+		if source.Priority == 0 {
+			source.Priority = 100
+		}
 	}
 	if source.Name == "" {
 		source.Name = "source1"
@@ -165,7 +199,7 @@ func collectSRv6Source(prompts *prompts, source model.SRv6Source) (model.SRv6Sou
 	}
 	source.PrefixURL = strings.TrimSpace(source.PrefixURL)
 	priority := strconv.Itoa(source.Priority)
-	if err := prompts.input("Priority (higher wins)", &priority, validateInt(0, 2147483647)); err != nil {
+	if err := prompts.input("Priority (lower wins)", &priority, validateInt(model.SRv6RulePriorityMin, model.SRv6RulePriorityMax)); err != nil {
 		return source, false, err
 	}
 	sid := srv6SIDInput(source.SID)
@@ -198,8 +232,8 @@ func validateSRv6SourceFields(source model.SRv6Source) error {
 	if !source.SID.IsValid() || !source.SID.Is6() || source.SID.IsUnspecified() {
 		return fmt.Errorf("SID must be a specified IPv6 address")
 	}
-	if source.Priority < 0 || source.Priority > 2147483647 {
-		return fmt.Errorf("priority must be between 0 and 2147483647")
+	if source.Priority < model.SRv6RulePriorityMin || source.Priority > model.SRv6RulePriorityMax {
+		return fmt.Errorf("priority must be between %d and %d", model.SRv6RulePriorityMin, model.SRv6RulePriorityMax)
 	}
 	return nil
 }

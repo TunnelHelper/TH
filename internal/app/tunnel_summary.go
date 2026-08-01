@@ -42,7 +42,8 @@ func showTunnelSummary(output *ui.UI, record model.Tunnel) {
 				ipv6++
 			}
 		}
-		fmt.Fprintf(output.Out, "Underlay: %s\nSources: %d (IPv4: %d, IPv6: %d)\n", spec.UnderlayInterface, len(spec.Sources), ipv4, ipv6)
+		fmt.Fprintf(output.Out, "Underlay: %s\nRoute table: %d\nRule priority: %d\nSources: %d (IPv4: %d, IPv6: %d)\n",
+			spec.UnderlayInterface, spec.Table, spec.RulePriority, len(spec.Sources), ipv4, ipv6)
 	}
 }
 

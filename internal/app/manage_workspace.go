@@ -278,7 +278,7 @@ func (m manageWorkspaceModel) updateTunnelDetail(key tea.KeyMsg) (tea.Model, tea
 		}
 	case "r":
 		m.busy = "Refreshing status"
-		return m, m.observeTunnel()
+		return m, m.refreshTunnel()
 	case "a":
 		m.busy = "Reconciling tunnel"
 		return m, m.reconcileTunnel()
@@ -389,7 +389,7 @@ func (m manageWorkspaceModel) tunnelListView(width int) string {
 func (m manageWorkspaceModel) tunnelDetailView(width int) string {
 	lines := []string{m.breadcrumb(width), ""}
 	feedback := m.feedbackLines(width)
-	hints := workspaceHintLines(width, "e  Edit", "space  Enable/disable", "r  Observe", "a  Reconcile", "d  Delete", "esc  Back")
+	hints := workspaceHintLines(width, "e  Edit", "space  Enable/disable", "r  Refresh", "a  Reconcile", "d  Delete", "esc  Back")
 	status := workspaceStatusLines(m.view, width)
 	fixedLines := len(lines) + len(feedback) + len(hints) + 1
 	if m.busy != "" {
@@ -511,6 +511,12 @@ func workspaceStatusLines(view model.TunnelView, width int) []string {
 		fmt.Sprintf("Interface         %s", optionalWorkspaceValue(view.Tunnel.Interface)),
 		fmt.Sprintf("Generation        %d / observed %d", view.Tunnel.Generation, view.Status.ObservedGeneration),
 	}
+	if !view.Status.LastReconcileTime.IsZero() {
+		lines = append(lines, "Last reconcile    "+view.Status.LastReconcileTime.Format(time.RFC3339))
+	}
+	if !view.Status.LastObservationTime.IsZero() {
+		lines = append(lines, "Last observation  "+view.Status.LastObservationTime.Format(time.RFC3339))
+	}
 	if value := view.Status.Details["ipv6_link_local"]; value != "" {
 		lines = append(lines, "IPv6 link-local   "+value)
 	}
@@ -574,13 +580,13 @@ func (m manageWorkspaceModel) loadViews() tea.Cmd {
 	}
 }
 
-func (m manageWorkspaceModel) observeTunnel() tea.Cmd {
+func (m manageWorkspaceModel) refreshTunnel() tea.Cmd {
 	id := m.view.Tunnel.ID
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, m.timeout)
 		defer cancel()
-		view, err := m.client.Observe(ctx, id)
-		return workspaceMutationMsg{op: "observe", view: view, err: err}
+		view, err := m.client.Get(ctx, id)
+		return workspaceMutationMsg{op: "refresh", view: view, err: err}
 	}
 }
 
@@ -659,7 +665,7 @@ func (m manageWorkspaceModel) deleteTunnel() tea.Cmd {
 
 func workspaceMutationNotice(operation string, view model.TunnelView) string {
 	switch operation {
-	case "observe":
+	case "refresh":
 		return "Status refreshed"
 	case "reconcile":
 		return fmt.Sprintf("Reconciled %s: %s", view.Tunnel.Name, view.Status.Phase)

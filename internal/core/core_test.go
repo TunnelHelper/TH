@@ -95,8 +95,30 @@ func TestManagerObserveRefreshesStatusWithoutApplyingDesiredState(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if backend.observeCalls != 1 || backend.applyCalls != 0 || observed.Status.Phase != model.PhaseReady {
+	if backend.observeCalls != 1 || backend.applyCalls != 0 || observed.Status.Phase != model.PhasePending || observed.Status.ObservedGeneration != 0 {
 		t.Fatalf("observe/apply/status = %d/%d/%s", backend.observeCalls, backend.applyCalls, observed.Status.Phase)
+	}
+}
+
+func TestManagerAllocatesPersistentSRv6RulePrioritiesBeforeMain(t *testing.T) {
+	records := newMemoryStore()
+	manager := NewManager(records, NewReconciler(records, newFakeBackend(), time.Hour))
+	priorities := make([]int, 0, 2)
+	for index := range 2 {
+		view, err := manager.Create(context.Background(), model.Tunnel{
+			Name: fmt.Sprintf("srv6-%d", index), Kind: model.KindSRv6, Enabled: true,
+			Spec: model.Spec{SRv6: &model.SRv6Spec{
+				UnderlayInterface: "eth0", Table: 1000 + index,
+				Sources: []model.SRv6Source{{Name: "source1", Family: model.SRv6FamilyIPv4, PrefixURL: "https://routes.example/v4.txt", SID: netip.MustParseAddr("2001:db8::1"), Priority: 100, MTU: 1500}},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		priorities = append(priorities, view.Tunnel.Spec.SRv6.RulePriority)
+	}
+	if priorities[0] != model.SRv6AutoRulePriorityMin || priorities[1] != model.SRv6AutoRulePriorityMin+1 || priorities[1] >= model.MainRulePriority {
+		t.Fatalf("allocated SRv6 priorities = %v", priorities)
 	}
 }
 
@@ -123,7 +145,7 @@ func TestManagerObserveAllRefreshesEveryStatusWithoutApplyingDesiredState(t *tes
 		t.Fatalf("observe/apply/views = %d/%d/%d", backend.observeCalls, backend.applyCalls, len(observed))
 	}
 	for _, view := range observed {
-		if view.Status.Phase != model.PhaseReady {
+		if view.Status.Phase != model.PhasePending || view.Status.ObservedGeneration != 0 {
 			t.Fatalf("observed status = %s", view.Status.Phase)
 		}
 	}
@@ -149,6 +171,95 @@ func TestManagerObserveReportsMissingManagedInterface(t *testing.T) {
 	}
 	if observed.Status.Phase != model.PhaseError || len(observed.Status.Conditions) == 0 || !strings.Contains(observed.Status.Conditions[0].Message, "is missing") {
 		t.Fatalf("missing-interface status = %+v", observed.Status)
+	}
+}
+
+func TestObservePreservesSuccessfulReconcileMetadataAndDetails(t *testing.T) {
+	records := newMemoryStore()
+	backend := newFakeBackend()
+	backend.apply = &Observation{InterfaceExists: true, InterfaceUp: true, Details: map[string]string{"cache": "fresh"}}
+	manager := NewManager(records, NewReconciler(records, backend, time.Hour))
+	created, err := manager.Create(context.Background(), model.Tunnel{
+		Name: "observed", Kind: model.KindGRE, Interface: "gre-observed", Enabled: true,
+		Spec: model.Spec{GRE: &model.GRESpec{Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := manager.Reconcile(context.Background(), created.Tunnel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.observe = &Observation{InterfaceExists: true, InterfaceUp: true, Details: map[string]string{"managed_routes": "3"}}
+	observed, err := manager.Observe(context.Background(), created.Tunnel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Status.Phase != model.PhaseReady || observed.Status.ObservedGeneration != reconciled.Status.ObservedGeneration {
+		t.Fatalf("observation changed reconciled phase/generation: %+v", observed.Status)
+	}
+	if observed.Status.LastReconcileTime != reconciled.Status.LastReconcileTime || observed.Status.LastSuccessfulTime != reconciled.Status.LastSuccessfulTime {
+		t.Fatalf("observation changed reconcile timestamps: before=%+v after=%+v", reconciled.Status, observed.Status)
+	}
+	if observed.Status.LastObservationTime.Before(reconciled.Status.LastObservationTime) || observed.Status.Details["cache"] != "fresh" || observed.Status.Details["managed_routes"] != "3" {
+		t.Fatalf("observation did not merge live details: %+v", observed.Status)
+	}
+}
+
+func TestSuccessfulObserveDoesNotEraseReconcileFailure(t *testing.T) {
+	records := newMemoryStore()
+	backend := newFakeBackend()
+	backend.applyErr = errors.New("apply failed")
+	manager := NewManager(records, NewReconciler(records, backend, time.Hour))
+	created, err := manager.Create(context.Background(), model.Tunnel{
+		Name: "failed", Kind: model.KindGRE, Interface: "gre-failed", Enabled: true,
+		Spec: model.Spec{GRE: &model.GRESpec{Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := manager.Reconcile(context.Background(), created.Tunnel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.observe = &Observation{InterfaceExists: true, InterfaceUp: true}
+	observed, err := manager.Observe(context.Background(), created.Tunnel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status.Phase != model.PhaseError || observed.Status.Phase != model.PhaseError || observed.Status.ObservedGeneration != 0 {
+		t.Fatalf("successful observation erased reconcile failure: before=%+v after=%+v", failed.Status, observed.Status)
+	}
+	if len(observed.Status.Conditions) == 0 || !strings.Contains(observed.Status.Conditions[0].Message, "apply failed") {
+		t.Fatalf("reconcile failure condition was not preserved: %+v", observed.Status.Conditions)
+	}
+}
+
+func TestObserveMarksDriftWithoutAdvancingReconcileMetadata(t *testing.T) {
+	records := newMemoryStore()
+	backend := newFakeBackend()
+	manager := NewManager(records, NewReconciler(records, backend, time.Hour))
+	created, err := manager.Create(context.Background(), model.Tunnel{
+		Name: "drift", Kind: model.KindGRE, Interface: "gre-drift", Enabled: true,
+		Spec: model.Spec{GRE: &model.GRESpec{Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := manager.Reconcile(context.Background(), created.Tunnel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.observeErr = fmt.Errorf("%w: route missing", ErrDriftDetected)
+	observed, err := manager.Observe(context.Background(), created.Tunnel.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.Status.Phase != model.PhaseError || observed.Status.ObservedGeneration != reconciled.Status.ObservedGeneration || observed.Status.LastReconcileTime != reconciled.Status.LastReconcileTime {
+		t.Fatalf("drift observation changed reconcile metadata incorrectly: before=%+v after=%+v", reconciled.Status, observed.Status)
+	}
+	if len(observed.Status.Conditions) == 0 || observed.Status.Conditions[0].Reason != "DriftDetected" {
+		t.Fatalf("drift condition = %+v", observed.Status.Conditions)
 	}
 }
 

@@ -67,6 +67,9 @@ func prepareUpdate(next, current *Tunnel, now time.Time, generateSecrets bool) e
 	next.CreatedAt = current.CreatedAt
 	next.UpdatedAt = now.UTC()
 	MergeSecrets(next, current)
+	if next.Kind == KindSRv6 && next.Spec.SRv6 != nil && current.Spec.SRv6 != nil && next.Spec.SRv6.RulePriority == 0 {
+		next.Spec.SRv6.RulePriority = current.Spec.SRv6.RulePriority
+	}
 	applyDefaults(next)
 	if err := prepareSecrets(next, generateSecrets); err != nil {
 		return err
@@ -152,8 +155,18 @@ func applyDefaults(t *Tunnel) {
 			}
 		}
 	case KindSRv6:
-		if t.Spec.SRv6 != nil && t.Spec.SRv6.RefreshIntervalSeconds == 0 {
-			t.Spec.SRv6.RefreshIntervalSeconds = 3600
+		if t.Spec.SRv6 != nil {
+			if t.Spec.SRv6.RulePriority == 0 {
+				t.Spec.SRv6.RulePriority = SRv6AutoRulePriorityMin
+			}
+			if t.Spec.SRv6.RefreshIntervalSeconds == 0 {
+				t.Spec.SRv6.RefreshIntervalSeconds = 3600
+			}
+			for index := range t.Spec.SRv6.Sources {
+				if t.Spec.SRv6.Sources[index].Priority == 0 {
+					t.Spec.SRv6.Sources[index].Priority = NextSRv6SourcePriority(t.Spec.SRv6.Sources)
+				}
+			}
 		}
 	}
 }

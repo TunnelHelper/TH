@@ -301,7 +301,7 @@ func (r *Reconciler) Remove(ctx context.Context, record model.Tunnel) error {
 		return store.ErrConflict
 	}
 	observation, err := r.backend.Remove(ctx, record)
-	r.setResult(record, observation, err, model.PhaseDisabled)
+	r.setReconcileResult(record, observation, err, model.PhaseDisabled)
 	return err
 }
 
@@ -318,7 +318,7 @@ func (r *Reconciler) Delete(ctx context.Context, id string, expected uint64) err
 		return store.ErrConflict
 	}
 	observation, removeErr := r.backend.Remove(ctx, record)
-	r.setResult(record, observation, removeErr, model.PhaseDisabled)
+	r.setReconcileResult(record, observation, removeErr, model.PhaseDisabled)
 	if removeErr != nil {
 		lock.Unlock()
 		return fmt.Errorf("%w: remove managed objects before deleting record: %v", ErrOperationFailed, removeErr)
@@ -351,15 +351,12 @@ func (r *Reconciler) Observe(ctx context.Context, id string) error {
 		return err
 	}
 	observation, err := r.backend.Observe(ctx, record)
-	phase := model.PhaseReady
-	if !record.Enabled {
-		phase = model.PhaseDisabled
-	} else if err == nil && record.Interface != "" && !observation.InterfaceExists {
-		err = fmt.Errorf("managed interface %s is missing", record.Interface)
-	} else if err == nil && record.Interface != "" && !observation.InterfaceUp {
-		err = fmt.Errorf("managed interface %s is down", record.Interface)
+	if record.Enabled && err == nil && record.Interface != "" && !observation.InterfaceExists {
+		err = fmt.Errorf("%w: managed interface %s is missing", ErrDriftDetected, record.Interface)
+	} else if record.Enabled && err == nil && record.Interface != "" && !observation.InterfaceUp {
+		err = fmt.Errorf("%w: managed interface %s is down", ErrDriftDetected, record.Interface)
 	}
-	r.setResult(record, observation, err, phase)
+	r.setObservationResult(record, observation, err)
 	return err
 }
 
@@ -431,16 +428,17 @@ func (r *Reconciler) MarkPending(record model.Tunnel) {
 	r.statusMu.Lock()
 	previous := r.statuses[record.ID]
 	status := model.Status{
-		TunnelID:           record.ID,
-		DesiredGeneration:  record.Generation,
-		ObservedGeneration: previous.ObservedGeneration,
-		Phase:              model.PhasePending,
-		InterfaceExists:    previous.InterfaceExists,
-		InterfaceUp:        previous.InterfaceUp,
-		LastReconcileTime:  previous.LastReconcileTime,
-		LastSuccessfulTime: previous.LastSuccessfulTime,
-		Details:            previous.Details,
-		Peers:              previous.Peers,
+		TunnelID:            record.ID,
+		DesiredGeneration:   record.Generation,
+		ObservedGeneration:  previous.ObservedGeneration,
+		Phase:               model.PhasePending,
+		InterfaceExists:     previous.InterfaceExists,
+		InterfaceUp:         previous.InterfaceUp,
+		LastReconcileTime:   previous.LastReconcileTime,
+		LastObservationTime: previous.LastObservationTime,
+		LastSuccessfulTime:  previous.LastSuccessfulTime,
+		Details:             previous.Details,
+		Peers:               previous.Peers,
 		Conditions: []model.Condition{{
 			Type:               "Ready",
 			Status:             false,
@@ -497,6 +495,6 @@ func (r *Reconciler) reconcileRecord(ctx context.Context, record model.Tunnel) e
 		observation, reconcileErr = r.backend.Remove(ctx, record)
 		phase = model.PhaseDisabled
 	}
-	r.setResult(record, observation, reconcileErr, phase)
+	r.setReconcileResult(record, observation, reconcileErr, phase)
 	return reconcileErr
 }

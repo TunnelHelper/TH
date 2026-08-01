@@ -247,6 +247,12 @@ func showStatus(output *ui.UI, view model.TunnelView) {
 	fmt.Fprintf(output.Out, "State: %s\n", enabledState(view.Tunnel.Enabled))
 	fmt.Fprintf(output.Out, "Generation: %d / observed %d\n", view.Tunnel.Generation, view.Status.ObservedGeneration)
 	fmt.Fprintf(output.Out, "Phase: %s\n", view.Status.Phase)
+	if !view.Status.LastReconcileTime.IsZero() {
+		fmt.Fprintf(output.Out, "Last reconcile: %s\n", view.Status.LastReconcileTime.Format(time.RFC3339))
+	}
+	if !view.Status.LastObservationTime.IsZero() {
+		fmt.Fprintf(output.Out, "Last observation: %s\n", view.Status.LastObservationTime.Format(time.RFC3339))
+	}
 	summarizedDetails := map[string]bool{"counter_source": true}
 	if linkLocal := view.Status.Details["ipv6_link_local"]; linkLocal != "" {
 		fmt.Fprintf(output.Out, "IPv6 LLA: %s\n", linkLocal)
@@ -315,17 +321,23 @@ func showStatus(output *ui.UI, view model.TunnelView) {
 
 func statusDetailLabel(key string) string {
 	labels := map[string]string{
-		"cache":           "Route cache",
-		"ike_sas":         "IKE SAs",
-		"link_type":       "Link type",
-		"listen_port":     "Listen port",
-		"managed_routes":  "Managed routes",
-		"mtu":             "MTU",
-		"peers":           "Peers",
-		"public_key":      "Public key",
-		"vici_connection": "VICI connection",
-		"xfrm_policies":   "XFRM policies",
-		"xfrm_states":     "XFRM states",
+		"cache":                 "Route cache",
+		"ike_sas":               "IKE SAs",
+		"link_type":             "Link type",
+		"listen_port":           "Listen port",
+		"expected_policy_rules": "Expected policy rules",
+		"expected_routes":       "Expected routes",
+		"managed_routes":        "Managed routes",
+		"mtu":                   "MTU",
+		"peers":                 "Peers",
+		"policy_rules":          "Policy rules",
+		"public_key":            "Public key",
+		"route_conflicts":       "Route conflicts",
+		"rule_priority":         "Rule priority",
+		"skipped_prefixes":      "Skipped prefixes",
+		"vici_connection":       "VICI connection",
+		"xfrm_policies":         "XFRM policies",
+		"xfrm_states":           "XFRM states",
 	}
 	if label := labels[key]; label != "" {
 		return label

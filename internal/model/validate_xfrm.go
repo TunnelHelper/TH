@@ -190,6 +190,9 @@ func validateSRv6(spec *SRv6Spec) error {
 	if spec.Table < 1 || spec.Table > 2147483647 {
 		return errors.New("table must be between 1 and 2147483647")
 	}
+	if spec.RulePriority < SRv6RulePriorityMin || spec.RulePriority > SRv6RulePriorityMax {
+		return fmt.Errorf("rule_priority must be between %d and %d", SRv6RulePriorityMin, SRv6RulePriorityMax)
+	}
 	if spec.RefreshIntervalSeconds < 60 || spec.RefreshIntervalSeconds > 604800 {
 		return errors.New("refresh_interval_seconds must be between 60 and 604800")
 	}
@@ -197,6 +200,7 @@ func validateSRv6(spec *SRv6Spec) error {
 		return errors.New("at least one SRv6 source is required")
 	}
 	seen := make(map[string]struct{}, len(spec.Sources))
+	priorities := make(map[int]struct{}, len(spec.Sources))
 	for i, source := range spec.Sources {
 		if len(source.Name) == 0 || len(source.Name) > 64 || !namePattern.MatchString(source.Name) {
 			return fmt.Errorf("sources[%d].name is invalid", i)
@@ -216,9 +220,13 @@ func validateSRv6(spec *SRv6Spec) error {
 		if !source.SID.IsValid() || !source.SID.Is6() || source.SID.IsUnspecified() {
 			return fmt.Errorf("sources[%d].sid must be a specified IPv6 address", i)
 		}
-		if source.Priority < 0 || source.Priority > 2147483647 {
-			return fmt.Errorf("sources[%d].priority must be between 0 and 2147483647", i)
+		if source.Priority < SRv6RulePriorityMin || source.Priority > SRv6RulePriorityMax {
+			return fmt.Errorf("sources[%d].priority must be between %d and %d", i, SRv6RulePriorityMin, SRv6RulePriorityMax)
 		}
+		if _, exists := priorities[source.Priority]; exists {
+			return fmt.Errorf("duplicate source priority %d", source.Priority)
+		}
+		priorities[source.Priority] = struct{}{}
 		if err := validateMTU(source.MTU); err != nil {
 			return fmt.Errorf("sources[%d]: %w", i, err)
 		}

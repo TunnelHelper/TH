@@ -19,6 +19,7 @@ type fakeBackend struct {
 	active       int
 	maxActive    int
 	applyErr     error
+	apply        *Observation
 	removeErr    error
 	observe      *Observation
 	observeErr   error
@@ -41,6 +42,7 @@ func (b *fakeBackend) Apply(ctx context.Context, record model.Tunnel) (Observati
 		b.maxActive = b.active
 	}
 	err := b.applyErr
+	observation := b.apply
 	block := b.block
 	b.mu.Unlock()
 	b.called <- struct{}{}
@@ -54,6 +56,9 @@ func (b *fakeBackend) Apply(ctx context.Context, record model.Tunnel) (Observati
 	b.mu.Lock()
 	b.active--
 	b.mu.Unlock()
+	if observation != nil {
+		return *observation, err
+	}
 	return Observation{InterfaceExists: err == nil, InterfaceUp: err == nil}, err
 }
 

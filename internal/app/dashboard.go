@@ -177,7 +177,7 @@ func (m dashboardModel) loadViews() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, m.timeout)
 		defer cancel()
-		views, err := m.client.ObserveAll(ctx)
+		views, err := m.client.List(ctx)
 		return dashboardViewsMsg{views: views, err: err}
 	}
 }

@@ -371,7 +371,7 @@ func (m manageWorkspaceModel) updateSourceList(key tea.KeyMsg) (tea.Model, tea.C
 func (m *manageWorkspaceModel) beginSourceAdd(sources []model.SRv6Source) {
 	m.sourceAdding, m.sourceIndex = true, -1
 	m.sourceOriginal = model.SRv6Source{}
-	m.sourceDraft = model.SRv6Source{Name: suggestedSRv6SourceName(sources), Priority: 100, MTU: 1500}
+	m.sourceDraft = model.SRv6Source{Name: suggestedSRv6SourceName(sources), Priority: model.NextSRv6SourcePriority(sources), MTU: 1500}
 	m.fieldSelected = 0
 	m.beginChoice("srv6-source-family", "Address family", "", []workspaceButton{
 		{Label: "IPv4", Value: string(model.SRv6FamilyIPv4)},
@@ -478,7 +478,7 @@ func workspaceSourceFields(source model.SRv6Source) []workspaceField {
 	return []workspaceField{
 		workspaceTextField("name", "Name", source.Name, validateNameInput),
 		workspaceTextField("url", srv6FamilyDisplay(source.Family)+" prefix file URL", source.PrefixURL, validateHTTPURL),
-		workspaceTextField("priority", "Priority (higher wins)", strconv.Itoa(source.Priority), validateInt(0, 2147483647)),
+		workspaceTextField("priority", "Priority (lower wins)", strconv.Itoa(source.Priority), validateInt(model.SRv6RulePriorityMin, model.SRv6RulePriorityMax)),
 		workspaceTextField("sid", "Route SID", srv6SIDInput(source.SID), validateRequiredIPv6),
 		workspaceTextField("mtu", "MTU", strconv.Itoa(source.MTU), validateInt(68, 65535)),
 	}
@@ -516,6 +516,9 @@ func (m *manageWorkspaceModel) validateSourceDraft() error {
 	for index, source := range m.draft.Spec.SRv6.Sources {
 		if index != m.sourceIndex && source.Name == m.sourceDraft.Name {
 			return fmt.Errorf("source name %q is already in use", m.sourceDraft.Name)
+		}
+		if index != m.sourceIndex && source.Priority == m.sourceDraft.Priority {
+			return fmt.Errorf("source priority %d is already in use", m.sourceDraft.Priority)
 		}
 	}
 	return nil

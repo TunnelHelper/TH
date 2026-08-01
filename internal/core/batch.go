@@ -144,6 +144,7 @@ func (m *Manager) buildBundlePlanLocked(bundle model.Bundle, prune bool) (Bundle
 	inputIDs := make(map[string]struct{}, len(bundle.Tunnels))
 	changes := make([]plannedBundleChange, 0, len(bundle.Tunnels)+len(current))
 	finalRecords := make([]model.Tunnel, 0, len(bundle.Tunnels)+len(current))
+	priorityRecords := append([]model.Tunnel(nil), current...)
 
 	for index, desired := range bundle.Tunnels {
 		if desired.Name == "" {
@@ -214,12 +215,16 @@ func (m *Manager) buildBundlePlanLocked(bundle model.Bundle, prune bool) (Bundle
 		candidate.ID = ""
 		candidate.SchemaVersion = 0
 		candidate.Generation = 0
+		if err := allocateSRv6RulePriority(&candidate, priorityRecords); err != nil {
+			return BundlePlan{}, nil, fmt.Errorf("%w: tunnel %q: %v", ErrInvalidRequest, desired.Name, err)
+		}
 		if err := model.PrepareNew(&candidate, m.now()); err != nil {
 			return BundlePlan{}, nil, fmt.Errorf("%w: tunnel %q: %v", ErrInvalidRequest, desired.Name, err)
 		}
 		operation := BundleOperation{Action: BundleCreate, Name: candidate.Name, Kind: candidate.Kind}
 		changes = append(changes, plannedBundleChange{operation: operation, after: cloneTunnelPointer(candidate)})
 		finalRecords = append(finalRecords, candidate)
+		priorityRecords = append(priorityRecords, candidate)
 	}
 
 	for _, record := range current {

@@ -9,21 +9,22 @@ import (
 	"github.com/TunnelHelper/TH/internal/store"
 )
 
-func (r *Reconciler) setResult(record model.Tunnel, observation Observation, err error, successPhase model.Phase) {
+func (r *Reconciler) setReconcileResult(record model.Tunnel, observation Observation, err error, successPhase model.Phase) {
 	now := r.now().UTC()
 	r.statusMu.Lock()
 	previous := r.statuses[record.ID]
 	status := model.Status{
-		TunnelID:           record.ID,
-		DesiredGeneration:  record.Generation,
-		ObservedGeneration: previous.ObservedGeneration,
-		Phase:              successPhase,
-		InterfaceExists:    observation.InterfaceExists,
-		InterfaceUp:        observation.InterfaceUp,
-		LastReconcileTime:  now,
-		LastSuccessfulTime: previous.LastSuccessfulTime,
-		Details:            observation.Details,
-		Peers:              observation.Peers,
+		TunnelID:            record.ID,
+		DesiredGeneration:   record.Generation,
+		ObservedGeneration:  previous.ObservedGeneration,
+		Phase:               successPhase,
+		InterfaceExists:     observation.InterfaceExists,
+		InterfaceUp:         observation.InterfaceUp,
+		LastReconcileTime:   now,
+		LastObservationTime: now,
+		LastSuccessfulTime:  previous.LastSuccessfulTime,
+		Details:             observation.Details,
+		Peers:               observation.Peers,
 	}
 	if err != nil {
 		status.Phase = model.PhaseError
@@ -47,6 +48,56 @@ func (r *Reconciler) setResult(record model.Tunnel, observation Observation, err
 	r.statuses[record.ID] = status
 	r.statusMu.Unlock()
 	r.publishStatus(record, status)
+}
+
+func (r *Reconciler) setObservationResult(record model.Tunnel, observation Observation, observationErr error) {
+	now := r.now().UTC()
+	r.statusMu.Lock()
+	previous, exists := r.statuses[record.ID]
+	if !exists {
+		phase := model.PhasePending
+		if !record.Enabled {
+			phase = model.PhaseDisabled
+		}
+		previous = model.Status{
+			TunnelID: record.ID, DesiredGeneration: record.Generation, Phase: phase,
+		}
+	}
+	status := previous
+	status.DesiredGeneration = record.Generation
+	status.InterfaceExists = observation.InterfaceExists
+	status.InterfaceUp = observation.InterfaceUp
+	status.LastObservationTime = now
+	status.Details = mergeObservationDetails(previous.Details, observation.Details)
+	status.Peers = observation.Peers
+	if observationErr != nil {
+		reason := "ObservationFailed"
+		if errors.Is(observationErr, ErrDriftDetected) {
+			reason = "DriftDetected"
+		}
+		status.Phase = model.PhaseError
+		status.Conditions = []model.Condition{{
+			Type: "Ready", Status: false, Reason: reason, Message: observationErr.Error(),
+			LastTransitionTime: transitionTime(previous, false, now),
+		}}
+	}
+	r.statuses[record.ID] = status
+	r.statusMu.Unlock()
+	r.publishStatus(record, status)
+}
+
+func mergeObservationDetails(previous, observed map[string]string) map[string]string {
+	if len(previous) == 0 && len(observed) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(previous)+len(observed))
+	for key, value := range previous {
+		merged[key] = value
+	}
+	for key, value := range observed {
+		merged[key] = value
+	}
+	return merged
 }
 
 func (r *Reconciler) publishStatus(record model.Tunnel, status model.Status) {

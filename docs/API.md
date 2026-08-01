@@ -67,8 +67,10 @@ discarded until owned runtime objects have been removed safely.
 
 Observe is read-only: it refreshes status from the kernel without reapplying
 desired configuration. The single-tunnel and all-tunnel observe endpoints back
-the TUI status refresh actions. Reconcile may repair or change runtime state and
-is kept as a separate operation.
+explicit observation clients. Observation has its own timestamp and does not
+advance the observed generation or erase the previous reconciliation result.
+The TUI dashboard's `r` action only reloads current daemon status. Reconcile may
+repair or change runtime state and is kept as a separate operation.
 
 Plan and apply accept this envelope:
 
@@ -122,7 +124,7 @@ Update uses this envelope and requires the current generation:
 {
   "generation": 4,
   "tunnel": {
-    "schema_version": 3,
+    "schema_version": 4,
     "id": "11111111-2222-4333-8444-555555555555",
     "generation": 4,
     "name": "site-a-gre",
@@ -155,6 +157,12 @@ Tunnel responses contain:
 - `status`: desired and observed generation, phase, timestamps, conditions,
   interface state, backend-specific details, and per-peer WireGuard or
   AmneziaWG operational counters.
+
+SRv6 specs include a durable `rule_priority`. The daemon allocates it for new
+records when omitted; it is immutable with the route table and is always in the
+range 1 through 32765. Source `priority` uses the same low-number-first ordering,
+must be unique within the tunnel, and has the same range. This keeps the SRv6
+table lookup ahead of Linux's `main` rule at priority 32766.
 
 WireGuard `receive_bytes` and `transmit_bytes` are the sum of the same per-peer
 generic-netlink transfer counters exposed by `wg`. Linux interface counters are

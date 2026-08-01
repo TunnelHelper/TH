@@ -45,7 +45,7 @@ func TestOpenMigratesSchema2RecordWithoutBackup(t *testing.T) {
 		t.Fatal("migration did not preserve WireGuard private key")
 	}
 	migrations := records.Migrations()
-	if len(migrations) != 1 || migrations[0].RecordID != record.ID || migrations[0].From != 2 || migrations[0].To != 3 {
+	if len(migrations) != 1 || migrations[0].RecordID != record.ID || migrations[0].From != 2 || migrations[0].To != model.SchemaVersion {
 		t.Fatalf("migrations = %+v", migrations)
 	}
 	assertNoMigrationBackups(t, stateDir)
@@ -92,10 +92,48 @@ func TestOpenMigratesSchema2SRv6Sources(t *testing.T) {
 	if len(sources) != 2 {
 		t.Fatalf("migrated sources = %+v", sources)
 	}
-	assertMigratedSRv6Source(t, sources[0], "carrier-v4", model.SRv6FamilyIPv4, "https://routes.example/feeds/carrier_v4.txt", sid4)
-	assertMigratedSRv6Source(t, sources[1], "carrier-v6", model.SRv6FamilyIPv6, "https://routes.example/feeds/carrier_v6.txt", sid6)
+	assertMigratedSRv6Source(t, sources[0], "carrier-v4", model.SRv6FamilyIPv4, "https://routes.example/feeds/carrier_v4.txt", sid4, 1)
+	assertMigratedSRv6Source(t, sources[1], "carrier-v6", model.SRv6FamilyIPv6, "https://routes.example/feeds/carrier_v6.txt", sid6, 2)
+	if loaded.Spec.SRv6.RulePriority < model.SRv6AutoRulePriorityMin || loaded.Spec.SRv6.RulePriority > model.SRv6AutoRulePriorityMax {
+		t.Fatalf("migrated rule priority = %d", loaded.Spec.SRv6.RulePriority)
+	}
 	if loaded.Generation != legacy.Generation || loaded.CreatedAt != legacy.CreatedAt || loaded.UpdatedAt != legacy.UpdatedAt {
 		t.Fatal("SRv6 migration changed generation or timestamps")
+	}
+}
+
+func TestOpenMigratesSchema3SRv6PrioritiesWithoutChangingPreference(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	id, err := model.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	legacy := schema3Tunnel{
+		SchemaVersion: previousSchemaVersion, ID: id, Generation: 3, Name: "legacy-srv6-v3", Kind: model.KindSRv6, Enabled: true,
+		CreatedAt: now.Add(-time.Hour), UpdatedAt: now,
+		Spec: schema3Spec{SRv6: &schema3SRv6Spec{
+			UnderlayInterface: "eth0", Table: 1002, RefreshIntervalSeconds: 300,
+			Sources: []model.SRv6Source{
+				{Name: "lower-old", Family: model.SRv6FamilyIPv4, PrefixURL: "https://routes.example/low.txt", SID: netip.MustParseAddr("2001:db8::1"), Priority: 100, MTU: 1500},
+				{Name: "higher-old", Family: model.SRv6FamilyIPv4, PrefixURL: "https://routes.example/high.txt", SID: netip.MustParseAddr("2001:db8::2"), Priority: 200, MTU: 1400},
+			},
+		}},
+	}
+	writeLegacyRecord(t, stateDir, id, legacy)
+	records, err := Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := records.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Spec.SRv6.Sources[0].Priority != 2 || loaded.Spec.SRv6.Sources[1].Priority != 1 {
+		t.Fatalf("legacy source preference was not preserved: %+v", loaded.Spec.SRv6.Sources)
+	}
+	if loaded.Spec.SRv6.RulePriority != model.SRv6AutoRulePriorityMin {
+		t.Fatalf("migrated rule priority = %d", loaded.Spec.SRv6.RulePriority)
 	}
 }
 
@@ -106,6 +144,7 @@ func TestOpenNormalizesSchema3LegacyNameWithoutBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := preparedWireGuard(t, "legacy-v3", "wg-legacy-v3", peerKey.PublicKey().String())
+	record.SchemaVersion = previousSchemaVersion
 	writeLegacyRecord(t, stateDir, record.ID, record)
 
 	records, err := Open(stateDir)
@@ -123,7 +162,7 @@ func TestOpenNormalizesSchema3LegacyNameWithoutBackup(t *testing.T) {
 		t.Fatal("name normalization changed generation or timestamps")
 	}
 	migrations := records.Migrations()
-	if len(migrations) != 1 || migrations[0].From != 3 || migrations[0].To != 3 || migrations[0].PreviousName != "legacy-v3" || migrations[0].Name != "wg-legacy-v3" {
+	if len(migrations) != 1 || migrations[0].From != 3 || migrations[0].To != model.SchemaVersion || migrations[0].PreviousName != "legacy-v3" || migrations[0].Name != "wg-legacy-v3" {
 		t.Fatalf("migrations = %+v", migrations)
 	}
 	assertNoMigrationBackups(t, stateDir)
@@ -201,9 +240,9 @@ func TestSchema2MigrationUsesProtocolPrefixes(t *testing.T) {
 	}
 }
 
-func assertMigratedSRv6Source(t *testing.T, source model.SRv6Source, name string, family model.SRv6AddressFamily, prefixURL string, sid netip.Addr) {
+func assertMigratedSRv6Source(t *testing.T, source model.SRv6Source, name string, family model.SRv6AddressFamily, prefixURL string, sid netip.Addr, priority int) {
 	t.Helper()
-	if source.Name != name || source.Family != family || source.PrefixURL != prefixURL || source.SID != sid || source.Priority != 0 || source.MTU != 1480 {
+	if source.Name != name || source.Family != family || source.PrefixURL != prefixURL || source.SID != sid || source.Priority != priority || source.MTU != 1480 {
 		t.Fatalf("migrated source = %+v", source)
 	}
 }

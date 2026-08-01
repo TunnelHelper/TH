@@ -2,9 +2,12 @@ package core
 
 import (
 	"context"
+	"errors"
 
 	"github.com/TunnelHelper/TH/internal/model"
 )
+
+var ErrDriftDetected = errors.New("managed state drift detected")
 
 type Observation struct {
 	InterfaceExists bool

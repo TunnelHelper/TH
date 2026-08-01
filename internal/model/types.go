@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	SchemaVersion = 3
+	SchemaVersion = 4
 	BundleVersion = 1
 
 	MaxTunnelRecords       = 1024
@@ -176,6 +176,7 @@ type XFRMIKEv2Spec struct {
 type SRv6Spec struct {
 	UnderlayInterface      string       `json:"underlay_interface"`
 	Table                  int          `json:"table"`
+	RulePriority           int          `json:"rule_priority"`
 	RefreshIntervalSeconds int          `json:"refresh_interval_seconds"`
 	Sources                []SRv6Source `json:"sources"`
 }
@@ -214,17 +215,18 @@ type Condition struct {
 }
 
 type Status struct {
-	TunnelID           string            `json:"tunnel_id"`
-	DesiredGeneration  uint64            `json:"desired_generation"`
-	ObservedGeneration uint64            `json:"observed_generation"`
-	Phase              Phase             `json:"phase"`
-	InterfaceExists    bool              `json:"interface_exists"`
-	InterfaceUp        bool              `json:"interface_up"`
-	LastReconcileTime  time.Time         `json:"last_reconcile_time,omitempty"`
-	LastSuccessfulTime time.Time         `json:"last_successful_time,omitempty"`
-	Conditions         []Condition       `json:"conditions,omitempty"`
-	Details            map[string]string `json:"details,omitempty"`
-	Peers              []PeerStatus      `json:"peers,omitempty"`
+	TunnelID            string            `json:"tunnel_id"`
+	DesiredGeneration   uint64            `json:"desired_generation"`
+	ObservedGeneration  uint64            `json:"observed_generation"`
+	Phase               Phase             `json:"phase"`
+	InterfaceExists     bool              `json:"interface_exists"`
+	InterfaceUp         bool              `json:"interface_up"`
+	LastReconcileTime   time.Time         `json:"last_reconcile_time,omitempty"`
+	LastObservationTime time.Time         `json:"last_observation_time,omitempty"`
+	LastSuccessfulTime  time.Time         `json:"last_successful_time,omitempty"`
+	Conditions          []Condition       `json:"conditions,omitempty"`
+	Details             map[string]string `json:"details,omitempty"`
+	Peers               []PeerStatus      `json:"peers,omitempty"`
 }
 
 type PeerStatus struct {

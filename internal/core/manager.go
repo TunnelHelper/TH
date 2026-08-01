@@ -74,12 +74,15 @@ func (m *Manager) createLocked(_ context.Context, record model.Tunnel) (model.Tu
 	record.Generation = 0
 	record.CreatedAt = time.Time{}
 	record.UpdatedAt = time.Time{}
-	if err := model.PrepareNew(&record, m.now()); err != nil {
-		return model.TunnelView{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
-	}
 	records, err := m.store.List()
 	if err != nil {
 		return model.TunnelView{}, err
+	}
+	if err := allocateSRv6RulePriority(&record, records); err != nil {
+		return model.TunnelView{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
+	}
+	if err := model.PrepareNew(&record, m.now()); err != nil {
+		return model.TunnelView{}, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 	if len(records) >= model.MaxTunnelRecords {
 		return model.TunnelView{}, fmt.Errorf("%w: tunnel store is limited to %d records", ErrInvalidRequest, model.MaxTunnelRecords)
@@ -178,10 +181,28 @@ func validateStableOwnership(current, next model.Tunnel) error {
 			return errors.New("XFRM if_id and req_id are immutable; delete and recreate the tunnel")
 		}
 	case model.KindSRv6:
-		if current.Spec.SRv6.Table != next.Spec.SRv6.Table {
-			return errors.New("SRv6 table is immutable; delete and recreate the tunnel")
+		if current.Spec.SRv6.Table != next.Spec.SRv6.Table || current.Spec.SRv6.RulePriority != next.Spec.SRv6.RulePriority {
+			return errors.New("SRv6 table and policy-rule priority are immutable; delete and recreate the tunnel")
 		}
 	}
+	return nil
+}
+
+func allocateSRv6RulePriority(record *model.Tunnel, records []model.Tunnel) error {
+	if record.Kind != model.KindSRv6 || record.Spec.SRv6 == nil || record.Spec.SRv6.RulePriority != 0 {
+		return nil
+	}
+	used := make(map[int]struct{})
+	for _, existing := range records {
+		for _, priority := range model.ManagedRulePriorities(existing) {
+			used[priority] = struct{}{}
+		}
+	}
+	priority, err := model.AllocateSRv6RulePriority(used)
+	if err != nil {
+		return err
+	}
+	record.Spec.SRv6.RulePriority = priority
 	return nil
 }
 

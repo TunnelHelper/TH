@@ -40,7 +40,6 @@ type srv6Route struct {
 	sid      netip.Addr
 	mtu      int
 	priority int
-	origin   string
 }
 
 func (b *Backend) applySRv6(ctx context.Context, record model.Tunnel) (core.Observation, error) {
@@ -63,7 +62,7 @@ func (b *Backend) applySRv6(ctx context.Context, record model.Tunnel) (core.Obse
 	if err := b.reconcileSRv6Rules(record, spec.Table, desired); err != nil {
 		return core.Observation{}, err
 	}
-	observation, err := b.observeSRv6(record)
+	observation, err := b.observeSRv6Desired(record, desired)
 	if observation.Details == nil {
 		observation.Details = make(map[string]string)
 	}
@@ -97,7 +96,7 @@ func (b *Backend) loadSRv6Feeds(ctx context.Context, record model.Tunnel) ([]srv
 	usedStale := false
 	sources := append([]model.SRv6Source(nil), spec.Sources...)
 	sort.SliceStable(sources, func(i, j int) bool {
-		return sources[i].Priority > sources[j].Priority
+		return sources[i].Priority < sources[j].Priority
 	})
 	for _, source := range sources {
 		family := 0
@@ -126,7 +125,7 @@ func (b *Backend) loadSRv6Feeds(ctx context.Context, record model.Tunnel) ([]srv
 		}
 		for _, prefix := range prefixes {
 			allRoutes = append(allRoutes, srv6Route{
-				prefix: prefix, sid: source.SID, mtu: source.MTU, priority: source.Priority, origin: source.Name + "/" + familyName,
+				prefix: prefix, sid: source.SID, mtu: source.MTU, priority: source.Priority,
 			})
 		}
 	}
@@ -134,10 +133,7 @@ func (b *Backend) loadSRv6Feeds(ctx context.Context, record model.Tunnel) ([]srv
 	if usedStale {
 		state = "stale-fallback"
 	}
-	resolved, skipped, err := resolveSRv6RouteConflicts(allRoutes)
-	if err != nil {
-		return nil, "", 0, err
-	}
+	resolved, skipped := resolveSRv6RouteConflicts(allRoutes)
 	return resolved, state, skipped, nil
 }
 
@@ -186,29 +182,23 @@ func fetchOrReadSRv6Feed(ctx context.Context, client *http.Client, feedURL, cach
 	return nil, false, errors.Join(fetchErr, cacheErr)
 }
 
-func resolveSRv6RouteConflicts(routes []srv6Route) ([]srv6Route, int, error) {
+func resolveSRv6RouteConflicts(routes []srv6Route) ([]srv6Route, int) {
 	sort.SliceStable(routes, func(i, j int) bool {
-		return routes[i].priority > routes[j].priority
+		return routes[i].priority < routes[j].priority
 	})
 	selected := make(map[netip.Prefix]srv6Route, len(routes))
 	result := make([]srv6Route, 0, len(routes))
 	skipped := 0
 	for _, route := range routes {
-		current, exists := selected[route.prefix]
+		_, exists := selected[route.prefix]
 		if !exists {
 			selected[route.prefix] = route
 			result = append(result, route)
 			continue
 		}
-		if route.priority == current.priority && (route.sid != current.sid || route.mtu != current.mtu) {
-			return nil, 0, fmt.Errorf(
-				"SRv6 prefix %s has conflicting actions at priority %d in %s and %s",
-				route.prefix, route.priority, current.origin, route.origin,
-			)
-		}
 		skipped++
 	}
-	return result, skipped, nil
+	return result, skipped
 }
 
 func writeCacheAtomic(path string, data []byte) error {
@@ -316,7 +306,8 @@ func (b *Backend) buildSRv6Routes(record model.Tunnel, underlay netlink.Link, ro
 			Table:     spec.Table,
 			Protocol:  managedRouteProtocol,
 			Realm:     realm,
-			Scope:     netlink.SCOPE_LINK,
+			Scope:     netlink.SCOPE_UNIVERSE,
+			Priority:  1024,
 		}
 		if defaultRoute != nil && len(defaultRoute.Gw) > 0 {
 			route.Gw = defaultRoute.Gw
@@ -376,7 +367,7 @@ func (b *Backend) reconcileSRv6Routes(record model.Tunnel, desired []netlink.Rou
 			if !routeOwnedByRecord(record, existing) && !(existing.Protocol == managedRouteProtocol && existing.Realm == 0) {
 				return fmt.Errorf("route %s in table %d is not owned by TH: %w", key, table, ErrOwnershipConflict)
 			}
-			if equalManagedRoute(existing, route) {
+			if equalSRv6ManagedRoute(existing, route) {
 				matched = true
 			}
 		}
@@ -424,6 +415,29 @@ func equalManagedRoute(a, b netlink.Route) bool {
 	return true
 }
 
+func equalSRv6ManagedRoute(current, desired netlink.Route) bool {
+	if current.Realm == 0 && desired.Realm != 0 && srv6RouteHasIPv6Destination(current) {
+		desired.Realm = 0
+	}
+	return equalManagedRoute(current, desired)
+}
+
+func srv6RouteHasIPv6Destination(route netlink.Route) bool {
+	prefix, ok := prefixFromIPNet(route.Dst)
+	return ok && prefix.Addr().Is6()
+}
+
+func srv6RouteOwnedForDesired(record model.Tunnel, route netlink.Route, desired map[string]netlink.Route) bool {
+	if routeOwnedByRecord(record, route) {
+		return true
+	}
+	if route.Protocol != managedRouteProtocol || route.Realm != 0 || !srv6RouteHasIPv6Destination(route) {
+		return false
+	}
+	_, expected := desired[routeKey(route)]
+	return expected
+}
+
 func routeKey(route netlink.Route) string {
 	return fmt.Sprintf("%d|%s", route.Table, routeDestinationKey(route))
 }
@@ -455,6 +469,11 @@ func (b *Backend) reconcileSRv6Rules(record model.Tunnel, table int, routes []ne
 		for i := range rules {
 			rule := &rules[i]
 			if rule.Priority != priority {
+				if rule.Protocol == managedRouteProtocol && rule.Table == table {
+					if err := b.netlink.RuleDel(rule); err != nil && !errors.Is(err, syscall.ENOENT) {
+						return fmt.Errorf("remove legacy SRv6 policy rule: %w", err)
+					}
+				}
 				continue
 			}
 			if rule.Protocol != managedRouteProtocol {
@@ -493,21 +512,21 @@ func (b *Backend) removeSRv6(record model.Tunnel) error {
 	if err != nil {
 		return err
 	}
+	desired := b.cachedSRv6RemovalRoutes(record)
 	for i := range routes {
-		if routeOwnedByRecord(record, routes[i]) {
+		if routeOwnedByRecord(record, routes[i]) || srv6RouteOwnedForDesired(record, routes[i], desired) {
 			if err := b.netlink.RouteDel(&routes[i]); err != nil && !errors.Is(err, syscall.ESRCH) {
 				return err
 			}
 		}
 	}
-	priority := srv6RulePriority(record)
 	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
 		rules, err := b.netlink.RuleList(family)
 		if err != nil {
 			return err
 		}
 		for i := range rules {
-			if rules[i].Protocol == managedRouteProtocol && rules[i].Priority == priority && rules[i].Table == spec.Table {
+			if rules[i].Protocol == managedRouteProtocol && rules[i].Table == spec.Table {
 				if err := b.netlink.RuleDel(&rules[i]); err != nil && !errors.Is(err, syscall.ENOENT) {
 					return err
 				}
@@ -517,20 +536,202 @@ func (b *Backend) removeSRv6(record model.Tunnel) error {
 	return nil
 }
 
+func (b *Backend) cachedSRv6RemovalRoutes(record model.Tunnel) map[string]netlink.Route {
+	spec := record.Spec.SRv6
+	desired := make(map[string]netlink.Route, len(spec.Sources)*2)
+	for _, source := range spec.Sources {
+		route := netlink.Route{Table: spec.Table, Dst: prefixToIPNet(netip.PrefixFrom(source.SID, 128))}
+		desired[routeKey(route)] = route
+	}
+	cached, _, err := b.loadCachedSRv6Feeds(record)
+	if err != nil {
+		return desired
+	}
+	for _, route := range cached {
+		netlinkRoute := netlink.Route{Table: spec.Table, Dst: prefixToIPNet(route.prefix)}
+		desired[routeKey(netlinkRoute)] = netlinkRoute
+	}
+	return desired
+}
+
+func (b *Backend) loadCachedSRv6Feeds(record model.Tunnel) ([]srv6Route, int, error) {
+	spec := record.Spec.SRv6
+	cacheDir := filepath.Join(b.settings.StateDir, "cache", "srv6", record.ID)
+	sources := append([]model.SRv6Source(nil), spec.Sources...)
+	sort.SliceStable(sources, func(i, j int) bool {
+		return sources[i].Priority < sources[j].Priority
+	})
+	allRoutes := make([]srv6Route, 0)
+	for _, source := range sources {
+		family := 0
+		switch source.Family {
+		case model.SRv6FamilyIPv4:
+			family = 4
+		case model.SRv6FamilyIPv6:
+			family = 6
+		default:
+			return nil, 0, fmt.Errorf("unsupported address family %q", source.Family)
+		}
+		cachePath := filepath.Join(cacheDir, srv6FeedCacheFilename(source.Name, string(source.Family), source.PrefixURL))
+		data, err := os.ReadFile(cachePath)
+		if err != nil {
+			return nil, 0, fmt.Errorf("%w: cached feed %s/%s is unavailable: %v", core.ErrDriftDetected, source.Name, source.Family, err)
+		}
+		prefixes, err := parseSRv6Feed(data, family)
+		if err != nil {
+			return nil, 0, fmt.Errorf("%w: cached feed %s/%s is invalid: %v", core.ErrDriftDetected, source.Name, source.Family, err)
+		}
+		if len(allRoutes)+len(prefixes) > maxSRv6RoutesTotal {
+			return nil, 0, fmt.Errorf("cached SRv6 feeds exceed %d total routes", maxSRv6RoutesTotal)
+		}
+		for _, prefix := range prefixes {
+			allRoutes = append(allRoutes, srv6Route{
+				prefix: prefix, sid: source.SID, mtu: source.MTU, priority: source.Priority,
+			})
+		}
+	}
+	resolved, skipped := resolveSRv6RouteConflicts(allRoutes)
+	return resolved, skipped, nil
+}
+
 func (b *Backend) observeSRv6(record model.Tunnel) (core.Observation, error) {
+	if !record.Enabled {
+		return b.observeSRv6Desired(record, nil)
+	}
+	underlay, err := b.netlink.LinkByName(record.Spec.SRv6.UnderlayInterface)
+	if err != nil {
+		return core.Observation{}, fmt.Errorf("%w: lookup SRv6 underlay %s: %v", core.ErrDriftDetected, record.Spec.SRv6.UnderlayInterface, err)
+	}
+	routes, skipped, err := b.loadCachedSRv6Feeds(record)
+	if err != nil {
+		return core.Observation{}, err
+	}
+	desired, err := b.buildSRv6Routes(record, underlay, routes)
+	if err != nil {
+		return core.Observation{}, err
+	}
+	observation, observeErr := b.observeSRv6Desired(record, desired)
+	if observation.Details == nil {
+		observation.Details = make(map[string]string)
+	}
+	observation.Details["skipped_prefixes"] = strconv.Itoa(skipped)
+	return observation, observeErr
+}
+
+func (b *Backend) observeSRv6Desired(record model.Tunnel, desired []netlink.Route) (core.Observation, error) {
 	spec := record.Spec.SRv6
 	routes, err := b.netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{Table: spec.Table}, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		return core.Observation{}, err
 	}
-	managed := 0
+	wanted := make(map[string]netlink.Route, len(desired))
+	for _, route := range desired {
+		wanted[routeKey(route)] = route
+	}
+	ownershipDesired := wanted
+	if len(wanted) == 0 {
+		ownershipDesired = b.cachedSRv6RemovalRoutes(record)
+	}
+	currentByKey := make(map[string][]netlink.Route, len(routes))
+	managed, missing, mismatched, stale, conflicts := 0, 0, 0, 0, 0
 	for _, route := range routes {
-		if routeOwnedByRecord(record, route) {
+		currentByKey[routeKey(route)] = append(currentByKey[routeKey(route)], route)
+		if srv6RouteOwnedForDesired(record, route, ownershipDesired) {
 			managed++
 		}
 	}
-	return core.Observation{Details: map[string]string{
-		"table":          strconv.Itoa(spec.Table),
-		"managed_routes": strconv.Itoa(managed),
-	}}, nil
+	for key, route := range wanted {
+		owned, exact, foreign := 0, 0, 0
+		for _, current := range currentByKey[key] {
+			if !srv6RouteOwnedForDesired(record, current, wanted) {
+				foreign++
+				continue
+			}
+			owned++
+			if equalSRv6ManagedRoute(current, route) {
+				exact++
+			}
+		}
+		if exact == 0 {
+			if owned == 0 {
+				missing++
+			} else {
+				mismatched++
+			}
+		}
+		if owned > 1 {
+			stale += owned - 1
+		}
+		conflicts += foreign
+	}
+	for _, route := range routes {
+		if !srv6RouteOwnedForDesired(record, route, ownershipDesired) {
+			continue
+		}
+		if _, expected := wanted[routeKey(route)]; !expected {
+			stale++
+		}
+	}
+
+	families := desiredSRv6Families(desired)
+	expectedRules, presentRules, missingRules, staleRules := len(families), 0, 0, 0
+	for _, family := range []int{netlink.FAMILY_V4, netlink.FAMILY_V6} {
+		rules, listErr := b.netlink.RuleList(family)
+		if listErr != nil {
+			return core.Observation{}, listErr
+		}
+		_, needed := families[family]
+		present := false
+		for i := range rules {
+			rule := &rules[i]
+			if rule.Protocol == managedRouteProtocol && rule.Table == spec.Table && rule.Priority != spec.RulePriority {
+				staleRules++
+				continue
+			}
+			if rule.Priority != spec.RulePriority {
+				continue
+			}
+			if rule.Protocol == managedRouteProtocol && needed && rule.Table == spec.Table && !present {
+				present = true
+				presentRules++
+				continue
+			}
+			staleRules++
+		}
+		if needed && !present {
+			missingRules++
+		}
+	}
+	details := map[string]string{
+		"table":                 strconv.Itoa(spec.Table),
+		"rule_priority":         strconv.Itoa(spec.RulePriority),
+		"managed_routes":        strconv.Itoa(managed),
+		"expected_routes":       strconv.Itoa(len(desired)),
+		"route_conflicts":       strconv.Itoa(conflicts),
+		"policy_rules":          strconv.Itoa(presentRules),
+		"expected_policy_rules": strconv.Itoa(expectedRules),
+	}
+	observation := core.Observation{Details: details}
+	if spec.RulePriority >= model.MainRulePriority {
+		return observation, fmt.Errorf("%w: SRv6 policy-rule priority %d does not precede main priority %d", core.ErrDriftDetected, spec.RulePriority, model.MainRulePriority)
+	}
+	if missing != 0 || mismatched != 0 || stale != 0 || conflicts != 0 || missingRules != 0 || staleRules != 0 {
+		return observation, fmt.Errorf(
+			"%w: SRv6 routes missing=%d mismatched=%d stale=%d conflicts=%d; policy rules missing=%d stale=%d",
+			core.ErrDriftDetected, missing, mismatched, stale, conflicts, missingRules, staleRules,
+		)
+	}
+	return observation, nil
+}
+
+func desiredSRv6Families(routes []netlink.Route) map[int]struct{} {
+	families := make(map[int]struct{})
+	for _, route := range routes {
+		family := netlink.FAMILY_V6
+		if route.Dst != nil && route.Dst.IP.To4() != nil {
+			family = netlink.FAMILY_V4
+		}
+		families[family] = struct{}{}
+	}
+	return families
 }

@@ -2,15 +2,56 @@ package app
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/TunnelHelper/TH/internal/control"
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/TunnelHelper/TH/internal/ui"
 )
+
+func TestDashboardRefreshUsesReadOnlyListEndpoint(t *testing.T) {
+	var observeCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/tunnels", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"tunnels": []model.TunnelView{{Tunnel: model.Tunnel{ID: "one", Name: "one"}}}})
+	})
+	mux.HandleFunc("POST /v1/observe", func(writer http.ResponseWriter, _ *http.Request) {
+		observeCalls.Add(1)
+		writer.WriteHeader(http.StatusNoContent)
+	})
+	socketPath := filepath.Join(t.TempDir(), "th.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: mux}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	})
+	client := control.NewClient(socketPath, time.Second)
+	t.Cleanup(client.CloseIdleConnections)
+	message, ok := (dashboardModel{ctx: context.Background(), client: client, timeout: time.Second}).loadViews()().(dashboardViewsMsg)
+	if !ok || message.err != nil || len(message.views) != 1 {
+		t.Fatalf("dashboard refresh = %#v", message)
+	}
+	if observeCalls.Load() != 0 {
+		t.Fatalf("dashboard refresh called observe %d times", observeCalls.Load())
+	}
+}
 
 func TestDashboardUpsertSortAndDelete(t *testing.T) {
 	modelState := dashboardModel{views: []model.TunnelView{{Tunnel: model.Tunnel{ID: "b", Name: "bravo"}}}}
