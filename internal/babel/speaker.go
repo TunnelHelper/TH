@@ -100,8 +100,20 @@ func (c *SpeakerConfig) SetDefaults() error {
 	if c.DelayMaxPenalty == 0 {
 		c.DelayMaxPenalty = DefaultDelayMaxPenalty
 	}
-	if c.DelaySmoothingAlpha <= 0 || c.DelaySmoothingAlpha > 1 {
-		c.DelaySmoothingAlpha = DefaultDelayAlpha
+	if c.DelayProbeInterval <= 0 {
+		c.DelayProbeInterval = DefaultDelayProbeInterval
+	}
+	if c.DelaySmoothingTimeConstant <= 0 {
+		c.DelaySmoothingTimeConstant = DefaultDelaySmoothingTimeConstant
+	}
+	if c.DelaySampleMaxAge <= c.DelayProbeInterval {
+		c.DelaySampleMaxAge = DefaultDelaySampleMaxAge
+	}
+	if c.DelayWarmupSamples == 0 {
+		c.DelayWarmupSamples = DefaultDelayWarmupSamples
+	}
+	if c.DelayMinWindow <= 0 {
+		c.DelayMinWindow = DefaultDelayMinWindow
 	}
 	if c.BottleneckPenalty < 0 {
 		c.BottleneckPenalty = 0
@@ -301,13 +313,15 @@ func (s *Speaker) Advertise(pfx netip.Prefix, metric proto.Metric) error {
 				SeqNo:    seqno,
 				Metric:   int(metric),
 			},
-			AdvertisedMetric: metric,
-			Metric:           metric,
-			SmoothedMetric:   metric,
-			SeqNo:            seqno,
-			Feasible:         true,
-			Local:            true,
-			PathRTTMicros:    0,
+			AdvertisedMetric:    metric,
+			Metric:              metric,
+			SmoothedMetric:      metric,
+			SeqNo:               seqno,
+			Feasible:            true,
+			Local:               true,
+			PathRTTMicros:       0,
+			PathJitterMicros:    -1,
+			PathMetricAgeMillis: -1,
 		}
 		s.Routes.Insert(r)
 		s.logger.Info("Added local route", slog.String("prefix", pfx.String()), slog.Int("metric", int(metric)))
@@ -387,15 +401,22 @@ func (s *Speaker) SetNeighbourCost(ifName string, addr netip.Addr, cost proto.Me
 // raw signal the data plane uses for weighted-ECMP decisions, independent
 // of the bounded protocol cost.
 func (s *Speaker) NeighbourRTT(ifName string, addr netip.Addr) (time.Duration, bool) {
+	stats, ok := s.NeighbourDelayStats(ifName, addr)
+	return stats.Mean, ok && stats.Samples > 0
+}
+
+// NeighbourDelayStats returns a consistent delay estimator snapshot for a
+// neighbour so data-plane scoring sees mean, jitter and freshness together.
+func (s *Speaker) NeighbourDelayStats(ifName string, addr netip.Addr) (DelayStats, bool) {
 	i, ok := s.Interfaces.LookupByName(ifName)
 	if !ok {
-		return 0, false
+		return DelayStats{}, false
 	}
 	n, ok := i.Neighbours.Lookup(addr)
 	if !ok {
-		return 0, false
+		return DelayStats{}, false
 	}
-	return n.RTT(), n.HasRTT()
+	return n.DelayStats(), true
 }
 
 func (s *Speaker) runSweep() {
@@ -467,6 +488,13 @@ func (s *Speaker) afterSelection(res selectionResult) {
 	s.sendTriggeredUpdates(res.updates, res.retractions, res.urgent)
 }
 
+func (s *Speaker) notifyRouteMetricsChanged() {
+	select {
+	case s.routeChanged <- struct{}{}:
+	default:
+	}
+}
+
 // sendTriggeredUpdates implements RFC 8966 Section 3.7.2. Updates are
 // subject to split horizon; retractions are sent on every interface.
 func (s *Speaker) sendTriggeredUpdates(updates, retractions []*Route, urgent bool) {
@@ -512,9 +540,11 @@ func (s *Speaker) advertisedRoutes(iface *Interface) (updates, retractions []*Ro
 
 // encodeRoutes builds the RouterId/NextHop/Update TLV sequence for the
 // given routes, updating source-table feasibility distances first.
-func (s *Speaker) encodeRoutes(iface *Interface, routes []*Route, rttMicros int64) []proto.Value {
+func (s *Speaker) encodeRoutes(iface *Interface, routes []*Route, linkStats DelayStats) []proto.Value {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now()
+	linkQuality := delayStatsPathQuality(linkStats, now, s.config.DelayWarmupSamples, s.config.DelaySampleMaxAge)
 
 	values := make([]proto.Value, 0, len(routes)*3)
 	var linkLocal netip.Addr
@@ -544,19 +574,23 @@ func (s *Speaker) encodeRoutes(iface *Interface, routes []*Route, rttMicros int6
 		v4ViaV6 := isV4 && !interfaceV4.IsValid()
 
 		if r.Local {
+			quality := linkQuality
 			values = append(values, &proto.RouterIDValue{RouterID: s.config.RouterID})
 			if nextHop.IsValid() {
 				values = append(values, &proto.NextHop{NextHop: nextHop})
 			}
 			s.sourceFeasibilityLocked(r.Source.Prefix, s.config.RouterID, r.SeqNo, int(r.AdvertisedMetric))
 			values = append(values, &proto.Update{
-				Prefix:             r.Source.Prefix,
-				Seqno:              r.SeqNo,
-				Metric:             r.AdvertisedMetric,
-				Interval:           s.config.UpdateInterval,
-				V4ViaV6:            v4ViaV6,
-				PathBottleneckMbps: iface.bandwidthMbps,
-				PathRTTMicros:      rttMicros,
+				Prefix:               r.Source.Prefix,
+				Seqno:                r.SeqNo,
+				Metric:               r.AdvertisedMetric,
+				Interval:             s.config.UpdateInterval,
+				V4ViaV6:              v4ViaV6,
+				PathBottleneckMbps:   iface.bandwidthMbps,
+				PathRTTMicros:        quality.rttMicros,
+				PathJitterMicros:     quality.jitterMicros,
+				PathMetricAgeMillis:  quality.ageMillis,
+				PathMetricConfidence: quality.confidenceQ16,
 			})
 			continue
 		}
@@ -577,18 +611,18 @@ func (s *Speaker) encodeRoutes(iface *Interface, routes []*Route, rttMicros int6
 		case iface.bandwidthMbps > 0:
 			bottleneckOut = iface.bandwidthMbps
 		}
-		rttOut := rttMicros
-		if r.PathRTTMicros > 0 {
-			rttOut += r.PathRTTMicros
-		}
+		quality := composePathDelay(routePathDelayQuality(r, now), linkQuality)
 		values = append(values, &proto.Update{
-			Prefix:             r.Source.Prefix,
-			Seqno:              r.SeqNo,
-			Metric:             r.Metric,
-			Interval:           s.config.UpdateInterval,
-			V4ViaV6:            v4ViaV6,
-			PathBottleneckMbps: bottleneckOut,
-			PathRTTMicros:      rttOut,
+			Prefix:               r.Source.Prefix,
+			Seqno:                r.SeqNo,
+			Metric:               r.Metric,
+			Interval:             s.config.UpdateInterval,
+			V4ViaV6:              v4ViaV6,
+			PathBottleneckMbps:   bottleneckOut,
+			PathRTTMicros:        quality.rttMicros,
+			PathJitterMicros:     quality.jitterMicros,
+			PathMetricAgeMillis:  quality.ageMillis,
+			PathMetricConfidence: quality.confidenceQ16,
 		})
 	}
 	return values
@@ -689,14 +723,18 @@ func (s *Speaker) onUpdateReceived(n *Neighbour, upd *proto.Update) {
 					SeqNo:    upd.Seqno,
 					Metric:   int(upd.Metric),
 				},
-				Neighbour:          n,
-				AdvertisedMetric:   upd.Metric,
-				SeqNo:              upd.Seqno,
-				NextHop:            nextHop,
-				Feasible:           true,
-				Expiry:             time.Now().Add(s.config.RouteExpiryTime),
-				PathBottleneckMbps: upd.PathBottleneckMbps,
-				PathRTTMicros:      upd.PathRTTMicros,
+				Neighbour:             n,
+				AdvertisedMetric:      upd.Metric,
+				SeqNo:                 upd.Seqno,
+				NextHop:               nextHop,
+				Feasible:              true,
+				Expiry:                time.Now().Add(s.config.RouteExpiryTime),
+				PathBottleneckMbps:    upd.PathBottleneckMbps,
+				PathRTTMicros:         upd.PathRTTMicros,
+				PathJitterMicros:      upd.PathJitterMicros,
+				PathMetricAgeMillis:   upd.PathMetricAgeMillis,
+				PathMetricConfidence:  upd.PathMetricConfidence,
+				PathMetricsReceivedAt: time.Now(),
 			}
 			s.Routes.Insert(r)
 			s.logger.Info("Learnt route",
@@ -716,6 +754,10 @@ func (s *Speaker) onUpdateReceived(n *Neighbour, upd *proto.Update) {
 			r.Expired = false
 			r.PathBottleneckMbps = upd.PathBottleneckMbps
 			r.PathRTTMicros = upd.PathRTTMicros
+			r.PathJitterMicros = upd.PathJitterMicros
+			r.PathMetricAgeMillis = upd.PathMetricAgeMillis
+			r.PathMetricConfidence = upd.PathMetricConfidence
+			r.PathMetricsReceivedAt = time.Now()
 			if upd.NextHop.IsValid() {
 				r.NextHop = upd.NextHop
 			}
@@ -825,16 +867,6 @@ func (s *Speaker) runSelectionLocked() selectionResult {
 			}
 			cost := r.Neighbour.Cost()
 			r.Metric = s.costProvider.Metric(cost, r.AdvertisedMetric)
-			if s.config.BottleneckPenalty > 0 && r.PathBottleneckMbps > 0 && r.Metric != proto.Retraction {
-				penalty := uint16(s.config.BottleneckPenalty / float64(r.PathBottleneckMbps))
-				if penalty > 0 {
-					if int(r.Metric)+int(penalty) > int(proto.Retraction)-1 {
-						r.Metric = proto.Retraction - 1
-					} else {
-						r.Metric += penalty
-					}
-				}
-			}
 			r.updateSmoothedMetric(s.config.SmoothingAlpha)
 			if r.Feasible && r.Metric != proto.Retraction {
 				candidates = append(candidates, r)
@@ -969,13 +1001,19 @@ func (s *Speaker) exportCandidatesLocked(pfx netip.Prefix, selected *Route) []*R
 		limit = 1
 	}
 	slack := int(s.config.MultipathSlack)
+	bestMetric := selected.Metric
+	for _, r := range s.Routes.ForPrefix(pfx) {
+		if r.Feasible && r.Metric != proto.Retraction && r.Metric < bestMetric {
+			bestMetric = r.Metric
+		}
+	}
 	candidates := make([]*Route, 0, limit)
 	candidates = append(candidates, selected)
 	for _, r := range s.Routes.ForPrefix(pfx) {
 		if r == selected || !r.Feasible || r.Metric == proto.Retraction {
 			continue
 		}
-		if int(r.Metric) > int(selected.Metric)+slack {
+		if int(r.Metric) > int(bestMetric)+slack {
 			continue
 		}
 		candidates = append(candidates, r)
@@ -997,15 +1035,19 @@ func (s *Speaker) exportForPrefixLocked(pfx netip.Prefix, selected *Route) []Sel
 		if r.Neighbour != nil {
 			ifName = r.Neighbour.intf.Name
 		}
+		quality := routePathDelayQuality(r, time.Now())
 		out = append(out, SelectedRoute{
-			Prefix:         r.Source.Prefix,
-			RouterID:       r.Source.RouterID,
-			NextHop:        r.NextHop,
-			Interface:      ifName,
-			Metric:         r.Metric,
-			Local:          r.Local,
-			BottleneckMbps: r.PathBottleneckMbps,
-			PathRTTMicros:  r.PathRTTMicros,
+			Prefix:               r.Source.Prefix,
+			RouterID:             r.Source.RouterID,
+			NextHop:              r.NextHop,
+			Interface:            ifName,
+			Metric:               r.Metric,
+			Local:                r.Local,
+			BottleneckMbps:       r.PathBottleneckMbps,
+			PathRTTMicros:        quality.rttMicros,
+			PathJitterMicros:     quality.jitterMicros,
+			PathMetricAgeMillis:  quality.ageMillis,
+			PathMetricConfidence: quality.confidenceQ16,
 		})
 	}
 	return out
@@ -1015,7 +1057,7 @@ func (s *Speaker) exportFingerprintLocked(pfx netip.Prefix, selected *Route) str
 	exported := s.exportForPrefixLocked(pfx, selected)
 	parts := make([]string, 0, len(exported))
 	for _, r := range exported {
-		parts = append(parts, fmt.Sprintf("%s|%s|%s|%d", r.Prefix, r.NextHop, r.Interface, r.Metric))
+		parts = append(parts, fmt.Sprintf("%s|%s|%s|%d|%d|%d|%d|%d", r.Prefix, r.NextHop, r.Interface, r.Metric, r.BottleneckMbps, r.PathRTTMicros, r.PathJitterMicros, r.PathMetricConfidence))
 	}
 	return strings.Join(parts, ",")
 }

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -161,7 +162,7 @@ func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
 			if health.Mptcp != test.mptcp {
 				t.Fatalf("Mptcp health = %+v, want %+v", health.Mptcp, test.mptcp)
 			}
-			if health.Babel != test.babel {
+			if !reflect.DeepEqual(health.Babel, test.babel) {
 				t.Fatalf("Babel health = %+v, want %+v", health.Babel, test.babel)
 			}
 		})
@@ -228,7 +229,8 @@ func TestEventStreamSendsReplayAndLiveEvents(t *testing.T) {
 }
 
 func TestSettingsAPI(t *testing.T) {
-	manager := &stubManager{}
+	defaults := config.Defaults()
+	manager := &stubManager{babelSettings: defaults.Babel, mptcpSettings: defaults.Mptcp}
 	server := httptest.NewServer(NewServer(manager).Handler())
 	defer server.Close()
 
@@ -267,6 +269,12 @@ func TestSettingsAPI(t *testing.T) {
 	}
 	if manager.babelSettings.RouterID != "0011223344556677" {
 		t.Fatal("manager must receive the updated settings")
+	}
+	if manager.babelSettings.DelayProbeIntervalMillis != defaults.Babel.DelayProbeIntervalMillis ||
+		manager.babelSettings.DelaySampleMaxAgeMillis != defaults.Babel.DelaySampleMaxAgeMillis ||
+		manager.babelSettings.DelaySmoothingTimeConstantMillis != defaults.Babel.DelaySmoothingTimeConstantMillis ||
+		manager.babelSettings.WeightJitterExponent != defaults.Babel.WeightJitterExponent {
+		t.Fatalf("fields omitted by an older client were not preserved: %+v", manager.babelSettings)
 	}
 	if !manager.mptcpSettings.Enabled || manager.mptcpSettings.Scheduler != "roundrobin" {
 		t.Fatalf("manager MPTCP settings = %+v", manager.mptcpSettings)

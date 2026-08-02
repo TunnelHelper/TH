@@ -216,8 +216,11 @@ func (p *Parser) ValueLength(v Value) (l int) {
 		if v.SourcePrefix != nil {
 			l += ValueHeaderLength + 1 + p.prefixLength(*v.SourcePrefix, false)
 		}
-		if v.PathBottleneckMbps != 0 || v.PathRTTMicros != 0 {
+		if v.PathBottleneckMbps != 0 || v.PathRTTMicros > 0 {
 			l += ValueHeaderLength + 8
+		}
+		if v.PathJitterMicros > 0 || v.PathMetricAgeMillis > 0 || v.PathMetricConfidence != 0 {
+			l += ValueHeaderLength + 12
 		}
 	case *RouteRequest:
 		l += 2 + p.prefixLength(v.Prefix, false)
@@ -968,6 +971,8 @@ func (p *Parser) update(b []byte) ([]byte, *Update, error) {
 		return nil, nil, err
 	}
 	v.PathRTTMicros = -1 // absent PathMetrics sub-TLV means unknown
+	v.PathJitterMicros = -1
+	v.PathMetricAgeMillis = -1
 
 	// Decode sub-TLVs
 	if b, err = p.forEachSubValue(b, func(t ValueType, b []byte) ([]byte, error) {
@@ -990,7 +995,24 @@ func (p *Parser) update(b []byte) ([]byte, *Update, error) {
 				return nil, err
 			}
 			v.PathBottleneckMbps = decodeBottleneck(bottleneck)
-			v.PathRTTMicros = int64(rtt)
+			v.PathRTTMicros = decodePathRTT(rtt)
+			return b, nil
+		case SubTypePathQuality:
+			var jitter, age uint32
+			if b, jitter, err = p.uint32(b); err != nil {
+				return nil, err
+			}
+			if b, age, err = p.uint32(b); err != nil {
+				return nil, err
+			}
+			if b, v.PathMetricConfidence, err = p.uint16(b); err != nil {
+				return nil, err
+			}
+			if b, _, err = p.uint16(b); err != nil { // Reserved
+				return nil, err
+			}
+			v.PathJitterMicros = decodePathQualityMetric(jitter)
+			v.PathMetricAgeMillis = decodePathQualityMetric(age)
 			return b, nil
 
 		default:
@@ -1049,8 +1071,11 @@ func (p *Parser) appendUpdate(b []byte, v *Update) []byte {
 	if v.SourcePrefix != nil {
 		b = p.appendSourcePrefix(b, *v.SourcePrefix)
 	}
-	if v.PathBottleneckMbps != 0 || v.PathRTTMicros != 0 {
+	if v.PathBottleneckMbps != 0 || v.PathRTTMicros > 0 {
 		b = p.appendPathMetrics(b, v.PathBottleneckMbps, v.PathRTTMicros)
+	}
+	if v.PathJitterMicros > 0 || v.PathMetricAgeMillis > 0 || v.PathMetricConfidence != 0 {
+		b = p.appendPathQuality(b, v.PathJitterMicros, v.PathMetricAgeMillis, v.PathMetricConfidence)
 	}
 
 	return b
@@ -1226,15 +1251,64 @@ func decodeBottleneck(encoded uint32) int {
 	if encoded == pathMetricsUnset {
 		return 0
 	}
+	if uint64(encoded) > uint64(math.MaxInt) {
+		return math.MaxInt
+	}
 	return int(encoded)
+}
+
+func encodePathRTT(micros int64) uint32 {
+	if micros < 0 {
+		return pathMetricsUnset
+	}
+	if micros >= int64(pathMetricsUnset) {
+		return pathMetricsUnset - 1
+	}
+	return uint32(micros)
+}
+
+func decodePathRTT(encoded uint32) int64 {
+	if encoded == pathMetricsUnset {
+		return -1
+	}
+	return int64(encoded)
+}
+
+func encodePathQualityMetric(value int64) uint32 {
+	if value < 0 {
+		return pathMetricsUnset
+	}
+	if value >= int64(pathMetricsUnset) {
+		return pathMetricsUnset - 1
+	}
+	return uint32(value)
+}
+
+func decodePathQualityMetric(encoded uint32) int64 {
+	if encoded == pathMetricsUnset {
+		return -1
+	}
+	return int64(encoded)
 }
 
 // appendPathMetrics encodes the TH PathMetrics sub-TLV: a 32-bit bottleneck
 // bandwidth (Mbps, 0xffffffff = unlimited) followed by the wrapped 32-bit
-// accumulated path RTT in microseconds.
+// accumulated path RTT in microseconds (0xffffffff = unknown).
 func (p *Parser) appendPathMetrics(b []byte, bottleneckMbps int, rttMicros int64) []byte {
 	return p.appendValueHeader(b, SubTypePathMetrics, func(b []byte) []byte {
 		b = p.appendUint32(b, encodeBottleneck(bottleneckMbps))
-		return p.appendUint32(b, uint32(rttMicros))
+		return p.appendUint32(b, encodePathRTT(rttMicros))
+	})
+}
+
+// appendPathQuality encodes volatile quality separately from PathMetrics so
+// older TH versions that understand the original fixed-size extension can
+// ignore this new non-mandatory sub-TLV safely.
+func (p *Parser) appendPathQuality(b []byte, jitterMicros, ageMillis int64, confidence uint16) []byte {
+	return p.appendValueHeader(b, SubTypePathQuality, func(b []byte) []byte {
+		b = p.appendUint32(b, encodePathQualityMetric(jitterMicros))
+		b = p.appendUint32(b, encodePathQualityMetric(ageMillis))
+		b = p.appendUint16(b, confidence)
+		return p.appendUint16(b, 0)
 	})
 }

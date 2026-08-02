@@ -190,6 +190,27 @@ func TestDashboardPeerDetailsShowLiveHandshakeAndBothCounterSources(t *testing.T
 	}
 }
 
+func TestDashboardRendersBabelDelayPeerWithoutWireGuardNoise(t *testing.T) {
+	rtt, jitter, age, confidence, fresh := int64(12_000), int64(2_000), int64(300), 0.9, true
+	view := model.TunnelView{
+		Tunnel: model.Tunnel{Name: "wg", Kind: model.KindWireGuard},
+		Status: model.Status{Peers: []model.PeerStatus{{
+			Protocol: "babel", PublicKey: "fe80::1", Endpoint: "wg0",
+			RTTMicros: &rtt, JitterMicros: &jitter, MetricAgeMillis: &age,
+			MetricConfidence: &confidence, MetricFresh: &fresh,
+		}}},
+	}
+	lines := strings.Join((dashboardModel{views: []model.TunnelView{view}}).peerLines(100), "\n")
+	for _, expected := range []string{"Babel neighbor fe80::1", "RTT 12ms", "jitter 2ms", "90% fresh"} {
+		if !strings.Contains(lines, expected) {
+			t.Fatalf("Babel peer details missing %q:\n%s", expected, lines)
+		}
+	}
+	if strings.Contains(lines, "Handshake:") || strings.Contains(lines, "WG transfer") {
+		t.Fatalf("Babel peer rendered unrelated WireGuard fields:\n%s", lines)
+	}
+}
+
 func TestDashboardPeerDetailsRemainReachableThroughViewport(t *testing.T) {
 	peers := make([]model.PeerStatus, 3)
 	for index := range peers {

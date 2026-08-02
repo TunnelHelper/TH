@@ -61,6 +61,7 @@ const (
 	SubTypeDiversity                    // draft-chroboczek-babel-diversity-routing
 	SubTypeTimestamp                    // draft-jonglez-babel-rtt-extension
 	SubTypePathMetrics                  // TH extension: end-to-end bottleneck bandwidth and path RTT
+	SubTypePathQuality                  // TH extension: path jitter, sample age and confidence
 
 	SubTypeSourcePrefix ValueType = 128 //	RFC 9079
 )

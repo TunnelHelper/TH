@@ -11,7 +11,8 @@ MPTCP**。默认关闭，能力检测失败时优雅降级，不影响 Babel 和
 TH 已经具备：
 
 - 隧道生命周期管理（创建/删除/启停、地址、路由、ownership）；
-- Babel 加权 ECMP：`w ∝ bottleneck^α / rtt^β` 写入内核 nexthop weight；
+- Babel 加权 ECMP：无量纲 bandwidth/RTT/jitter/confidence score 写入内核
+  nexthop weight；
 - 一套“desired state + reconcile”的 daemon 架构（`/var/lib/th` 为唯一事实源）。
 
 MPTCP 单流聚合（应用单线程同时使用多条隧道）依赖三层配合：

@@ -6,6 +6,7 @@ package proto
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 	"net/netip"
 	"reflect"
 	"testing"
@@ -352,6 +353,47 @@ func TestParserPathMetricsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParserPathQualityRoundTrip(t *testing.T) {
+	p := NewParser()
+	prefix := netip.MustParsePrefix("10.0.0.0/16")
+	b := p.AppendValue(nil, &Update{
+		Prefix: prefix, Seqno: 1, Metric: 100, Interval: time.Second,
+		PathRTTMicros:        5000,
+		PathJitterMicros:     700,
+		PathMetricAgeMillis:  1200,
+		PathMetricConfidence: 49151,
+	})
+	p.Reset()
+	_, values, err := p.Values(b, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := values[0].(*Update)
+	if update.PathJitterMicros != 700 || update.PathMetricAgeMillis != 1200 || update.PathMetricConfidence != 49151 {
+		t.Fatalf("path quality = (%d, %d, %d)", update.PathJitterMicros, update.PathMetricAgeMillis, update.PathMetricConfidence)
+	}
+}
+
+func TestParserPathQualityPreservesUnknownAndSaturates(t *testing.T) {
+	p := NewParser()
+	prefix := netip.MustParsePrefix("10.0.0.0/16")
+	b := p.AppendValue(nil, &Update{
+		Prefix: prefix, Seqno: 1, Metric: 100, Interval: time.Second,
+		PathJitterMicros:     -1,
+		PathMetricAgeMillis:  int64(math.MaxUint32) + 100,
+		PathMetricConfidence: 1,
+	})
+	p.Reset()
+	_, values, err := p.Values(b, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := values[0].(*Update)
+	if update.PathJitterMicros != -1 || update.PathMetricAgeMillis != int64(math.MaxUint32-1) {
+		t.Fatalf("path quality unknown/saturation = (%d, %d)", update.PathJitterMicros, update.PathMetricAgeMillis)
+	}
+}
+
 func TestParserPathMetricsUnsetBottleneck(t *testing.T) {
 	p := NewParser()
 	prefix := netip.MustParsePrefix("10.0.0.0/16")
@@ -368,6 +410,28 @@ func TestParserPathMetricsUnsetBottleneck(t *testing.T) {
 	update := values[0].(*Update)
 	if update.PathBottleneckMbps != 0 || update.PathRTTMicros != 1000 {
 		t.Fatalf("unset bottleneck must decode as 0, got (%d, %d)", update.PathBottleneckMbps, update.PathRTTMicros)
+	}
+	if got := decodeBottleneck(math.MaxUint32 - 1); got <= 0 {
+		t.Fatalf("large remote bottleneck overflowed int: %d", got)
+	}
+}
+
+func TestParserPathMetricsUnsetRTT(t *testing.T) {
+	p := NewParser()
+	prefix := netip.MustParsePrefix("10.0.0.0/16")
+	b := p.AppendValue(nil, &Update{
+		Prefix: prefix, Seqno: 1, Metric: 100, Interval: time.Second,
+		PathBottleneckMbps: 10,
+		PathRTTMicros:      -1,
+	})
+	p.Reset()
+	_, values, err := p.Values(b, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := values[0].(*Update)
+	if update.PathBottleneckMbps != 10 || update.PathRTTMicros != -1 {
+		t.Fatalf("unset RTT must remain unknown, got (%d, %d)", update.PathBottleneckMbps, update.PathRTTMicros)
 	}
 }
 
@@ -388,7 +452,7 @@ func TestParserIgnoresUnknownSubTLV(t *testing.T) {
 	}
 
 	// An unknown non-mandatory sub-TLV is silently ignored.
-	b := buildUpdate(5)
+	b := buildUpdate(6)
 	p.Reset()
 	if _, _, err := p.Values(b, false); err != nil {
 		t.Fatalf("unknown non-mandatory sub-TLV must be ignored: %v", err)
@@ -509,6 +573,8 @@ func TestParserValuesRoundTrip(t *testing.T) {
 			// zero value used by the test inputs represents the same state.
 			if update, ok := decoded.(*Update); ok && update.PathRTTMicros == -1 {
 				update.PathRTTMicros = 0
+				update.PathJitterMicros = 0
+				update.PathMetricAgeMillis = 0
 			}
 			if typ != tc.typ {
 				t.Errorf("type = %d, want %d", typ, tc.typ)

@@ -37,6 +37,15 @@ const babelRoutePriority = 1
 // changes must be slow and deliberate.
 const babelWeightCooldown = 60 * time.Second
 
+const (
+	babelReferenceBandwidthMbps = 100.0
+	babelReferenceRTTMicros     = 10_000.0
+	babelReferenceJitterMicros  = 5_000.0
+	babelUnknownRTTMicros       = 120_000.0
+	babelUnknownJitterMicros    = 20_000.0
+	babelMinimumConfidence      = 0.10
+)
+
 // babelTunnel is the engine's view of one participating tunnel.
 type babelTunnel struct {
 	recordID      string
@@ -46,6 +55,35 @@ type babelTunnel struct {
 	balance       *float64
 	neighbours    []netip.Addr
 	multicast     bool
+}
+
+type babelWeightState struct {
+	installed           string
+	lastChange          time.Time
+	pending             string
+	pendingObservations int
+}
+
+func (s *babelWeightState) shouldApply(desired string, now time.Time) bool {
+	if s.installed != "" && weightsWithinTolerance(s.installed, desired) {
+		s.pending = ""
+		s.pendingObservations = 0
+		return false
+	}
+	if s.pending == "" || !weightsWithinTolerance(s.pending, desired) {
+		s.pending = desired
+		s.pendingObservations = 1
+		return false
+	}
+	s.pendingObservations++
+	return s.pendingObservations >= 2 && (s.lastChange.IsZero() || now.Sub(s.lastChange) >= babelWeightCooldown)
+}
+
+func (s *babelWeightState) applied(fingerprint string, now time.Time) {
+	s.installed = fingerprint
+	s.lastChange = now
+	s.pending = ""
+	s.pendingObservations = 0
 }
 
 func (t babelTunnel) fingerprint() string {
@@ -69,17 +107,21 @@ type babelEngine struct {
 	settings config.BabelSettings
 	table    int
 
-	reconcileMu      sync.Mutex
-	mu               sync.Mutex
-	eventTable       atomic.Int64
-	speaker          *babel.Speaker
-	tunnels          map[string]babelTunnel
-	built            string // fingerprint of the tunnels the current speaker was built from
-	routerID         [8]byte
-	lastWeightChange time.Time
-	lastWeights      map[string]string
+	reconcileMu  sync.Mutex
+	mu           sync.Mutex
+	eventTable   atomic.Int64
+	speaker      *babel.Speaker
+	tunnels      map[string]babelTunnel
+	built        string // fingerprint of the tunnels the current speaker was built from
+	routerID     [8]byte
+	weightStates map[string]*babelWeightState
 
 	advertised map[netip.Prefix]struct{}
+
+	// forceWeightRefresh bypasses measurement-noise damping for an explicit
+	// operator change to the global weighting policy. It is protected by
+	// reconcileMu and remains set after a failed netlink update for retry.
+	forceWeightRefresh bool
 }
 
 func newBabelEngine(backend *Backend) (*babelEngine, error) {
@@ -93,13 +135,13 @@ func newBabelEngine(backend *Backend) (*babelEngine, error) {
 		table = unix.RT_TABLE_MAIN
 	}
 	engine := &babelEngine{
-		backend:     backend,
-		settings:    settings,
-		table:       table,
-		tunnels:     make(map[string]babelTunnel),
-		routerID:    routerID,
-		advertised:  make(map[netip.Prefix]struct{}),
-		lastWeights: make(map[string]string),
+		backend:      backend,
+		settings:     settings,
+		table:        table,
+		tunnels:      make(map[string]babelTunnel),
+		routerID:     routerID,
+		advertised:   make(map[netip.Prefix]struct{}),
+		weightStates: make(map[string]*babelWeightState),
 	}
 	engine.eventTable.Store(int64(table))
 	return engine, nil
@@ -142,9 +184,93 @@ func randomBabelRouterIDBytes() ([8]byte, error) {
 // health reports the router ID the running speaker actually uses, which is
 // the persisted auto-generated value when the configuration is empty.
 func (e *babelEngine) health() core.BabelHealth {
+	e.reconcileMu.Lock()
+	defer e.reconcileMu.Unlock()
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	return core.BabelHealth{RouterID: hex.EncodeToString(e.routerID[:])}
+	routerID := hex.EncodeToString(e.routerID[:])
+	speaker := e.speaker
+	table := e.table
+	maxAge := e.settings.DelaySampleMaxAge()
+	e.mu.Unlock()
+	health := core.BabelHealth{RouterID: routerID}
+	if speaker == nil {
+		return health
+	}
+	now := time.Now()
+	_ = speaker.Interfaces.Foreach(func(_ int, iface *babel.Interface) error {
+		return iface.Neighbours.Foreach(func(n *babel.Neighbour) error {
+			stats := n.DelayStats()
+			health.Neighbours = append(health.Neighbours, core.BabelNeighbourHealth{
+				Interface: iface.Name, Address: n.Address.String(),
+				RTTMicros: stats.Mean.Microseconds(), JitterMicros: stats.Jitter().Microseconds(),
+				MinRTTMicros: stats.Min.Microseconds(), AgeMillis: stats.Age(now).Milliseconds(),
+				Samples: stats.Samples, Outliers: stats.OutlierSamples,
+				Confidence: stats.Confidence(now, babel.DefaultDelayWarmupSamples, maxAge),
+				Fresh:      stats.Fresh(now, babel.DefaultDelayWarmupSamples, maxAge),
+			})
+			return nil
+		})
+	})
+	sort.Slice(health.Neighbours, func(i, j int) bool {
+		if health.Neighbours[i].Interface != health.Neighbours[j].Interface {
+			return health.Neighbours[i].Interface < health.Neighbours[j].Interface
+		}
+		return health.Neighbours[i].Address < health.Neighbours[j].Address
+	})
+	health.Routes = e.routeHealthLocked(speaker.SelectedRoutes(), table)
+	return health
+}
+
+func (e *babelEngine) routeHealthLocked(selected []babel.SelectedRoute, table int) []core.BabelRouteHealth {
+	byPrefix := make(map[netip.Prefix][]babel.SelectedRoute)
+	for _, route := range selected {
+		if !route.Local {
+			byPrefix[route.Prefix.Masked()] = append(byPrefix[route.Prefix.Masked()], route)
+		}
+	}
+	prefixes := make([]netip.Prefix, 0, len(byPrefix))
+	for prefix := range byPrefix {
+		prefixes = append(prefixes, prefix)
+	}
+	sort.Slice(prefixes, func(i, j int) bool { return prefixes[i].String() < prefixes[j].String() })
+	out := make([]core.BabelRouteHealth, 0, len(selected))
+	for _, prefix := range prefixes {
+		candidates := byPrefix[prefix]
+		sort.SliceStable(candidates, func(i, j int) bool {
+			if candidates[i].Metric != candidates[j].Metric {
+				return candidates[i].Metric < candidates[j].Metric
+			}
+			return candidates[i].NextHop.Compare(candidates[j].NextHop) < 0
+		})
+		scores := make([]float64, len(candidates))
+		best := 0.0
+		for i, candidate := range candidates {
+			scores[i] = e.pathScore(candidate)
+			if scores[i] > best && !math.IsInf(scores[i], 0) && !math.IsNaN(scores[i]) {
+				best = scores[i]
+			}
+		}
+		key := routeKey(netlink.Route{Table: table, Dst: prefixToIPNet(prefix)})
+		installed := []int(nil)
+		if state := e.weightStates[key]; state != nil {
+			installed, _, _ = parseWeightFingerprint(state.installed)
+		}
+		for i, candidate := range candidates {
+			confidence := float64(candidate.PathMetricConfidence) / float64(math.MaxUint16)
+			item := core.BabelRouteHealth{
+				Prefix: prefix.String(), Interface: candidate.Interface, NextHop: candidate.NextHop.String(),
+				Metric: candidate.Metric, BottleneckMbps: candidate.BottleneckMbps,
+				RTTMicros: candidate.PathRTTMicros, JitterMicros: candidate.PathJitterMicros,
+				AgeMillis: candidate.PathMetricAgeMillis, Confidence: confidence,
+				Score: scores[i], DesiredWeight: babelWeightFromScores(best, scores[i]),
+			}
+			if i < len(installed) {
+				item.InstalledWeight = installed[i]
+			}
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // upsertTunnel records (or updates) a tunnel's participation. It marks the
@@ -257,8 +383,10 @@ func (e *babelEngine) fingerprintLocked() string {
 		keys = append(keys, id+"="+t.fingerprint())
 	}
 	sort.Strings(keys)
-	return fmt.Sprintf("%s|%x|%v|%d|%s", fmt.Sprint(keys), e.routerID,
-		e.settings.DelayMetricEnabled(), e.settings.UnicastHelloSeconds, e.externalFingerprintLocked())
+	return fmt.Sprintf("%s|%x|%v|%d|%d|%d|%d|%s", fmt.Sprint(keys), e.routerID,
+		e.settings.DelayMetricEnabled(), e.settings.UnicastHelloSeconds,
+		e.settings.DelayProbeIntervalMillis, e.settings.DelaySampleMaxAgeMillis,
+		e.settings.DelaySmoothingTimeConstantMillis, e.externalFingerprintLocked())
 }
 
 func (e *babelEngine) externalFingerprintLocked() string {
@@ -278,6 +406,9 @@ func (e *babelEngine) refreshSettings(settings config.BabelSettings) error {
 	e.mu.Lock()
 	previousFingerprint := e.fingerprintLocked()
 	oldTable := e.table
+	weightPolicyChanged := e.settings.WeightBandwidthExponent != settings.WeightBandwidthExponent ||
+		e.settings.WeightRTTExponent != settings.WeightRTTExponent ||
+		e.settings.WeightJitterExponent != settings.WeightJitterExponent
 	if err := e.refreshRouterIDLocked(settings); err != nil {
 		e.mu.Unlock()
 		return err
@@ -296,6 +427,9 @@ func (e *babelEngine) refreshSettings(settings config.BabelSettings) error {
 	}
 	tableChanged := e.table != oldTable
 	e.mu.Unlock()
+	if weightPolicyChanged {
+		e.forceWeightRefresh = true
+	}
 
 	// Route-table changes move the routes to a new table; remove the old
 	// table's owned routes first so nothing is orphaned.
@@ -368,6 +502,9 @@ func (e *babelEngine) buildSpeakerLocked() (*babel.Speaker, error) {
 	params.MaxPaths = maxPaths
 	params.MultipathSlack = uint16(e.settings.MultipathSlack)
 	params.DelayMetric = e.settings.DelayMetricEnabled()
+	params.DelayProbeInterval = e.settings.DelayProbeInterval()
+	params.DelaySampleMaxAge = e.settings.DelaySampleMaxAge()
+	params.DelaySmoothingTimeConstant = e.settings.DelaySmoothingTimeConstant()
 	params.BottleneckPenalty = e.settings.WeightBottleneckPenalty
 
 	cfg := &babel.SpeakerConfig{
@@ -522,41 +659,56 @@ func (e *babelEngine) installRoutes(speaker *babel.Speaker) error {
 		slog.Error("Babel route diff failed", "error", err)
 		return err
 	}
-	weightApplied := false
+	now := time.Now()
 	for i := range replace {
 		route := replace[i]
 		key := routeKey(route)
-		if babelWeightOnlyChange(current, route) {
-			fingerprint := multipathWeightFingerprint(route)
-			if previous, ok := e.lastWeights[key]; ok && weightsWithinTolerance(previous, fingerprint) {
-				// Small weight changes do not rehash in-flight flows.
+		if shouldDampBabelWeightChange(e.forceWeightRefresh, current, route) {
+			desiredFingerprint := multipathWeightFingerprint(route)
+			currentFingerprint := currentMultipathWeightFingerprint(current, key)
+			state := e.weightStates[key]
+			if state == nil {
+				state = &babelWeightState{installed: currentFingerprint}
+				e.weightStates[key] = state
+			} else if state.installed != currentFingerprint {
+				// Netlink is authoritative if an external actor changed the route.
+				state.installed = currentFingerprint
+				state.pending = ""
+				state.pendingObservations = 0
+			}
+			if !state.shouldApply(desiredFingerprint, now) {
 				continue
 			}
-			if time.Since(e.lastWeightChange) < babelWeightCooldown {
-				continue
-			}
-			weightApplied = true
-			e.lastWeights[key] = fingerprint
-		} else {
-			delete(e.lastWeights, key)
 		}
 		if err := e.backend.netlink.RouteReplace(&route); err != nil {
 			slog.Error("Babel route replace failed", "route", routeKey(route), "error", err)
 			return fmt.Errorf("ensure Babel route %s: %w", routeKey(route), err)
 		}
-	}
-	if weightApplied {
-		e.lastWeightChange = time.Now()
+		if len(route.MultiPath) > 0 {
+			state := e.weightStates[key]
+			if state == nil {
+				state = &babelWeightState{}
+				e.weightStates[key] = state
+			}
+			state.applied(multipathWeightFingerprint(route), now)
+		} else {
+			delete(e.weightStates, key)
+		}
 	}
 	for i := range remove {
 		route := remove[i]
-		delete(e.lastWeights, routeKey(route))
+		delete(e.weightStates, routeKey(route))
 		if err := e.backend.netlink.RouteDel(&route); err != nil && !errors.Is(err, unix.ESRCH) {
 			slog.Error("Babel route delete failed", "route", routeKey(route), "error", err)
 			return fmt.Errorf("remove stale Babel route: %w", err)
 		}
 	}
+	e.forceWeightRefresh = false
 	return nil
+}
+
+func shouldDampBabelWeightChange(forceRefresh bool, current []netlink.Route, desired netlink.Route) bool {
+	return !forceRefresh && babelWeightOnlyChange(current, desired)
 }
 
 func (e *babelEngine) bandwidthOf(interfaceName string) int {
@@ -571,17 +723,16 @@ func (e *babelEngine) bandwidthOf(interfaceName string) int {
 }
 
 // pathScore is the raw per-path signal used for weighted ECMP:
-// bandwidth^alpha / rtt^beta. Bandwidth is the operator-declared value;
-// RTT is the smoothed measurement from RFC 9616. Before an RTT sample
-// exists the bandwidth term alone is used.
-// pathScore is the raw per-path signal used for weighted ECMP:
-// bottleneck^alpha / path_rtt^beta, computed from the end-to-end values
-// carried by the route. When a peer does not announce the extension, the
-// local first-hop declared bandwidth and measured neighbour RTT are used.
+// (bottleneck/B0)^alpha / (path_rtt/R0)^beta /
+// (1 + path_jitter/J0)^gamma * confidence. Fixed references make the score
+// dimensionless, so per-interface exponent overrides cannot change path
+// ordering merely because a measurement is expressed in other units.
 func (e *babelEngine) pathScore(route babel.SelectedRoute) float64 {
 	e.mu.Lock()
 	alpha, beta := e.exponentsFor(route.Interface)
+	gamma := e.settings.WeightJitterExponent
 	speaker := e.speaker
+	maxAge := e.settings.DelaySampleMaxAge()
 	e.mu.Unlock()
 
 	bw := float64(route.BottleneckMbps)
@@ -591,12 +742,11 @@ func (e *babelEngine) pathScore(route babel.SelectedRoute) float64 {
 			bw = 1
 		}
 	}
-	var localRTT time.Duration
-	var hasRTT bool
+	var local babel.DelayStats
 	if speaker != nil {
-		localRTT, hasRTT = speaker.NeighbourRTT(route.Interface, route.NextHop)
+		local, _ = speaker.NeighbourDelayStats(route.Interface, route.NextHop)
 	}
-	return babelPathScore(bw, route.PathRTTMicros, localRTT, hasRTT, alpha, beta)
+	return babelPathScore(bw, route, local, maxAge, alpha, beta, gamma)
 }
 
 // exponentsFor returns the weight exponents of a tunnel. An explicit
@@ -623,20 +773,37 @@ func clampWeightExponent(value float64) float64 {
 	return value
 }
 
-// babelPathScore computes bottleneck^alpha / rtt^beta from end-to-end path
-// values, falling back to the local first-hop measurement when the path RTT
-// is unknown. A zero-latency path gets full weight.
-func babelPathScore(bottleneck float64, pathRTT int64, localRTT time.Duration, hasLocalRTT bool, alpha, beta float64) float64 {
+// babelPathScore computes a dimensionless bandwidth/latency utility. Missing
+// path RTT falls back to the local first-hop measurement, then to a common
+// conservative value. Omitting the RTT denominator for only some candidates
+// would make known and unknown paths incomparable.
+func babelPathScore(bottleneck float64, route babel.SelectedRoute, local babel.DelayStats, maxAge time.Duration, alpha, beta, gamma float64) float64 {
 	if bottleneck <= 0 {
 		bottleneck = 1
 	}
-	if pathRTT > 0 {
-		return math.Pow(bottleneck, alpha) / math.Pow(float64(pathRTT), beta)
+	rttMicros := babelUnknownRTTMicros
+	jitterMicros := babelUnknownJitterMicros
+	confidence := babelMinimumConfidence
+	pathKnown := route.PathRTTMicros > 0
+	pathFresh := pathKnown && route.PathMetricAgeMillis >= 0 && maxAge > 0 &&
+		time.Duration(route.PathMetricAgeMillis)*time.Millisecond < maxAge
+	if pathFresh {
+		rttMicros = float64(route.PathRTTMicros)
+		if route.PathJitterMicros >= 0 {
+			jitterMicros = float64(route.PathJitterMicros)
+		}
+		confidence = max(float64(route.PathMetricConfidence)/float64(math.MaxUint16), babelMinimumConfidence)
+	} else if !pathKnown {
+		now := time.Now()
+		if local.Samples > 0 && local.Age(now) < maxAge {
+			rttMicros = float64(max(local.Mean.Microseconds(), 1))
+			jitterMicros = float64(max(local.Jitter().Microseconds(), 0))
+			confidence = max(local.Confidence(now, babel.DefaultDelayWarmupSamples, maxAge), babelMinimumConfidence)
+		}
 	}
-	if hasLocalRTT && localRTT > 0 {
-		return math.Pow(bottleneck, alpha) / math.Pow(float64(localRTT.Microseconds()), beta)
-	}
-	return math.Pow(bottleneck, alpha)
+	return math.Pow(bottleneck/babelReferenceBandwidthMbps, alpha) /
+		math.Pow(rttMicros/babelReferenceRTTMicros, beta) /
+		math.Pow(1+jitterMicros/babelReferenceJitterMicros, gamma) * confidence
 }
 
 func (e *babelEngine) removeOwnedRoutes() error {
@@ -690,7 +857,18 @@ func (e *babelEngine) observe(record model.Tunnel) core.Observation {
 		count := 0
 		_ = iface.Neighbours.Foreach(func(n *babel.Neighbour) error {
 			count++
-			peers = append(peers, model.PeerStatus{PublicKey: n.Address.String(), Endpoint: iface.Name})
+			stats := n.DelayStats()
+			now := time.Now()
+			rtt := stats.Mean.Microseconds()
+			jitter := stats.Jitter().Microseconds()
+			age := stats.Age(now).Milliseconds()
+			confidence := stats.Confidence(now, babel.DefaultDelayWarmupSamples, e.settings.DelaySampleMaxAge())
+			fresh := stats.Fresh(now, babel.DefaultDelayWarmupSamples, e.settings.DelaySampleMaxAge())
+			peers = append(peers, model.PeerStatus{
+				Protocol: "babel", PublicKey: n.Address.String(), Endpoint: iface.Name,
+				RTTMicros: &rtt, JitterMicros: &jitter, MetricAgeMillis: &age,
+				MetricConfidence: &confidence, MetricFresh: &fresh,
+			})
 			return nil
 		})
 		details["neighbours"] = strconv.Itoa(count)
@@ -824,8 +1002,11 @@ func normalizeBabelAddress(addr netip.Addr) netip.Addr {
 // 256 * score_i / score_best, clamped to [1, 256]. A missing signal yields
 // the default weight, so no path is ever starved completely.
 func babelWeightFromScores(scoreBest, candidate float64) int {
-	if scoreBest <= 0 || candidate <= 0 {
+	if scoreBest <= 0 || math.IsNaN(scoreBest) || math.IsInf(scoreBest, 0) {
 		return 256
+	}
+	if candidate <= 0 || math.IsNaN(candidate) || math.IsInf(candidate, 0) {
+		return 1
 	}
 	weight := int(math.Round(256 * candidate / scoreBest))
 	if weight < 1 {
@@ -991,53 +1172,63 @@ func equalBabelManagedRoute(current, desired netlink.Route) bool {
 	return true
 }
 
-// babelWeightEqual treats next-hop weights as equal when they differ by at
-// most 10% (or a single unit). Small weight changes must not trigger kernel
-// route replacements: each one rehashes in-flight flows.
-func babelWeightEqual(current, desired int) bool {
-	if current == desired {
-		return true
-	}
-	larger := max(current, desired)
-	if larger == 0 {
-		return true
-	}
-	delta := current - desired
-	if delta < 0 {
-		delta = -delta
-	}
-	return float64(delta)/float64(larger) <= 0.10 || delta <= 1
-}
-
 // multipathWeightFingerprint serialises the installed weights of a
 // multipath route so weight-only changes can be compared across reconciles.
 func multipathWeightFingerprint(route netlink.Route) string {
 	parts := make([]string, 0, len(route.MultiPath))
 	for _, nextHop := range route.MultiPath {
-		parts = append(parts, strconv.Itoa(nextHop.Hops))
+		parts = append(parts, strconv.Itoa(nextHop.Hops+1))
 	}
 	return strings.Join(parts, ",")
+}
+
+func currentMultipathWeightFingerprint(current []netlink.Route, key string) string {
+	for _, route := range current {
+		if routeKey(route) == key && len(route.MultiPath) > 0 {
+			return multipathWeightFingerprint(route)
+		}
+	}
+	return ""
 }
 
 // weightsWithinTolerance reports whether every weight in the new fingerprint
 // is within the 10% tolerance of the previously installed one.
 func weightsWithinTolerance(previous, current string) bool {
-	oldParts := strings.Split(previous, ",")
-	newParts := strings.Split(current, ",")
-	if len(oldParts) != len(newParts) {
+	oldWeights, oldTotal, ok := parseWeightFingerprint(previous)
+	if !ok {
 		return false
 	}
-	for i := range oldParts {
-		oldWeight, oldErr := strconv.Atoi(oldParts[i])
-		newWeight, newErr := strconv.Atoi(newParts[i])
-		if oldErr != nil || newErr != nil {
-			return false
-		}
-		if !babelWeightEqual(oldWeight, newWeight) {
+	newWeights, newTotal, ok := parseWeightFingerprint(current)
+	if !ok || len(oldWeights) != len(newWeights) {
+		return false
+	}
+	for i := range oldWeights {
+		oldShare := float64(oldWeights[i]) / float64(oldTotal)
+		newShare := float64(newWeights[i]) / float64(newTotal)
+		larger := max(oldShare, newShare)
+		if larger > 0 && math.Abs(oldShare-newShare)/larger > 0.10 {
 			return false
 		}
 	}
 	return true
+}
+
+func parseWeightFingerprint(fingerprint string) ([]int, int, bool) {
+	if fingerprint == "" {
+		return nil, 0, false
+	}
+	parts := strings.Split(fingerprint, ",")
+	weights := make([]int, len(parts))
+	total := 0
+	for i, part := range parts {
+		weight, err := strconv.Atoi(part)
+		if err != nil || weight < 1 || weight > 256 {
+			return nil, 0, false
+		}
+		weights[i] = weight
+		total += weight
+	}
+	return weights, total, total > 0
 }
 
 // babelWeightOnlyChange reports whether a replacement differs from the

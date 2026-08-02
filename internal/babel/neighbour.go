@@ -9,7 +9,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/babel/internal/deadline"
@@ -36,9 +35,10 @@ type Neighbour struct {
 
 	outgoingUnicastHelloSeqNo proto.SequenceNumber
 
-	ihuTicker   *time.Ticker
-	helloTicker *time.Ticker
-	ihuTimeout  deadline.Deadline
+	ihuTicker        *time.Ticker
+	helloTicker      *time.Ticker
+	delayProbeTicker *time.Ticker
+	ihuTimeout       deadline.Deadline
 
 	queue *queue.Queue
 
@@ -52,12 +52,14 @@ type Neighbour struct {
 	costOverride *proto.Metric
 
 	// RFC 9616 delay-based metric state.
+	stateMu            sync.RWMutex
 	lastHelloOrigin    proto.Timestamp // timestamp of the last Hello received from this neighbour
 	lastHelloReceive   proto.Timestamp // local receive time of that Hello
 	hasHelloTimestamps bool
-	lastTxHello        proto.Timestamp // timestamp of the last Hello we sent to this neighbour
-	rtt                atomic.Int64    // nanoseconds, written by the read loop, read by the engine
-	hasRTT             atomic.Bool
+	delayMu            sync.RWMutex
+	delayStats         DelayStats
+	lastPublishedDelay DelayStats
+	lastDelayPublish   time.Time
 
 	done      chan struct{}
 	stopped   chan struct{}
@@ -124,6 +126,12 @@ func (i *Interface) NewNeighbour(addr proto.Address) (*Neighbour, error) {
 		n.helloTicker = time.NewTicker(math.MaxInt64)
 		n.helloTicker.Stop()
 	}
+	if interval := n.intf.speaker.config.DelayProbeInterval; n.intf.speaker.config.DelayMetric && interval > 0 {
+		n.delayProbeTicker = time.NewTicker(interval)
+	} else {
+		n.delayProbeTicker = time.NewTicker(math.MaxInt64)
+		n.delayProbeTicker.Stop()
+	}
 
 	return n, nil
 }
@@ -147,10 +155,21 @@ func (n *Neighbour) runTimers() {
 			if err := n.sendIHU(); err != nil {
 				n.logger.Error("Failed to send IHU", slog.Any("error", err))
 			}
+		case <-n.delayProbeTicker.C:
+			// Re-evaluate freshness even when no response arrives; otherwise a
+			// once-valid estimate could remain in route cost until IHU expiry.
+			n.intf.speaker.onNeighbourCostChanged(n)
+			if now := time.Now(); n.shouldPublishDelay(now) {
+				n.sendDelayUpdate()
+				n.intf.speaker.notifyRouteMetricsChanged()
+			}
+			if err := n.sendDelayProbe(); err != nil {
+				n.logger.Error("Failed to send delay probe", slog.Any("error", err))
+			}
 
 		case <-n.ihuTimeout.C:
 			n.logger.Warn("IHU deadline missed")
-			n.TxCost = proto.Retraction
+			n.setTransmissionCost(proto.Retraction)
 			n.intf.speaker.onNeighbourCostChanged(n)
 		}
 	}
@@ -163,6 +182,9 @@ func (n *Neighbour) Close() error {
 		close(n.done)
 		n.ihuTicker.Stop()
 		n.helloTicker.Stop()
+		if n.delayProbeTicker != nil {
+			n.delayProbeTicker.Stop()
+		}
 		n.ihuTimeout.Stop()
 		<-n.stopped
 		if n.queue != nil {
@@ -183,9 +205,11 @@ func (n *Neighbour) onHello(hello *proto.Hello, rxTime proto.Timestamp) {
 		n.helloMulticast.Update(hello.Seqno)
 	}
 	if hello.Timestamp != nil {
+		n.stateMu.Lock()
 		n.lastHelloOrigin = hello.Timestamp.Transmit
 		n.lastHelloReceive = rxTime
 		n.hasHelloTimestamps = true
+		n.stateMu.Unlock()
 	}
 
 	n.logger.Debug("Handled Hello", "rxcost", n.RxCost())
@@ -194,13 +218,12 @@ func (n *Neighbour) onHello(hello *proto.Hello, rxTime proto.Timestamp) {
 func (n *Neighbour) onIHU(ihu *proto.IHU) {
 	n.ihuTimeout.Reset(time.Duration(n.intf.speaker.config.IHUHoldTimeFactor * float32(ihu.Interval)))
 
-	old := n.TxCost
-	n.TxCost = ihu.RxCost
-	if old != n.TxCost {
+	old := n.setTransmissionCost(ihu.RxCost)
+	if old != ihu.RxCost {
 		n.intf.speaker.onNeighbourCostChanged(n)
 	}
 
-	n.logger.Debug("Handled IHU", "txcost", n.TxCost, "rxcost", n.RxCost(), "cost", n.Cost())
+	n.logger.Debug("Handled IHU", "txcost", ihu.RxCost, "rxcost", n.RxCost(), "cost", n.Cost())
 }
 
 // onRouteRequest implements RFC 8966 Section 3.8.1.1.
@@ -296,27 +319,87 @@ func (n *Neighbour) computeRTT(t2 proto.Timestamp, hello *proto.TimestampHello, 
 	}
 
 	sample := time.Duration(rttMicros) * time.Microsecond
-	if !n.hasRTT.Load() {
-		n.rtt.Store(int64(sample))
-	} else {
-		alpha := s.config.DelaySmoothingAlpha
-		current := time.Duration(n.rtt.Load())
-		smoothed := current + time.Duration(alpha*float64(sample-current))
-		n.rtt.Store(int64(smoothed))
-	}
-	n.hasRTT.Store(true)
-	n.logger.Debug("RTT sample", slog.Duration("rtt", n.RTT()))
+	now := time.Now()
+	n.recordDelaySample(sample, now)
+	stats := n.DelayStats()
+	n.logger.Debug("RTT sample", slog.Duration("rtt", stats.Mean), slog.Duration("jitter", stats.Jitter()), slog.Uint64("samples", uint64(stats.Samples)))
 	s.onNeighbourCostChanged(n)
+	if n.shouldPublishDelay(now) {
+		n.sendDelayUpdate()
+		s.notifyRouteMetricsChanged()
+	}
+}
+
+func (n *Neighbour) recordDelaySample(sample time.Duration, now time.Time) {
+	n.delayMu.Lock()
+	n.delayStats = n.delayStats.updated(sample, now,
+		n.intf.speaker.config.DelaySmoothingTimeConstant,
+		n.intf.speaker.config.DelayMinWindow)
+	n.delayMu.Unlock()
+}
+
+// DelayStats returns a consistent copy of the neighbour's current estimator.
+func (n *Neighbour) DelayStats() DelayStats {
+	n.delayMu.RLock()
+	defer n.delayMu.RUnlock()
+	return n.delayStats
+}
+
+func (n *Neighbour) shouldPublishDelay(now time.Time) bool {
+	n.delayMu.Lock()
+	defer n.delayMu.Unlock()
+	stats := n.delayStats
+	if stats.Samples < n.intf.speaker.config.DelayWarmupSamples {
+		return false
+	}
+	minInterval := max(2*n.intf.speaker.config.DelayProbeInterval, 2*time.Second)
+	if !n.lastDelayPublish.IsZero() && now.Sub(n.lastDelayPublish) < minInterval {
+		return false
+	}
+	old := n.lastPublishedDelay
+	significant := old.Samples == 0 || relativeDurationChange(old.Mean, stats.Mean, time.Millisecond) > 0.10 ||
+		relativeDurationChange(old.Jitter(), stats.Jitter(), time.Millisecond) > 0.10 ||
+		math.Abs(old.Confidence(n.lastDelayPublish, n.intf.speaker.config.DelayWarmupSamples, n.intf.speaker.config.DelaySampleMaxAge)-
+			stats.Confidence(now, n.intf.speaker.config.DelayWarmupSamples, n.intf.speaker.config.DelaySampleMaxAge)) > 0.10 ||
+		now.Sub(n.lastDelayPublish) >= n.intf.speaker.config.UpdateInterval
+	if !significant {
+		return false
+	}
+	n.lastPublishedDelay = stats
+	n.lastDelayPublish = now
+	return true
+}
+
+func relativeDurationChange(a, b, floor time.Duration) float64 {
+	denominator := max(absDuration(a), absDuration(b), floor)
+	if denominator <= 0 {
+		return 0
+	}
+	return float64(absDuration(a-b)) / float64(denominator)
+}
+
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 // RTT returns the smoothed round-trip time measured for this neighbour.
 func (n *Neighbour) RTT() time.Duration {
-	return time.Duration(n.rtt.Load())
+	return n.DelayStats().Mean
 }
 
 // HasRTT reports whether at least one valid RTT sample was measured.
 func (n *Neighbour) HasRTT() bool {
-	return n.hasRTT.Load()
+	return n.DelayStats().Samples > 0
+}
+
+// HasFreshRTT reports whether the estimate is sufficiently warmed up and has
+// not exceeded the configured sample age.
+func (n *Neighbour) HasFreshRTT() bool {
+	s := n.DelayStats()
+	return s.Fresh(time.Now(), n.intf.speaker.config.DelayWarmupSamples, n.intf.speaker.config.DelaySampleMaxAge)
 }
 
 func (n *Neighbour) sendUnicastHello() error {
@@ -327,8 +410,7 @@ func (n *Neighbour) sendUnicastHello() error {
 		Interval: n.intf.speaker.config.UnicastHelloInterval,
 	}
 	if n.intf.speaker.config.DelayMetric {
-		n.lastTxHello = timestampNow()
-		hello.Timestamp = &proto.TimestampHello{Transmit: n.lastTxHello}
+		hello.Timestamp = &proto.TimestampHello{Transmit: timestampNow()}
 	}
 	n.queue.SendValue(hello, n.intf.speaker.config.UnicastHelloInterval*3/5)
 
@@ -336,6 +418,14 @@ func (n *Neighbour) sendUnicastHello() error {
 }
 
 func (n *Neighbour) sendIHU() error {
+	return n.sendIHUWithin(n.intf.speaker.config.IHUInterval * 3 / 5)
+}
+
+func (n *Neighbour) sendDelayProbe() error {
+	return n.sendIHUWithin(n.intf.speaker.config.DelayProbeInterval / 2)
+}
+
+func (n *Neighbour) sendIHUWithin(maxDelay time.Duration) error {
 	ihu := &proto.IHU{
 		RxCost:   n.RxCost(),
 		Address:  n.Address,
@@ -353,16 +443,16 @@ func (n *Neighbour) sendIHU() error {
 			Interval:  n.intf.speaker.config.UnicastHelloInterval,
 			Timestamp: &proto.TimestampHello{Transmit: timestampNow()},
 		}
-		n.lastTxHello = hello.Timestamp.Transmit
-		if n.hasHelloTimestamps {
+		origin, receive, hasTimestamps := n.helloTimestampSnapshot()
+		if hasTimestamps {
 			ihu.Timestamp = &proto.TimestampIHU{
-				Origin:  n.lastHelloOrigin,
-				Receive: n.lastHelloReceive,
+				Origin:  origin,
+				Receive: receive,
 			}
 		}
 		values = []proto.Value{hello, ihu}
 	}
-	n.queue.SendValues(values, n.intf.speaker.config.IHUInterval*3/5)
+	n.queue.SendValues(values, maxDelay)
 
 	return nil
 }
@@ -386,14 +476,21 @@ func (n *Neighbour) RxCost() proto.Metric {
 // reception cost (derived from Hello history and overrides) with the
 // transmission cost (from IHU packets) according to the configured policy.
 func (n *Neighbour) Cost() proto.Metric {
-	if n.costOverride != nil {
-		return *n.costOverride
-	}
 	s := n.intf.speaker
-	if s.config.DelayMetric && n.HasRTT() {
-		return DelayCost(n.RTT(), n.intf.nominalCost, s.config.DelayMin, s.config.DelayMax, s.config.DelayMaxPenalty)
+	// Delay measurements describe quality, not reachability. Always honour
+	// Hello/IHU liveness first so a stale finite RTT can never keep a dead
+	// neighbour usable.
+	base := s.costProvider.Combine(n.RxCost(), n.transmissionCost())
+	if base == proto.Retraction {
+		return proto.Retraction
 	}
-	return s.costProvider.Combine(n.RxCost(), n.TxCost)
+	cost := base
+	if override, ok := n.costOverrideValue(); ok {
+		cost = override
+	} else if s.config.DelayMetric && n.HasFreshRTT() {
+		cost = DelayCost(n.RTT(), n.intf.nominalCost, s.config.DelayMin, s.config.DelayMax, s.config.DelayMaxPenalty)
+	}
+	return addMetricPenalty(cost, InverseBandwidthPenalty(s.config.BottleneckPenalty, n.intf.bandwidthMbps))
 }
 
 // SetCostOverride replaces the nominal cost used for this neighbour with an
@@ -403,12 +500,43 @@ func (n *Neighbour) SetCostOverride(cost proto.Metric) {
 	if cost == 0 {
 		cost = 1
 	}
+	n.stateMu.Lock()
 	if cost == proto.Retraction {
 		n.costOverride = nil
 	} else {
 		n.costOverride = &cost
 	}
+	n.stateMu.Unlock()
 	n.intf.speaker.onNeighbourCostChanged(n)
+}
+
+func (n *Neighbour) transmissionCost() proto.Metric {
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	return n.TxCost
+}
+
+func (n *Neighbour) setTransmissionCost(cost proto.Metric) proto.Metric {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	old := n.TxCost
+	n.TxCost = cost
+	return old
+}
+
+func (n *Neighbour) costOverrideValue() (proto.Metric, bool) {
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.costOverride == nil {
+		return 0, false
+	}
+	return *n.costOverride, true
+}
+
+func (n *Neighbour) helloTimestampSnapshot() (proto.Timestamp, proto.Timestamp, bool) {
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	return n.lastHelloOrigin, n.lastHelloReceive, n.hasHelloTimestamps
 }
 
 // sendUpdateForRoutes sends RouterId/NextHop/Update TLVs for the given
@@ -418,11 +546,7 @@ func (n *Neighbour) sendUpdateForRoutes(routes []*Route, urgent bool) {
 	if urgent {
 		maxDelay = n.intf.speaker.config.UrgentTimeout
 	}
-	rttMicros := int64(0)
-	if n.HasRTT() {
-		rttMicros = n.RTT().Microseconds()
-	}
-	values := n.intf.speaker.encodeRoutes(n.intf, routes, rttMicros)
+	values := n.intf.speaker.encodeRoutes(n.intf, routes, n.DelayStats())
 	if len(values) == 0 {
 		return
 	}
@@ -437,16 +561,23 @@ func (n *Neighbour) sendRetraction(pfx proto.Prefix) {
 
 func (n *Neighbour) sendFullDump() {
 	updates, retractions := n.intf.speaker.advertisedRoutes(n.intf)
-	rttMicros := int64(0)
-	if n.HasRTT() {
-		rttMicros = n.RTT().Microseconds()
-	}
-	values := n.intf.speaker.encodeRoutes(n.intf, updates, rttMicros)
+	values := n.intf.speaker.encodeRoutes(n.intf, updates, n.DelayStats())
 	for _, r := range retractions {
 		values = append(values, n.intf.speaker.encodeRetraction(r.Source.RouterID, r.SeqNo, r.Source.Prefix)...)
 	}
 	if len(values) > 0 {
 		n.queue.SendValues(values, n.intf.speaker.config.UpdateInterval)
+	}
+}
+
+func (n *Neighbour) sendDelayUpdate() {
+	updates, retractions := n.intf.speaker.advertisedRoutes(n.intf)
+	values := n.intf.speaker.encodeRoutes(n.intf, updates, n.DelayStats())
+	for _, r := range retractions {
+		values = append(values, n.intf.speaker.encodeRetraction(r.Source.RouterID, r.SeqNo, r.Source.Prefix)...)
+	}
+	if len(values) > 0 {
+		n.queue.SendValues(values, n.intf.speaker.config.UrgentTimeout)
 	}
 }
 

@@ -88,7 +88,7 @@ func (t ValueType) IsMandatory() bool {
 
 func (t ValueType) IsSubType() bool {
 	switch t {
-	case SubTypePad1, SubTypePadN, SubTypeDiversity, SubTypeTimestamp, SubTypeSourcePrefix:
+	case SubTypePad1, SubTypePadN, SubTypeDiversity, SubTypeTimestamp, SubTypePathMetrics, SubTypePathQuality, SubTypeSourcePrefix:
 		return true
 	default:
 		return false

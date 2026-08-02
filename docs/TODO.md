@@ -111,15 +111,15 @@ Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
       IPv6 link-local links.
 - [x] Derive ECMP split weights from `bandwidth_mbps`
       (256 * bw_i / bw_best) and install weighted kernel next hops.
-- [x] Switch weights to the raw-signal formula `w ∝ bandwidth^α / rtt^β`
-      (smoothed RTT from RFC 9616, α/β in daemon settings, default 1,1),
-      gated by a 10% change threshold and a weight-update cooldown.
+- [x] Switch weights to a dimensionless bandwidth/RTT/jitter/confidence score
+      (continuous RFC 9616 samples, configurable exponents), gated by
+      per-prefix traffic-share tolerance, confirmation, and cooldown.
 - [x] Add the bandwidth/latency balance knob to the TUI settings view
       (left/right slider, default centre 1,1).
 - [x] Implement docs/BABEL_ECMP.md: end-to-end bottleneck bandwidth and
-      path RTT propagation (PathMetrics sub-TLV, per-hop min/accumulation),
-      weight formula `bottleneck^α / path_rtt^β` with local fallbacks,
-      the bias knob (α=1+bias, β=1-bias), the K bottleneck penalty,
+      path delay-quality propagation (PathMetrics/PathQuality sub-TLVs),
+      dimensionless weighted score with conservative fallbacks, the bias
+      knob (α=1+bias, β=1-bias), the per-link K bandwidth penalty,
       external PTP interfaces in daemon settings, dual-stack udp4+udp6
       sockets, and weight-change fingerprint gating.
 - [x] Add settings endpoints (`GET/PUT /v1/settings`) and a TUI settings

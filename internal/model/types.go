@@ -282,6 +282,7 @@ type Status struct {
 }
 
 type PeerStatus struct {
+	Protocol          string     `json:"protocol,omitempty"`
 	PublicKey         string     `json:"public_key"`
 	Endpoint          string     `json:"endpoint,omitempty"`
 	AllowedIPs        []string   `json:"allowed_ips,omitempty"`
@@ -289,6 +290,11 @@ type PeerStatus struct {
 	LastHandshakeTime *time.Time `json:"last_handshake_time,omitempty"`
 	ReceiveBytes      int64      `json:"receive_bytes"`
 	TransmitBytes     int64      `json:"transmit_bytes"`
+	RTTMicros         *int64     `json:"rtt_micros,omitempty"`
+	JitterMicros      *int64     `json:"jitter_micros,omitempty"`
+	MetricAgeMillis   *int64     `json:"metric_age_millis,omitempty"`
+	MetricConfidence  *float64   `json:"metric_confidence,omitempty"`
+	MetricFresh       *bool      `json:"metric_fresh,omitempty"`
 }
 
 type TunnelView struct {

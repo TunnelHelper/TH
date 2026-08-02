@@ -199,6 +199,11 @@ func (b *Backend) Observe(ctx context.Context, record model.Tunnel) (core.Observ
 			observation, err = b.observeLink(record)
 		}
 	}
+	if record.Spec.Babel != nil && record.Spec.Babel.Enabled && record.Kind != model.KindGRE && record.Kind != model.KindVXLAN {
+		babelObservation := b.babel.observe(record)
+		appendObservationDetails(&observation, babelObservation.Details)
+		observation.Peers = append(observation.Peers, babelObservation.Peers...)
+	}
 	if b.mptcp != nil {
 		appendObservationDetails(&observation, b.mptcp.observationDetails())
 	}

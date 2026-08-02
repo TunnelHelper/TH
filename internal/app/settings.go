@@ -26,7 +26,8 @@ func validateBabelRouterIDInput(value string) error {
 	if value == "" {
 		return nil
 	}
-	settings := config.BabelSettings{RouterID: value}
+	settings := config.Defaults().Babel
+	settings.RouterID = value
 	return settings.Validate()
 }
 

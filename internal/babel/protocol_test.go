@@ -6,6 +6,7 @@ package babel
 import (
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
 	"testing"
@@ -187,6 +188,30 @@ func TestSelectionHysteresis(t *testing.T) {
 	}
 	if !r1.Selected {
 		t.Fatal("route must switch once both metrics are better")
+	}
+}
+
+func TestMultipathSlackUsesTrueBestDuringHysteresis(t *testing.T) {
+	s := newTestSpeaker(t)
+	s.config.MaxPaths = 3
+	s.config.MultipathSlack = 10
+	old := insertRoute(s, newFakeNeighbour(s, "fe80::1", 96), "10.8.0.0/24", proto.RouterID{2}, 1, 100)
+	best := insertRoute(s, newFakeNeighbour(s, "fe80::2", 96), "10.8.0.0/24", proto.RouterID{2}, 1, 200)
+	middle := insertRoute(s, newFakeNeighbour(s, "fe80::3", 96), "10.8.0.0/24", proto.RouterID{2}, 1, 105)
+	s.runSelection()
+	best.AdvertisedMetric = 0
+	s.runSelection()
+	if !old.Selected {
+		t.Fatal("hysteresis fixture must retain the old primary")
+	}
+	exported := s.SelectedRoutes()
+	if len(exported) != 2 {
+		t.Fatalf("selected old primary plus true best = 2 paths, got %+v", exported)
+	}
+	for _, route := range exported {
+		if route.NextHop == middle.NextHop {
+			t.Fatal("route outside true-best slack was admitted via retained primary")
+		}
 	}
 }
 
@@ -414,8 +439,8 @@ func TestIHUDoesNotExpireImmediately(t *testing.T) {
 	n := newFakeNeighbour(s, "fe80::1", 96)
 
 	n.onIHU(&proto.IHU{RxCost: 42, Interval: 12 * time.Second, Address: n.Address})
-	if n.TxCost != 42 {
-		t.Fatalf("TxCost = %d, want 42", n.TxCost)
+	if got := n.transmissionCost(); got != 42 {
+		t.Fatalf("TxCost = %d, want 42", got)
 	}
 	if n.ihuTimeout.Expired() {
 		t.Fatal("IHU hold time must not expire immediately after receiving an IHU")
@@ -478,6 +503,18 @@ func TestDelayCostMapping(t *testing.T) {
 	}
 }
 
+func TestInverseBandwidthPenalty(t *testing.T) {
+	if got := InverseBandwidthPenalty(100, 10); got != 10 {
+		t.Fatalf("penalty = %d, want 10", got)
+	}
+	if got := InverseBandwidthPenalty(100, 1000); got != 0 {
+		t.Fatalf("rounded sub-unit penalty = %d, want 0", got)
+	}
+	if got := InverseBandwidthPenalty(math.Inf(1), 1); got != proto.Retraction-1 {
+		t.Fatalf("infinite penalty = %d, want saturation", got)
+	}
+}
+
 func TestComputeRTT(t *testing.T) {
 	s := newTestSpeaker(t)
 	s.config.DelayMetric = true
@@ -497,6 +534,13 @@ func TestComputeRTT(t *testing.T) {
 	if got := n.Cost(); got != 96 {
 		t.Errorf("2ms RTT must keep nominal cost 96, got %d", got)
 	}
+	n.SetCostOverride(10)
+	n.setTransmissionCost(proto.Retraction)
+	if got := n.Cost(); got != proto.Retraction {
+		t.Fatalf("an IHU-dead neighbour with finite RTT and an override must retract, got %d", got)
+	}
+	n.setTransmissionCost(96)
+	n.SetCostOverride(proto.Retraction)
 
 	// A stale sample (origin more than 3 minutes old) must be discarded.
 	before := n.RTT()
@@ -525,7 +569,9 @@ func TestPathMetricsPropagation(t *testing.T) {
 	}
 	// Hop A->B: source bottleneck is unlimited, the outgoing interface
 	// declares 10 Mbps and the link RTT is 500 us.
-	values := s.encodeRoutes(ifaceAB, []*Route{local}, 500)
+	now := time.Now()
+	linkAB := DelayStats{Mean: 500 * time.Microsecond, Samples: 4, LastSample: now}
+	values := s.encodeRoutes(ifaceAB, []*Route{local}, linkAB)
 	var hopAB *proto.Update
 	for _, value := range values {
 		if update, ok := value.(*proto.Update); ok {
@@ -539,15 +585,18 @@ func TestPathMetricsPropagation(t *testing.T) {
 	// B learns the route and re-advertises on a 1000 Mbps interface with
 	// an additional 300 us of RTT: bottleneck stays 10, RTT accumulates.
 	learned := &Route{
-		Source:             &Source{Prefix: pfx, RouterID: proto.RouterID{5}},
-		Neighbour:          newFakeNeighbour(s, "fe80::b", 96),
-		AdvertisedMetric:   100,
-		Metric:             196,
-		SeqNo:              1,
-		NextHop:            netip.MustParseAddr("fe80::b"),
-		Feasible:           true,
-		PathBottleneckMbps: 10,
-		PathRTTMicros:      500,
+		Source:               &Source{Prefix: pfx, RouterID: proto.RouterID{5}},
+		Neighbour:            newFakeNeighbour(s, "fe80::b", 96),
+		AdvertisedMetric:     100,
+		Metric:               196,
+		SeqNo:                1,
+		NextHop:              netip.MustParseAddr("fe80::b"),
+		Feasible:             true,
+		PathBottleneckMbps:   10,
+		PathRTTMicros:        500,
+		PathJitterMicros:     200,
+		PathMetricAgeMillis:  100,
+		PathMetricConfidence: 60_000,
 	}
 	ifaceBC := &Interface{
 		Interface:     &net.Interface{Name: "bc", Index: 2},
@@ -555,7 +604,8 @@ func TestPathMetricsPropagation(t *testing.T) {
 		speaker:       s,
 		logger:        s.logger,
 	}
-	values = s.encodeRoutes(ifaceBC, []*Route{learned}, 300)
+	linkBC := DelayStats{Mean: 300 * time.Microsecond, VarianceMicros2: 10_000, Samples: 4, LastSample: now}
+	values = s.encodeRoutes(ifaceBC, []*Route{learned}, linkBC)
 	var hopBC *proto.Update
 	for _, value := range values {
 		if update, ok := value.(*proto.Update); ok {
@@ -565,11 +615,15 @@ func TestPathMetricsPropagation(t *testing.T) {
 	if hopBC == nil || hopBC.PathBottleneckMbps != 10 || hopBC.PathRTTMicros != 800 {
 		t.Fatalf("hop B->C path metrics = (%d, %d), want (10, 800)", hopBC.PathBottleneckMbps, hopBC.PathRTTMicros)
 	}
+	if hopBC.PathJitterMicros != 300 || hopBC.PathMetricAgeMillis < 100 || hopBC.PathMetricConfidence != 60_000 {
+		t.Fatalf("hop B->C path quality = jitter %d age %d confidence %d", hopBC.PathJitterMicros, hopBC.PathMetricAgeMillis, hopBC.PathMetricConfidence)
+	}
 }
 
 func TestUpdateECMPParamsAppliesPenalty(t *testing.T) {
 	s := newTestSpeaker(t)
 	n := newFakeNeighbour(s, "fe80::1", 96)
+	n.intf.bandwidthMbps = 10
 	rid := proto.RouterID{9}
 	r := insertRoute(s, n, "10.0.0.0/24", rid, 1, 100)
 	r.PathBottleneckMbps = 10
@@ -579,7 +633,7 @@ func TestUpdateECMPParamsAppliesPenalty(t *testing.T) {
 		t.Fatalf("base metric = %d, want 196", before)
 	}
 
-	// A K penalty of 100 over a 10 Mbps bottleneck adds 10 to the metric,
+	// A K penalty of 100 over a 10 Mbps local link adds 10 to the metric,
 	// applied to the running speaker without a rebuild.
 	s.UpdateECMPParams(4, 0, 100)
 	if r.Metric != before+10 {

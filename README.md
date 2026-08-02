@@ -25,9 +25,9 @@ compatibility parser, or automatic cleanup workflow. Remove or disable old
 tunnel definitions before enabling TH records that use the same names.
 
 The Babel engine runs inside the daemon itself (no external routing daemon)
-and installs the selected routes with TH ownership tags (`protocol 242` +
-engine realm) so stale dynamic routes are removed only when TH can prove it
-created them. Participation is per tunnel (`spec.babel.enabled`); tunnels
+and installs selected routes with TH ownership tags (`protocol 242` plus the
+reserved Babel route priority) so stale dynamic routes are removed only when
+TH can prove it created them. Participation is per tunnel (`spec.babel.enabled`); tunnels
 that opt out never carry Babel traffic. Link mode is chosen per interface:
 single-peer WireGuard and point-to-point GRE/VXLAN use multicast
 auto-discovery, multi-peer WireGuard meshes use unicast Hellos with
@@ -35,16 +35,15 @@ neighbours derived from the peers' public keys (their stable IPv6
 link-local addresses). Prefixes originate from the daemon settings
 (`/etc/th/thd.json`, `babel.advertise`) with include/exclude filters,
 typically discovered from `lo`. Link cost is measured with the RFC 9616
-delay-based metric; ECMP split weights combine each tunnel's declared
-bandwidth with the measured RTT. The protocol propagates each path's
-end-to-end bottleneck bandwidth and accumulated RTT hop by hop (a
-PathMetrics sub-TLV, unknown to older implementations which fall back to
-the local first-hop values), and weights are
-`w ∝ bottleneck^α / path_rtt^β` (defaults α=β=1, tunable from the TUI).
-Weight changes are gated by a 10% threshold and a cooldown so rehashing
-does not disturb in-flight flows; the protocol cost and slack still decide
-which paths are admitted, and the optional bottleneck penalty (K) can pull
-bandwidth into primary-path selection. External point-to-point interfaces
+delay-based metric. Independent timestamp probes continuously estimate mean
+RTT, jitter, freshness, and confidence with a time-aware robust filter. The
+protocol propagates end-to-end bottleneck bandwidth and delay quality through
+non-mandatory PathMetrics and PathQuality sub-TLVs. ECMP uses a dimensionless
+bandwidth/RTT/jitter score with tunable exponents. Automatic weight changes use
+a per-prefix 10% traffic-share threshold, two observations, and a cooldown;
+failures and explicit policy changes remain immediate. Protocol cost and slack
+still decide which paths are admitted, and optional K adds
+`K/local_link_bandwidth` once per hop. External point-to-point interfaces
 (BIRD style) can participate through daemon settings, and the speaker runs
 dual udp4/udp6 sockets so IPv4-only links work.
 

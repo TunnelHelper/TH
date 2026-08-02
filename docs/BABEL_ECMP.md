@@ -1,340 +1,209 @@
-# Babel 加权多路径实现指南：端到端瓶颈带宽 + 可调带宽/延迟权重
+# Babel 延迟检测与加权多路径
 
-本文档是 Babel 加权 ECMP 的完整实现规格，供实现者（含 AI agent）直接照做。
-它把"木桶短板"（路径被最窄链路限制）和"带宽/延迟权重主导权"两个问题一起解决。
+本文描述 TH 当前的 Babel 路径选择、持续延迟估计、质量传播和 Linux
+weighted ECMP 行为。实现分别位于 `internal/babel`、
+`internal/backend/linux/babel_backend.go` 和 `internal/config/settings.go`。
 
-## 1. 背景与目标
+## 1. 两层决策
 
-### 1.1 现状
+TH 不让权重替代 Babel 的可达性和可行性判断：
 
-TH 的 Babel 引擎（`internal/backend/linux/babel_backend.go`）目前：
-
-- 每隧道 `spec.babel {enabled, bandwidth_mbps}` 决定参与和声明带宽；
-- 协议 cost 走 RFC 9616 延迟度量（RTT → 有界 cost），决定主路径与候选准入（slack）；
-- weight 走 `babelMultipathWeight(bwBest, bwCandidate)`，输入**只有本地第一跳接口的
-  声明带宽**（`bandwidthOf(interfaceName)`）。
-
-### 1.2 缺陷（要解决的两个问题）
-
-1. **木桶短板**：多跳网格中，节点 C 只知道"自己到 B 的带宽"，不知道 B 之后路径的
-   瓶颈。一条"前段 1000 Mbps、后段 10 Mbps"的路会被高估，流量拥上去。
-2. **主导权不可调**：当前 weight 是纯带宽（延迟完全失效）；协议 cost 是纯 RTT
-   （带宽完全不参与排序）。需要把"带宽还是延迟主导分流"变成一个可调旋钮。
-
-### 1.3 目标
-
-- 任意节点通过 Babel 通告知道每条候选路径的**端到端瓶颈带宽**和**端到端平滑 RTT**；
-- weight 用端到端值计算：`w ∝ bottleneck^α / path_rtt^β`，α/β 可调（默认 1,1）；
-- 准入与排序职责不变：仍由 RTT cost + slack 决定候选集，weight 只管已准入路径的分流；
-- 稳定性优先：权重变化超过阈值才重装内核路由，避免流重哈希抖动；
-- 支持外部 PTP 接口（BIRD 风格显式配置），与 TH 隧道在瓶颈传播中行为一致。
-
-### 1.4 非目标
-
-- 不做逐字节/逐包分摊（内核 weight 是按流 hash，比例是统计近似）；
-- 不做基于流特征的策略路由（交互流 vs 大流分类属于另一个层次）；
-- 不做吞吐主动测量（带宽来自声明值，RTT 来自 RFC 9616 被动测量）。
-
-## 2. 设计总览：职责分层
-
-```
-协议 cost（RTT，有界）── 主路径选择 + 故障切换 + 候选准入（metric ≤ best + slack）
-        │
-        ▼
-候选集（SelectedRoutes，携带端到端瓶颈/端到端 RTT）
-        │
-        ▼
-weight（bottleneck^α / path_rtt^β）── 已准入路径之间的流量分流
-        │
-        ▼
-内核 multipath（nexthop 权重 1..256，按流 hash）
+```text
+Hello/IHU 活性 + Babel 可行性
+             |
+             v
+有界链路 cost + multipath slack -> 候选集
+             |
+             v
+带宽/RTT/抖动/置信度 score -> Linux nexthop weight 1..256
 ```
 
-核心原则：**weight 只分"协议已经认证活着且无环"的路**。路径不可达时，Babel 的
-活体检测（IHU 超时）→ metric 无穷 → 退出候选集 → 引擎重装路由，该路径的权重随之消失
-（不存在"权重指向黑洞"的状态）。
+- 协议层负责存活、无环、主路径和候选准入。
+- 数据面 score 只在已准入的候选间分流。
+- 候选准入以真实的最小可行 metric 为基准，而不是被滞回暂时保留的旧主路径。
+- IHU 或 Hello 失效永远先产生无穷 cost。旧 RTT 样本不能维持一条死亡链路。
 
-## 3. 协议扩展：瓶颈带宽与端到端 RTT 的传播
+## 2. 协议 cost 与带宽 K
 
-### 3.1 核心机制
+启用 delay metric 后，新鲜且完成预热的 RTT 通过 RFC 9616 风格的有界映射
+转换成链路 cost。没有新鲜样本时使用 Babel 的常规 Rx/Tx cost。
 
-与 cost 相同地随 Update 逐跳传播，但组合规则不同：
+可选的 `weight_bottleneck_penalty` 使用加性形式：
 
-| 属性 | 组合规则 | 每跳贡献 |
-|---|---|---|
-| cost（现状） | 加法 | 本跳链路 cost |
-| **瓶颈带宽（新增）** | **min** | 本跳出站接口声明带宽 |
-| **端到端 RTT（新增）** | 加法 | 本跳平滑 RTT（`n.rtt`） |
-
-min 满足结合律：`min(min(a,b),c) = min(a,b,c)`，逐跳 min 等价于全路径 min。
-节点不需要知道远端拓扑，只需要自己出站链路的声明带宽。
-
-### 3.2 数据模型（`internal/babel/proto`）
-
-`Update` 新增两个**派生字段**（不进线格式主体，模式与 RouterID/NextHop/V4ViaV6 相同）：
-
-```go
-// internal/babel/proto/tlv_update.go
-type Update struct {
-    // ...现有字段...
-
-    // PathBottleneckMbps 是这条通告路径的端到端瓶颈带宽（Mbps）。
-    // 未知/源头视为最大值（不设限）。
-    PathBottleneckMbps int
-
-    // PathRTTMicros 是端到端平滑 RTT 之和（微秒）。
-    PathRTTMicros int64
-}
+```text
+link_metric = delay_or_rx_tx_cost + round(K / local_link_bandwidth_mbps)
+path_metric = sum(link_metric)
 ```
 
-线格式：新增一个 sub-TLV（复用现有 sub-TLV 框架，模式与 RFC 9616 Timestamp 相同），
-编码在 Update 的 sub-TLV 区。标准 Babel 实现遇到未知 sub-TLV 会静默忽略，
-因此向后兼容。
+K 在每个本地链路上只加一次。不能在每一跳重复对已累计路径的 bottleneck
+计算 `K/bottleneck`，否则同一个窄链路会被下游节点重复计数，破坏度量语义。
+加法使用饱和运算，不会越过 Babel 的 retraction 值。
 
-### 3.3 三节点例子
+## 3. 持续延迟和抖动估计
 
-```
-A ──(10 Mbps)── B ──(1000 Mbps)── C
+延迟探测与 liveness 广告解耦。默认每 2 秒发送一个带时间戳的 Hello+IHU，
+而 IHU 的通告周期和 hold time 保持原值。这样能提高测量分辨率而不缩短故障判定窗口。
 
-A 通告 10.0.0.0/24：bottleneck = 10（源头=接口声明带宽），rtt = 0
-B 收到后重通告：bottleneck = min(10, 1000) = 10，rtt = 0 + B→A 平滑RTT
-C 收到后：bottleneck = min(10, 1000) = 10
-  → C 知道到 10.0.0.0/24 的整条路瓶颈是 10 Mbps，无需知道 B 的拓扑
-```
+### 3.1 样本过滤
 
-## 4. 节点行为
+时间戳先经过 RFC 9616 的负值、回绕和最大 3 分钟检查。有效样本再进入因果
+3 点中值滤波：
 
-### 4.1 接收（`internal/babel/speaker.go` → `onUpdateReceived`）
-
-```go
-route.PathBottleneckMbps = upd.PathBottleneckMbps  // 缺失 → 视为未设置（∞）
-route.PathRTTMicros      = upd.PathRTTMicros
+```text
+x'_n = median(x_(n-2), x_(n-1), x_n)
 ```
 
-存储到 `Route`（`internal/babel/route.go` 新增两个字段）。
+一个孤立尖峰不会污染均值和方差；连续两个同向变化会在下一个探测周期进入
+估计器，因此真实的持续阶跃不会被永久忽略。被中值窗口确认且偏差大于
+`max(6 * MAD, 5 ms)` 的中间样本计入 `outliers`，供健康页诊断。
 
-### 4.2 转通告（`encodeRoutes`）
+### 3.2 时间感知 EWMA
 
-```go
-bottleneckOut := min(route.PathBottleneckMbps, 出站接口声明带宽)
-rttOut        := route.PathRTTMicros + 本接口邻居平滑RTT(n.rtt，μs)
+滤波系数由实际采样间隔决定，而不是按包固定：
+
+```text
+a = 1 - exp(-dt / tau)
+mean_n = mean_(n-1) + a * (x'_n - mean_(n-1))
+var_n = (1-a) * (var_(n-1) + a * delta^2)
+jitter_n = sqrt(var_n)
 ```
 
-"出站接口声明带宽"来源：TH 隧道取 `spec.babel.bandwidth_mbps`；外部 PTP 取
-`settings.babel.interfaces.<name>.bandwidth_mbps`；未声明视为 ∞（该跳不设限）。
+默认 `tau=30s`。丢包或调度延迟改变 `dt` 时，滤波器的物理响应时间仍保持一致。
+前三个样本用中值和 `1.4826 * MAD` 建立稳健初值。另维护 10 分钟重置窗口内的
+最小 RTT，帮助观察基础传播延迟。
 
-### 4.3 本地注入（`Advertise`，源头）
+### 3.3 新鲜度和置信度
 
-```go
-bottleneck = 本隧道/外部接口声明带宽
-rtt        = 0
+默认需要 4 个有效样本完成预热，样本最大年龄为 10 秒。置信度为：
+
+```text
+warmup = min(samples / 4, 1)
+freshness = 1                              age <= max_age/2
+          = (max_age-age)/(max_age/2)      max_age/2 < age < max_age
+          = 0                              age >= max_age
+confidence = warmup * freshness
 ```
 
-### 4.4 导出（`SelectedRoute`）
+均值、抖动、置信度任一相对变化超过 10% 时可以发布质量更新；最短发布间隔为
+`max(2 * probe_interval, 2s)`，并至少随正常 Update 周期发布一次。即使没有新样本，
+探测计时器也会重新计算 freshness，使陈旧数据按时退出 cost 和 weight。
 
-`SelectedRoute` 增加 `BottleneckMbps int`、`PathRTTMicros int64`，随候选集导出。
+## 4. 端到端质量传播
 
-## 5. weight 公式与 α/β 旋钮
+Update 使用两个非 mandatory TH sub-TLV。未知它们的 Babel 实现会安全忽略。
 
-### 5.1 公式（`internal/backend/linux/babel_backend.go`）
+| sub-TLV | 长度 | 内容 |
+|---|---:|---|
+| PathMetrics (4) | 8 | bottleneck Mbps `u32`，RTT us `u32` |
+| PathQuality (5) | 12 | jitter us `u32`，age ms `u32`，confidence Q0.16 `u16`，reserved `u16` |
 
-对每个目的前缀的候选集：
+PathMetrics 中 `0xffffffff` 分别表示未知带宽和未知 RTT。可表示的 RTT 上限会饱和到
+`0xfffffffe`，不会让内部 `int64` 负值在线上变成约 71 分钟的伪 RTT。
+PathQuality 的 jitter 和 age 也使用 `0xffffffff` 表示未知，并在上限饱和，避免
+混合已知/未知字段被误解为零或发生整数回绕。
 
-```
-score_i = bw_i^α / rtt_i^β
-w_i     = clamp( round( 256 × score_i / max_j(score_j) ), 1, 256 )
-```
+逐跳组合规则：
 
-其中：
+| 属性 | 组合 |
+|---|---|
+| bottleneck | `min`，未声明链路不设限 |
+| mean RTT | 各跳相加 |
+| jitter | 各跳标准差相加 |
+| age | 取最大值，并加入本节点 residence time |
+| confidence | 取最小值 |
 
-- `bw_i` = `SelectedRoute.BottleneckMbps`（端到端瓶颈）；缺失（对端是 babeld/bird
-  等不认此字段的实现）→ 回退 `bandwidthOf(interfaceName)` 本地声明；
-- `rtt_i` = `SelectedRoute.PathRTTMicros`；缺失 → 回退本邻居 `n.rtt`；
-- `α`、`β` 可调指数，默认 `1.0, 1.0`（w ∝ 带宽/RTT）；
-- 下限保护：权重最小 1（clamp 已有），差路径不被完全饿死。
+标准差相加是 Minkowski 不等式给出的保守上界，即使各跳延迟相关也不会低估。
+residence time 防止一次收到的远端质量数据在本地永久保持“新鲜”。
 
-### 5.2 数值例子
+共享 multicast 接口无法在同一个组播 Update 中表达每个接收者不同的 RTT；有显著
+质量变化时，TH 会向各邻居发送带该邻居质量的 unicast Update。
 
-链路 A：1 Mbps / 1 ms；链路 B：1000 Mbps / 1000 ms；α=β=1：
+## 5. 无量纲路径 score
 
-```
-score_A = 1/1   = 1
-score_B = 1000/1000 = 1
-w_A = w_B = 256        → 50:50（吞吐延迟比相等，各让一步）
-```
+对每个候选路径计算：
 
-比例相同的例子（10 Mbps/5ms vs 100 Mbps/50ms）同样得到 256:256。
-这就是"带宽和延迟都占因素"的平衡点。
+```text
+score_i = (B_i / 100Mbps)^alpha
+          / (RTT_i / 10ms)^beta
+          / (1 + Jitter_i / 5ms)^gamma
+          * confidence_i
 
-### 5.3 TUI 旋钮映射
-
-一个滑块（左右键拖动），右偏带宽、左偏延迟，默认居中：
-
-```
-bias ∈ [-2, 2]（整数步进，默认 0）
-α = 1 + bias
-β = 1 - bias
-```
-
-- bias=0 → α=β=1（默认）；
-- bias=+1 → α=2, β=0（纯带宽主导）；
-- bias=-1 → α=0, β=2（纯延迟主导）。
-
-settings 里存储显式的 `weight_bandwidth_exponent` / `weight_rtt_exponent`
-（float64，默认 1.0，范围 [0,4]），TUI 只操作 bias 并写回换算结果，滑块旁实时显示
-当前 α/β 与生效公式。滑块只能表达 α+β=2 的组合；当存储值不在该线上时，TUI 会给出
-提示，并且除非用户真正移动滑块，否则原指数保持不变，避免无关保存静默改写 ECMP 调优。
-
-## 6. B-lite（可选）：带宽进入主路径选择
-
-纯方案 A 只改分流，主路径选择仍是纯 RTT——极端场景下（10 Mbps/1ms vs
-1000 Mbps/1000ms）主路径是薄链路，故障时全网塌到 10 Mbps。如需带宽参与排序：
-
-```
-metric = rtt_cost + K / bottleneck_bw      # K 默认 0（= 纯 A）
+weight_i = clamp(round(256 * score_i / max(score)), 1, 256)
 ```
 
-- K=0：行为与现状完全一致；
-- K 调大：主路径开始偏向高瓶颈路径；
-- K 只影响准入/排序，不影响 weight 公式（两旋钮各管一层，不冲突）；
-- 保持加性形式，满足 RFC 8966 §3.5.2 的严格单调/左分配要求；
-- 选择层已有的滞回（A.3）压住主路径抖动。
+固定参考值使 score 无量纲。改变 Mbps/bps 或 us/ms 的表示单位不会在指数不同时
+改变路径排序。
 
-settings 字段：`weight_bottleneck_penalty`（默认 0），在 TUI 的 Babel settings 中
-可直接编辑（Bottleneck penalty K）。
+- `B_i` 优先使用端到端 bottleneck，再回退本地声明带宽；完全未知按 1 Mbps 保守处理。
+- 未知 RTT 使用 120 ms、未知 jitter 使用 20 ms，置信度使用 0.10。
+- 只有 PathRTT 缺失时才回退新鲜的本地第一跳估计。
+- 已知但过期的端到端 RTT不会回退成更小的第一跳 RTT，而是使用保守未知值。
+- 非有限或非正 score 得到最小 weight 1；整个候选集都无有效 score 时等权 256。
 
-## 7. 外部 PTP 接口支持（BIRD 风格）
+全局 `alpha`、`beta`、`gamma` 默认均为 1，范围 `[0,4]`。每隧道的 `balance`
+仍可覆盖 alpha/beta，映射为 `alpha=clamp(1+bias)`、
+`beta=clamp(1-bias)`；gamma 使用全局值。
 
-外部接口没有 TH 记录，在 daemon settings 显式声明：
+## 6. 权重稳定性
 
-TUI 的 Babel settings 可以直接管理外部接口：从系统真实接口列表里按关键词
-过滤选取，配置带宽、组播/单播模式和单播邻居；增删改后随其他 Babel settings
-一起保存（写入 thd.json）。
+Linux multipath 权重变化可能导致流重新哈希。自动质量变化采用每前缀独立状态机：
+
+1. 比较归一化流量份额，而不是直接比较 1..256 整数。
+2. 所有份额变化不超过 10% 时不更新。
+3. 显著变化必须连续观察两次。
+4. 每个前缀两次 weight-only 更新至少间隔 60 秒。
+5. 30 秒周期 reconcile 会重试已确认但仍在 cooldown 的目标。
+
+候选增删、next hop 变化和故障撤回属于结构变化，立即安装。管理员显式修改全局
+alpha/beta/gamma 也立即刷新，不受测量噪声冷却限制。若外部程序修改了内核路由，
+下一次 reconcile 以 netlink 当前状态为准重新建立基线。
+
+## 7. 配置与可观测性
+
+默认 Babel 配置的相关字段：
 
 ```json
-"babel": {
-  "interfaces": {
-    "gre-ext0": { "bandwidth_mbps": 100, "multicast": true },
-    "tun-ext1": { "bandwidth_mbps": 10, "multicast": false, "neighbours": ["fe80::1"] }
+{
+  "babel": {
+    "delay_metric": true,
+    "unicast_hello_seconds": 4,
+    "delay_probe_interval_milliseconds": 2000,
+    "delay_sample_max_age_milliseconds": 10000,
+    "delay_smoothing_time_constant_milliseconds": 30000,
+    "multipath_max_paths": 4,
+    "multipath_slack": 512,
+    "weight_bandwidth_exponent": 1,
+    "weight_rtt_exponent": 1,
+    "weight_jitter_exponent": 1,
+    "weight_bottleneck_penalty": 0
   }
 }
 ```
 
-职责边界：
+约束：probe 为 250..60000 ms；max age 必须大于 probe 且不超过 600000 ms；
+tau 为 1000..600000 ms；指数必须有限且在 `[0,4]`；K 必须有限且在
+`[0, 1e9]`。
 
-- TH 不创建/修改/删除外部接口（链路/地址/MTU/up 全归创建者），只在上面跑 Babel；
-- 外部接口死亡 → Hello/IHU 超时 → 撤回，与 TH 隧道一致；
-- 路由安装仍用引擎 realm（protocol 242），只删自己装的路由；
-- 瓶颈传播对外部接口与 TH 隧道一视同仁（都贡献声明带宽）。
+TUI 的 Babel settings 可编辑这些字段，并提供 Live path metrics 页面。健康数据包含：
 
-约束：
+- 邻居 mean RTT、jitter、窗口 min、age、samples、outliers、confidence、fresh；
+- 候选路径 metric、bottleneck、端到端 RTT/jitter/age/confidence、score；
+- 已安装 weight 与当前目标 weight。
 
-- 接口名不能与 TH 隧道接口重名（配置校验拒绝）；
-- 组播能力因隧道类型而异：GRE/IPIP 通常可组播；不支持的就 `multicast: false` +
-  `neighbours` 显式列表；
-- 双栈：Speaker 同时绑 udp4/udp6 socket，组播接口按其地址族加入
-  ff02::1:6（IPv6）和/或 224.0.0.111（IPv4），IPv4-only 外部链路可以直接
-  组播；单播模式也支持 IPv4 邻居地址；
-- 自动降级：接口没有可用地址、组播加入失败时，若配置了单播邻居则自动回退
-  到单播模式，否则跳过该接口并告警日志，不会让整个引擎失败。
+Tunnel dashboard 的 Babel peer 行显示 RTT、jitter、age、confidence 和 fresh/stale，
+不会混入 WireGuard handshake/transfer 字段。
 
-## 8. 配置总览（`internal/config/settings.go`）
+## 8. 限制
 
-```json
-"babel": {
-  "router_id": "...",
-  "route_table": 0,
-  "delay_metric": true,
-  "unicast_hello_seconds": 4,
-  "multipath_max_paths": 4,
-  "multipath_slack": 512,
-  "weight_bandwidth_exponent": 1.0,
-  "weight_rtt_exponent": 1.0,
-  "weight_bottleneck_penalty": 0,
-  "interfaces": { },
-  "advertise": { "source_interfaces": ["lo"], "include": [], "exclude": [] }
-}
-```
+- 带宽是静态声明值，不是主动吞吐测量。
+- Linux nexthop weight 是按流 hash 的统计比例，不是逐包调度保证。
+- PathMetrics/PathQuality 是 TH 扩展；旧实现仍能交换基础 Babel 路由，但只提供
+  本地回退质量。
+- weight 只影响已通过 Babel 可行性和 slack 的候选，不能把不可达路径重新加入。
 
-校验规则（`BabelSettings.Validate()`）：
+## 9. 验证重点
 
-- 指数 ∈ [0,4]；
-- K ≥ 0；
-- `interfaces` 键为合法接口名（1-15 字符，无空白），且不与 TH 隧道接口重名；
-- 外部接口的 `neighbours` 地址合法、`bandwidth_mbps` 范围同隧道；
-- 既有字段校验不变。
-
-## 9. 稳定性（冷却阈值）
-
-权重变化触发内核路由更新 → 流重哈希 → 连接抖动。要求：
-
-- weight 输入用**平滑 RTT**（`n.rtt` 已是指数平滑）和**静态声明带宽**；
-- 引擎在 `installRoutes` 前比较新旧权重：只有任一候选的 score 相对变化 ≥ 10%
-  才重装内核路由，否则沿用上次安装的路由；
-- 实现：引擎记录上次安装的权重指纹（`map[prefix]string`），与本次比对后决定是否
-  重装。
-
-## 10. 边界情况
-
-| 场景 | 行为 |
-|---|---|
-| 对端不认识新 sub-TLV（babeld/bird） | 字段缺失 → 回退本地第一跳值，不报错、不降级 |
-| 未声明带宽的接口 | 视为 ∞，该跳不设限（min 无效果） |
-| 带宽 0 | 视为未声明（∞），不允许用 0 打死路径 |
-| path RTT 回绕 | 内部一律 int64 μs 累加；线格式按 RFC 9616 uint32 语义编码 |
-| 路由撤回/过期 | 瓶颈值随路由消失，hold-time 条目不导出 |
-| 候选集变化 | 存活候选重新归一化；只剩一条时退化为单路径（无 multipath） |
-| 外部 PTP 只有 IPv4 | 依赖双栈前置项，否则暂不支持 |
-
-## 11. 实现顺序（文件级清单）
-
-1. **proto 层**：`internal/babel/proto/tlv_update.go` 加字段；`proto/parser.go`
-   加 sub-TLV 编解码；单测覆盖：未知 sub-TLV 忽略、RTT 回绕、min 语义。
-2. **speaker 层**：`internal/babel/route.go` 加存储字段；`speaker.go` 的
-   `onUpdateReceived` 存储、`encodeRoutes` 重算、`Advertise` 源头值、
-   `SelectedRoute` 导出；单测覆盖三跳 min 传播。
-3. **settings 层**：`internal/config/settings.go` 加 α/β/K + `interfaces` 外部
-   PTP 结构 + 校验 + 默认值。
-4. **引擎层**：`internal/backend/linux/babel_backend.go` 的
-   `babelRoutesToNetlink` 改用端到端值、`babelMultipathWeight` 换成
-   `bottleneck^α/rtt^β`、权重冷却指纹、合并外部接口（`ext:<name>` 合成 ID）；
-   单测覆盖公式、回退、冷却。
-5. **双栈前置**：Speaker 增加 udp4+udp6 双 socket（IPv4-only 外部 PTP 依赖）。
-6. **TUI**：`internal/app/settings.go` 加 bias 滑块 + α/β 实时显示。
-7. **集成测试**：三节点 netns（见第 12 节）。
-
-## 12. 测试计划与验收标准
-
-### 12.1 单元测试
-
-- sub-TLV 编解码 + 未知 sub-TLV 忽略；
-- min 传播：模拟三跳通告链，断言每跳结果；
-- weight 公式：α/β 变化时比例变化正确；缺字段回退本地值；clamp 下限 1；
-- 冷却阈值：微小 RTT 波动不触发重装，≥10% 才触发。
-
-### 12.2 集成测试（三节点 netns）
-
-拓扑：A（10 Mbps 声明）─ B（1000 Mbps）─ C，C 另有平行路径 D（1000 Mbps）到同一前缀。
-
-- 断言 C 学到的候选 `BottleneckMbps == 10`（不需要知道 B 的拓扑）；
-- 断言两路 weight 按端到端值成比例（默认 α=β=1）；
-- 调大 β 后比例向低延迟路倾斜、调大 α 后向高瓶颈路倾斜；
-- 验证 10% 冷却：模拟微小 RTT 波动，断言内核路由未重装。
-
-### 12.3 验收标准
-
-- 三节点测试证明端到端瓶颈可见；
-- `w ∝ bottleneck^α / path_rtt^β` 端到端生效，α/β 可调且默认 (1,1)；
-- 冷却阈值生效；
-- 外部 PTP（声明带宽）与 TH 隧道行为一致；
-- 全部单测/集成/race/guard 通过。
-
-## 13. 参考文件
-
-- `internal/babel/proto/tlv_update.go`、`proto/parser.go`：Update 结构、sub-TLV 编解码
-- `internal/babel/route.go`、`speaker.go`：Route/SelectedRoute、通告与选择
-- `internal/backend/linux/babel_backend.go`：引擎、weight、路由安装
-- `internal/config/settings.go`：Babel settings 与校验
-- `internal/app/settings.go`：TUI settings 视图
-- `internal/model/types.go`：`BabelTunnelConfig`
-- RFC 8966 §3.5.2（metric 代数）、RFC 9616（延迟度量与时间戳）、RFC 9229（v4-via-v6）
+单元测试覆盖时间感知均值/方差、孤立尖峰、持续阶跃、新鲜度、未知值 sentinel、
+多跳质量组合、真实 best metric 的 slack、无量纲 score、过期回退、权重份额阈值、
+两次确认、每前缀 cooldown、结构变化和健康/TUI 展示。Linux namespace 集成测试
+继续验证实际接口、路由所有权和并发 reconcile。

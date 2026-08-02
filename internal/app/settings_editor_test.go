@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -78,9 +79,10 @@ func TestSettingsFieldsCoverEverySetting(t *testing.T) {
 	fields := settingsFields(settingsEditorFixture().draft, settingsEditorFixture().babel.RouterID)
 	for _, id := range []string{
 		"babel.router_id", "babel.delay_metric", "babel.route_table",
-		"babel.unicast_hello_seconds", "babel.max_paths", "babel.slack", "babel.k_penalty",
+		"babel.unicast_hello_seconds", "babel.delay_probe_ms", "babel.delay_max_age_ms", "babel.delay_tau_ms",
+		"babel.max_paths", "babel.slack", "babel.k_penalty", "babel.bandwidth_exponent", "babel.rtt_exponent", "babel.jitter_exponent",
 		"babel.advertise_sources", "babel.advertise_prefixes", "babel.include", "babel.exclude",
-		"babel.external_interfaces", "mptcp.enabled", "mptcp.scheduler",
+		"babel.external_interfaces", "babel.live_metrics", "mptcp.enabled", "mptcp.scheduler",
 	} {
 		if settingsFieldIndex(fields, id) == 0 {
 			t.Errorf("settings field %q is missing: %+v", id, fields)
@@ -171,6 +173,21 @@ func TestSettingsInputOverlayAcceptsTyping(t *testing.T) {
 	want := netip.MustParsePrefix("10.0.0.0/8")
 	if len(model.draft.Babel.Advertise.Include) != 1 || model.draft.Babel.Advertise.Include[0] != want {
 		t.Fatalf("include filter = %+v, want [%s]", model.draft.Babel.Advertise.Include, want)
+	}
+}
+
+func TestSettingsMainKeepsIncludeFilterVisibleInSmallTerminal(t *testing.T) {
+	model := settingsEditorFixture()
+	model.width, model.height = 72, 14
+	model.fieldSelected = settingsFieldIndex(settingsFields(model.draft, model.babel.RouterID), "babel.include") - 1
+	view := model.mainView(model.width)
+	if !strings.Contains(view, "Include filter") || !strings.Contains(view, "above") || !strings.Contains(view, "below") {
+		t.Fatalf("selected include filter is not visible in the field window:\n%s", view)
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(settingsModel)
+	if model.overlay == nil || model.overlay.Kind != workspaceOverlayList {
+		t.Fatalf("visible include filter did not open its list editor: %+v", model.overlay)
 	}
 }
 
@@ -493,6 +510,64 @@ func TestSettingsMainViewShowsBabelHeaderAndAutoRouterIDInField(t *testing.T) {
 	routerID := fields[settingsFieldIndex(fields, "babel.router_id")-1]
 	if routerID.EditValue != "0011223344556677" {
 		t.Fatalf("auto router id must be editable as the effective value, got %q", routerID.EditValue)
+	}
+}
+
+func TestSettingsLiveMetricsViewShowsDelayAndWeights(t *testing.T) {
+	model := settingsEditorFixture()
+	model.babel = core.BabelHealth{
+		RouterID: "0011223344556677",
+		Neighbours: []core.BabelNeighbourHealth{{
+			Interface: "wg0", Address: "fe80::1", RTTMicros: 12_000, JitterMicros: 2_000,
+			MinRTTMicros: 10_000, AgeMillis: 500, Samples: 9, Confidence: 0.9, Fresh: true,
+		}},
+		Routes: []core.BabelRouteHealth{{
+			Prefix: "10.0.0.0/24", Interface: "wg0", NextHop: "fe80::1", Metric: 120,
+			BottleneckMbps: 100, RTTMicros: 12_000, JitterMicros: 2_000, AgeMillis: 500,
+			Score: 1.25, InstalledWeight: 200, DesiredWeight: 180,
+		}},
+	}
+	fields := settingsFields(model.draft, model.babel.RouterID)
+	field := fields[settingsFieldIndex(fields, "babel.live_metrics")-1]
+	if err := model.activateSettingsField(field); err != nil {
+		t.Fatal(err)
+	}
+	if model.page != settingsMetrics {
+		t.Fatal("live metrics field did not open the metrics page")
+	}
+	view := model.metricsView(120)
+	for _, expected := range []string{"wg0", "fe80::1", "RTT 12ms", "jitter 2ms", "10.0.0.0/24", "weight 200 -> 180"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("metrics view missing %q:\n%s", expected, view)
+		}
+	}
+}
+
+func TestSettingsLiveMetricsViewScrollsToAllRoutes(t *testing.T) {
+	model := settingsEditorFixture()
+	model.page = settingsMetrics
+	model.width, model.height = 72, 12
+	for i := 0; i < 12; i++ {
+		model.babel.Routes = append(model.babel.Routes, core.BabelRouteHealth{
+			Prefix: fmt.Sprintf("10.0.%d.0/24", i), Interface: "wg0", NextHop: "fe80::1",
+			Metric: 100, BottleneckMbps: 100, RTTMicros: 10_000,
+			JitterMicros: 1000, DesiredWeight: 256,
+		})
+	}
+	first := model.metricsView(model.width)
+	if model.metricsOffset != 0 || strings.Contains(first, "10.0.11.0/24") {
+		t.Fatalf("initial metrics viewport is not at the top:\n%s", first)
+	}
+	updated, _ := model.updateMetrics(tea.KeyMsg{Type: tea.KeyEnd})
+	model = updated.(settingsModel)
+	last := model.metricsView(model.width)
+	if !strings.Contains(last, "10.0.11.0/24") || model.metricsOffset != model.metricsMaxOffset() {
+		t.Fatalf("end did not expose the final route at offset %d/%d:\n%s", model.metricsOffset, model.metricsMaxOffset(), last)
+	}
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 72, Height: 40})
+	model = updated.(settingsModel)
+	if model.metricsOffset > model.metricsMaxOffset() {
+		t.Fatalf("resize left metrics offset outside range: %d > %d", model.metricsOffset, model.metricsMaxOffset())
 	}
 }
 

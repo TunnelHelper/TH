@@ -62,6 +62,16 @@ type Route struct {
 	// PathRTTMicros is the accumulated end-to-end smoothed RTT (microseconds).
 	// Negative means unknown.
 	PathRTTMicros int64
+
+	// PathJitterMicros is a conservative sum of per-hop RTT standard
+	// deviations. Negative means unknown.
+	PathJitterMicros int64
+
+	// PathMetricAgeMillis and PathMetricConfidence describe freshness and
+	// estimator confidence of the propagated path metrics.
+	PathMetricAgeMillis   int64
+	PathMetricConfidence  uint16
+	PathMetricsReceivedAt time.Time
 }
 
 // SelectedRoute is an exported view of a route chosen by the selection
@@ -81,7 +91,10 @@ type SelectedRoute struct {
 
 	// PathRTTMicros is the end-to-end accumulated smoothed RTT, used by the
 	// data plane for weighted ECMP. Negative means unknown.
-	PathRTTMicros int64
+	PathRTTMicros        int64
+	PathJitterMicros     int64
+	PathMetricAgeMillis  int64
+	PathMetricConfidence uint16
 }
 
 func (r *Route) key() (netip.Prefix, netip.Addr) {
@@ -119,5 +132,5 @@ func (r *Route) updateSmoothedMetric(alpha float64) {
 
 // fingerprint returns a stable string identity for change detection.
 func (r *Route) fingerprint() string {
-	return fmt.Sprintf("%s/%s/%s/%d/%d", r.Source.Prefix, hex.EncodeToString(r.Source.RouterID[:]), r.NextHop, r.PathBottleneckMbps, r.PathRTTMicros)
+	return fmt.Sprintf("%s/%s/%s/%d/%d/%d/%d", r.Source.Prefix, hex.EncodeToString(r.Source.RouterID[:]), r.NextHop, r.PathBottleneckMbps, r.PathRTTMicros, r.PathJitterMicros, r.PathMetricConfidence)
 }

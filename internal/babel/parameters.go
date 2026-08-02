@@ -58,13 +58,27 @@ type Parameters struct {
 	// DelayMax.
 	DelayMaxPenalty uint16
 
-	// DelaySmoothingAlpha is the exponential-smoothing factor applied to
-	// RTT samples before they are mapped to a cost.
-	DelaySmoothingAlpha float64
+	// DelayProbeInterval controls the timestamped Hello+IHU measurement
+	// cadence independently from Babel liveness advertisements.
+	DelayProbeInterval time.Duration
 
-	// BottleneckPenalty (K) optionally adds K / bottleneck_bw to the route
-	// metric so bandwidth participates in primary-path selection and
-	// admission. Zero (the default) keeps selection purely delay-based.
+	// DelaySmoothingTimeConstant is the physical time constant of the RTT
+	// mean and variance estimator.
+	DelaySmoothingTimeConstant time.Duration
+
+	// DelaySampleMaxAge bounds how long an RTT estimate remains usable.
+	DelaySampleMaxAge time.Duration
+
+	// DelayWarmupSamples is the number of valid samples required before an
+	// estimate affects route cost.
+	DelayWarmupSamples uint32
+
+	// DelayMinWindow is the rolling reset window of the base RTT estimate.
+	DelayMinWindow time.Duration
+
+	// BottleneckPenalty (K) optionally adds K / local_link_bw once per hop so
+	// bandwidth participates in primary-path selection and admission. Zero
+	// (the default) keeps selection purely delay-based.
 	BottleneckPenalty float64
 }
 
@@ -78,35 +92,43 @@ const (
 	DefaultUpdateInterval         = 16 * time.Second // 4 * DefaultMulticastHelloInterval
 	DefaultUrgentTimeout          = 200 * time.Millisecond
 
-	DefaultIHUHoldTimeFactor = 3.5 // times the advertised IHU interval
-	DefaultWiredLinkCost     = 96
-	DefaultSmoothingAlpha    = 0.25
-	DefaultMaxPaths          = 4
-	DefaultDelayMin          = 10 * time.Millisecond
-	DefaultDelayMax          = 120 * time.Millisecond
-	DefaultDelayMaxPenalty   = 150
-	DefaultDelayAlpha        = 0.25
+	DefaultIHUHoldTimeFactor                 = 3.5 // times the advertised IHU interval
+	DefaultWiredLinkCost                     = 96
+	DefaultSmoothingAlpha                    = 0.25
+	DefaultMaxPaths                          = 4
+	DefaultDelayMin                          = 10 * time.Millisecond
+	DefaultDelayMax                          = 120 * time.Millisecond
+	DefaultDelayMaxPenalty                   = 150
+	DefaultDelayProbeInterval                = 2 * time.Second
+	DefaultDelaySmoothingTimeConstant        = 30 * time.Second
+	DefaultDelaySampleMaxAge                 = 10 * time.Second
+	DefaultDelayWarmupSamples         uint32 = 4
+	DefaultDelayMinWindow                    = 10 * time.Minute
 )
 
 var DefaultParameters = Parameters{
-	MulticastHelloInterval: DefaultMulticastHelloInterval,
-	UnicastHelloInterval:   DefaultUnicastHelloInterval,
-	UpdateInterval:         DefaultUpdateInterval,
-	IHUInterval:            DefaultIHUInterval,
-	IHUHoldTimeFactor:      DefaultIHUHoldTimeFactor,
-	RouteExpiryTime:        DefaultRouteExpiryTime,
-	InitialRequestTimeout:  DefaultInitialRequestTimeout,
-	UrgentTimeout:          DefaultUrgentTimeout,
-	SourceGCTime:           DefaultSourceGCTime,
-	NominalLinkCost:        DefaultWiredLinkCost,
-	SmoothingAlpha:         DefaultSmoothingAlpha,
-	MaxPaths:               DefaultMaxPaths,
-	SplitHorizon:           true,
-	DelayMetric:            true,
-	DelayMin:               DefaultDelayMin,
-	DelayMax:               DefaultDelayMax,
-	DelayMaxPenalty:        DefaultDelayMaxPenalty,
-	DelaySmoothingAlpha:    DefaultDelayAlpha,
+	MulticastHelloInterval:     DefaultMulticastHelloInterval,
+	UnicastHelloInterval:       DefaultUnicastHelloInterval,
+	UpdateInterval:             DefaultUpdateInterval,
+	IHUInterval:                DefaultIHUInterval,
+	IHUHoldTimeFactor:          DefaultIHUHoldTimeFactor,
+	RouteExpiryTime:            DefaultRouteExpiryTime,
+	InitialRequestTimeout:      DefaultInitialRequestTimeout,
+	UrgentTimeout:              DefaultUrgentTimeout,
+	SourceGCTime:               DefaultSourceGCTime,
+	NominalLinkCost:            DefaultWiredLinkCost,
+	SmoothingAlpha:             DefaultSmoothingAlpha,
+	MaxPaths:                   DefaultMaxPaths,
+	SplitHorizon:               true,
+	DelayMetric:                true,
+	DelayMin:                   DefaultDelayMin,
+	DelayMax:                   DefaultDelayMax,
+	DelayMaxPenalty:            DefaultDelayMaxPenalty,
+	DelayProbeInterval:         DefaultDelayProbeInterval,
+	DelaySmoothingTimeConstant: DefaultDelaySmoothingTimeConstant,
+	DelaySampleMaxAge:          DefaultDelaySampleMaxAge,
+	DelayWarmupSamples:         DefaultDelayWarmupSamples,
+	DelayMinWindow:             DefaultDelayMinWindow,
 }
 
 // LocalRouteMetric is the metric advertised for directly attached or

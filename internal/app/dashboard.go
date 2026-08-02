@@ -483,6 +483,33 @@ func (m dashboardModel) peerLinesWithin(width, maxLines int) []string {
 		if endpoint == "" {
 			endpoint = "-"
 		}
+		if peer.Protocol == "babel" {
+			lines = append(lines, fit(fmt.Sprintf("Babel neighbor %s  %s", key, endpoint), width))
+			state := "warming"
+			if peer.MetricFresh != nil {
+				if *peer.MetricFresh {
+					state = "fresh"
+				} else {
+					state = "stale"
+				}
+			}
+			rtt, jitter, age, confidence := time.Duration(0), time.Duration(0), int64(0), 0.0
+			if peer.RTTMicros != nil {
+				rtt = time.Duration(*peer.RTTMicros) * time.Microsecond
+			}
+			if peer.JitterMicros != nil {
+				jitter = time.Duration(*peer.JitterMicros) * time.Microsecond
+			}
+			if peer.MetricAgeMillis != nil {
+				age = *peer.MetricAgeMillis
+			}
+			if peer.MetricConfidence != nil {
+				confidence = *peer.MetricConfidence * 100
+			}
+			lines = append(lines, fit(fmt.Sprintf("  RTT %s  jitter %s  age %dms  %.0f%% %s",
+				rtt.Round(time.Microsecond), jitter.Round(time.Microsecond), age, confidence, state), width))
+			continue
+		}
 		lines = append(lines, fit(fmt.Sprintf("Peer %s  %s", key, endpoint), width))
 		handshake := "never"
 		if peer.LastHandshakeTime != nil {

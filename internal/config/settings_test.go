@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +16,26 @@ func TestLoadMissingSettingsUsesAllDefaults(t *testing.T) {
 	}
 	if defaults := Defaults(); !reflect.DeepEqual(settings, defaults) {
 		t.Fatalf("missing settings = %+v, want defaults %+v", settings, defaults)
+	}
+}
+
+func TestBabelDelayAndWeightValidation(t *testing.T) {
+	settings := Defaults()
+	settings.Babel.DelaySampleMaxAgeMillis = settings.Babel.DelayProbeIntervalMillis
+	if err := settings.Validate(); err == nil {
+		t.Fatal("sample max age equal to probe interval was accepted")
+	}
+	for _, invalid := range []float64{math.NaN(), math.Inf(1), -1, 5} {
+		settings = Defaults()
+		settings.Babel.WeightJitterExponent = invalid
+		if err := settings.Validate(); err == nil {
+			t.Fatalf("invalid jitter exponent %v was accepted", invalid)
+		}
+	}
+	settings = Defaults()
+	settings.Babel.WeightBottleneckPenalty = math.Inf(1)
+	if err := settings.Validate(); err == nil {
+		t.Fatal("infinite bandwidth penalty was accepted")
 	}
 }
 

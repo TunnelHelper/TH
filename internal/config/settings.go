@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/netip"
 	"os"
 	"os/user"
@@ -97,6 +98,17 @@ type BabelSettings struct {
 	// non-multicast tunnel links. Zero means the default (4 seconds).
 	UnicastHelloSeconds int `json:"unicast_hello_seconds,omitempty"`
 
+	// DelayProbeIntervalMillis controls active RFC 9616 timestamp exchanges
+	// independently from the Hello/IHU liveness cadence.
+	DelayProbeIntervalMillis int `json:"delay_probe_interval_milliseconds,omitempty"`
+
+	// DelaySampleMaxAgeMillis is the freshness deadline of an RTT estimate.
+	DelaySampleMaxAgeMillis int `json:"delay_sample_max_age_milliseconds,omitempty"`
+
+	// DelaySmoothingTimeConstantMillis controls the time-aware EWMA mean and
+	// variance response independently from the probe interval.
+	DelaySmoothingTimeConstantMillis int `json:"delay_smoothing_time_constant_milliseconds,omitempty"`
+
 	// MultipathMaxPaths caps the number of next hops installed for one
 	// prefix. Zero means the default (4).
 	MultipathMaxPaths int `json:"multipath_max_paths,omitempty"`
@@ -106,15 +118,16 @@ type BabelSettings struct {
 	// equal-cost multipath only.
 	MultipathSlack int `json:"multipath_slack,omitempty"`
 
-	// WeightBandwidthExponent and WeightRTTExponent are the exponents of
-	// the ECMP weight formula w ∝ bottleneck^α / path_rtt^β. The default
-	// (1, 1) balances capacity against latency; a larger α favours
-	// bandwidth, a larger β favours low latency.
+	// WeightBandwidthExponent, WeightRTTExponent and WeightJitterExponent
+	// control the dimensionless ECMP score. Defaults of (1, 1, 1) balance
+	// capacity, latency and delay variation; larger values make the
+	// corresponding signal more influential.
 	WeightBandwidthExponent float64 `json:"weight_bandwidth_exponent,omitempty"`
 	WeightRTTExponent       float64 `json:"weight_rtt_exponent,omitempty"`
+	WeightJitterExponent    float64 `json:"weight_jitter_exponent,omitempty"`
 
-	// WeightBottleneckPenalty (K) optionally adds K / bottleneck_bw to the
-	// route metric so bandwidth participates in primary-path selection.
+	// WeightBottleneckPenalty (K) optionally adds K / local_link_bw once per
+	// hop so bandwidth participates in primary-path selection.
 	// Zero (the default) keeps selection purely delay-based.
 	WeightBottleneckPenalty float64 `json:"weight_bottleneck_penalty,omitempty"`
 
@@ -176,11 +189,15 @@ func Defaults() Settings {
 		ReconcileIntervalSeconds: 30,
 		RequestTimeoutSeconds:    15,
 		Babel: BabelSettings{
-			UnicastHelloSeconds:     4,
-			MultipathMaxPaths:       4,
-			MultipathSlack:          512,
-			WeightBandwidthExponent: 1,
-			WeightRTTExponent:       1,
+			UnicastHelloSeconds:              4,
+			DelayProbeIntervalMillis:         2000,
+			DelaySampleMaxAgeMillis:          10000,
+			DelaySmoothingTimeConstantMillis: 30000,
+			MultipathMaxPaths:                4,
+			MultipathSlack:                   512,
+			WeightBandwidthExponent:          1,
+			WeightRTTExponent:                1,
+			WeightJitterExponent:             1,
 			Advertise: BabelAdvertiseSettings{
 				SourceInterfaces: []string{"lo"},
 			},
@@ -350,18 +367,28 @@ func (b BabelSettings) Validate() error {
 	if b.UnicastHelloSeconds < 0 || b.UnicastHelloSeconds > 3600 {
 		return errors.New("unicast_hello_seconds must be between 0 and 3600")
 	}
+	if b.DelayProbeIntervalMillis < 250 || b.DelayProbeIntervalMillis > 60000 {
+		return errors.New("delay_probe_interval_milliseconds must be between 250 and 60000")
+	}
+	if b.DelaySampleMaxAgeMillis <= b.DelayProbeIntervalMillis || b.DelaySampleMaxAgeMillis > 600000 {
+		return errors.New("delay_sample_max_age_milliseconds must be greater than the probe interval and at most 600000")
+	}
+	if b.DelaySmoothingTimeConstantMillis < 1000 || b.DelaySmoothingTimeConstantMillis > 600000 {
+		return errors.New("delay_smoothing_time_constant_milliseconds must be between 1000 and 600000")
+	}
 	if b.MultipathMaxPaths < 0 || b.MultipathMaxPaths > 8 {
 		return errors.New("multipath_max_paths must be between 0 and 8")
 	}
 	if b.MultipathSlack < 0 || b.MultipathSlack > 65534 {
 		return errors.New("multipath_slack must be between 0 and 65534")
 	}
-	if b.WeightBandwidthExponent < 0 || b.WeightBandwidthExponent > 4 ||
-		b.WeightRTTExponent < 0 || b.WeightRTTExponent > 4 {
-		return errors.New("weight_bandwidth_exponent and weight_rtt_exponent must be between 0 and 4")
+	if !finiteInRange(b.WeightBandwidthExponent, 0, 4) ||
+		!finiteInRange(b.WeightRTTExponent, 0, 4) ||
+		!finiteInRange(b.WeightJitterExponent, 0, 4) {
+		return errors.New("weight bandwidth, RTT and jitter exponents must be finite and between 0 and 4")
 	}
-	if b.WeightBottleneckPenalty < 0 {
-		return errors.New("weight_bottleneck_penalty must be non-negative")
+	if math.IsNaN(b.WeightBottleneckPenalty) || math.IsInf(b.WeightBottleneckPenalty, 0) || b.WeightBottleneckPenalty < 0 || b.WeightBottleneckPenalty > 1e9 {
+		return errors.New("weight_bottleneck_penalty must be finite and between 0 and 1000000000")
 	}
 	for name, external := range b.Interfaces {
 		if len(name) == 0 || len(name) > 15 || strings.ContainsAny(name, "/ \t\r\n") {
@@ -394,6 +421,10 @@ func (b BabelSettings) Validate() error {
 		}
 	}
 	return nil
+}
+
+func finiteInRange(value, low, high float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= low && value <= high
 }
 
 // DelayMetricEnabled reports whether RFC 9616 delay-based cost is active.
@@ -464,4 +495,16 @@ func (s Settings) ReconcileInterval() time.Duration {
 
 func (s Settings) RequestTimeout() time.Duration {
 	return time.Duration(s.RequestTimeoutSeconds) * time.Second
+}
+
+func (b BabelSettings) DelayProbeInterval() time.Duration {
+	return time.Duration(b.DelayProbeIntervalMillis) * time.Millisecond
+}
+
+func (b BabelSettings) DelaySampleMaxAge() time.Duration {
+	return time.Duration(b.DelaySampleMaxAgeMillis) * time.Millisecond
+}
+
+func (b BabelSettings) DelaySmoothingTimeConstant() time.Duration {
+	return time.Duration(b.DelaySmoothingTimeConstantMillis) * time.Millisecond
 }

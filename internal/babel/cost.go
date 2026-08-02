@@ -4,6 +4,7 @@
 package babel
 
 import (
+	"math"
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/babel/proto"
@@ -38,8 +39,8 @@ type CostProvider struct {
 
 func defaultRxCost(n *Neighbour, nominal proto.Metric) proto.Metric {
 	if n.helloUnicast.OutOf(2, 3) || n.helloMulticast.OutOf(2, 3) {
-		if n.costOverride != nil {
-			return *n.costOverride
+		if override, ok := n.costOverrideValue(); ok {
+			return override
 		}
 		return nominal
 	}
@@ -105,4 +106,29 @@ func DelayCost(rtt time.Duration, nominal uint16, min, max time.Duration, maxPen
 	fraction := float64(rtt-min) / float64(max-min)
 	extra := uint16(fraction*float64(maxPenalty) + 0.5)
 	return nominal + extra
+}
+
+// InverseBandwidthPenalty maps a local link bandwidth to an additive Babel
+// cost. Applying the penalty once per link keeps the metric additive; applying
+// K/bottleneck repeatedly to an already accumulated path metric would count
+// the same bottleneck once at every downstream hop.
+func InverseBandwidthPenalty(k float64, bandwidthMbps int) proto.Metric {
+	if k <= 0 || bandwidthMbps <= 0 || math.IsNaN(k) {
+		return 0
+	}
+	penalty := k / float64(bandwidthMbps)
+	if math.IsInf(penalty, 1) || penalty >= float64(proto.Retraction-1) {
+		return proto.Retraction - 1
+	}
+	return proto.Metric(math.Round(penalty))
+}
+
+func addMetricPenalty(metric, penalty proto.Metric) proto.Metric {
+	if metric == proto.Retraction {
+		return proto.Retraction
+	}
+	if int(metric)+int(penalty) >= int(proto.Retraction) {
+		return proto.Retraction - 1
+	}
+	return metric + penalty
 }

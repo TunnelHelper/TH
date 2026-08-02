@@ -26,6 +26,7 @@ const (
 	settingsMain settingsPage = iota
 	settingsInterfaces
 	settingsInterface
+	settingsMetrics
 )
 
 type settingsLoadMsg struct {
@@ -37,6 +38,10 @@ type settingsLoadMsg struct {
 }
 
 type settingsSaveMsg struct{ err error }
+type settingsHealthMsg struct {
+	babel core.BabelHealth
+	err   error
+}
 
 // settingsModel is the unified daemon-settings editor: one page listing
 // every operator-editable setting (Babel and MPTCP sections), with
@@ -60,6 +65,7 @@ type settingsModel struct {
 	ifaceAdding    bool
 	ifaceName      string
 	ifaceDraft     config.BabelExternalInterface
+	metricsOffset  int
 
 	width     int
 	height    int
@@ -120,10 +126,22 @@ func (m settingsModel) save() tea.Cmd {
 	}
 }
 
+func (m settingsModel) loadHealth() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, m.timeout)
+		defer cancel()
+		health, err := m.client.Health(ctx)
+		return settingsHealthMsg{babel: health.Babel, err: err}
+	}
+}
+
 func (m settingsModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if size, ok := message.(tea.WindowSizeMsg); ok {
 		m.width, m.height = size.Width, size.Height
 		m.resizeInput()
+		if m.page == settingsMetrics {
+			m.metricsOffset = min(m.metricsOffset, m.metricsMaxOffset())
+		}
 		return m, nil
 	}
 	if key, ok := message.(tea.KeyMsg); ok && key.String() == "ctrl+c" {
@@ -157,6 +175,14 @@ func (m settingsModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.busy = "Refreshing settings"
 		return m, m.load()
+	case settingsHealthMsg:
+		m.busy = ""
+		m.healthErr = message.err
+		if message.err == nil {
+			m.babel = message.babel
+			m.metricsOffset = min(m.metricsOffset, m.metricsMaxOffset())
+		}
+		return m, nil
 	}
 	if !m.loaded {
 		key, ok := message.(tea.KeyMsg)
@@ -175,7 +201,6 @@ func (m settingsModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-
 	if m.overlay != nil {
 		return m.updateOverlay(message)
 	}
@@ -194,9 +219,36 @@ func (m settingsModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateInterfaceList(key)
 	case settingsInterface:
 		return m.updateInterfaceEditor(key)
+	case settingsMetrics:
+		return m.updateMetrics(key)
 	default:
 		return m, nil
 	}
+}
+
+func (m settingsModel) updateMetrics(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	maximum := m.metricsMaxOffset()
+	page := m.metricsViewportRows()
+	switch key.String() {
+	case "q", "esc":
+		m.page = settingsMain
+	case "up", "k":
+		m.metricsOffset = max(0, m.metricsOffset-1)
+	case "down", "j":
+		m.metricsOffset = min(maximum, m.metricsOffset+1)
+	case "pgup":
+		m.metricsOffset = max(0, m.metricsOffset-page)
+	case "pgdown":
+		m.metricsOffset = min(maximum, m.metricsOffset+page)
+	case "home", "g":
+		m.metricsOffset = 0
+	case "end", "G":
+		m.metricsOffset = maximum
+	case "r":
+		m.busy = "Refreshing path metrics"
+		return m, m.loadHealth()
+	}
+	return m, nil
 }
 
 func (m settingsModel) updateMain(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -379,6 +431,9 @@ func (m *settingsModel) activateSettingsField(field workspaceField) error {
 		case "babel.external_interfaces":
 			m.ifaceSelected = 0
 			m.page = settingsInterfaces
+		case "babel.live_metrics":
+			m.metricsOffset = 0
+			m.page = settingsMetrics
 		default:
 			return fmt.Errorf("unsupported settings field %q", field.ID)
 		}
@@ -436,6 +491,20 @@ func (m *settingsModel) applySettingsInput(action string, values []string) error
 		babel.RouteTable = parseInt(value)
 	case "babel.unicast_hello_seconds":
 		babel.UnicastHelloSeconds = parseInt(value)
+	case "babel.delay_probe_ms":
+		parsed := parseInt(value)
+		if babel.DelaySampleMaxAgeMillis > 0 && parsed >= babel.DelaySampleMaxAgeMillis {
+			return errors.New("delay probe must be shorter than sample max age")
+		}
+		babel.DelayProbeIntervalMillis = parsed
+	case "babel.delay_max_age_ms":
+		parsed := parseInt(value)
+		if parsed <= babel.DelayProbeIntervalMillis {
+			return errors.New("sample max age must be longer than delay probe")
+		}
+		babel.DelaySampleMaxAgeMillis = parsed
+	case "babel.delay_tau_ms":
+		babel.DelaySmoothingTimeConstantMillis = parseInt(value)
 	case "babel.max_paths":
 		babel.MultipathMaxPaths = parseInt(value)
 	case "babel.slack":
@@ -446,6 +515,19 @@ func (m *settingsModel) applySettingsInput(action string, values []string) error
 			return errors.New("penalty must be a non-negative number")
 		}
 		babel.WeightBottleneckPenalty = parsed
+	case "babel.bandwidth_exponent", "babel.rtt_exponent", "babel.jitter_exponent":
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < 0 || parsed > 4 {
+			return errors.New("exponent must be between 0 and 4")
+		}
+		switch id {
+		case "babel.bandwidth_exponent":
+			babel.WeightBandwidthExponent = parsed
+		case "babel.rtt_exponent":
+			babel.WeightRTTExponent = parsed
+		case "babel.jitter_exponent":
+			babel.WeightJitterExponent = parsed
+		}
 	case "babel.advertise_sources":
 		babel.Advertise.SourceInterfaces = splitNonEmpty(value)
 	case "babel.advertise_prefixes":
@@ -586,12 +668,24 @@ func settingsFields(settings config.Settings, effectiveRouterID string) []worksp
 			"Kernel table for Babel routes; 0 = main table."),
 		withFieldDescription(workspaceTextField("babel.unicast_hello_seconds", "Hello interval", strconv.Itoa(babel.UnicastHelloSeconds), validateInt(0, 3600)),
 			"Unicast Hello interval in seconds; 0 = default 4."),
+		withFieldDescription(workspaceTextField("babel.delay_probe_ms", "Delay probe", strconv.Itoa(babel.DelayProbeIntervalMillis), validateInt(250, 60000)),
+			"RFC 9616 measurement cadence in milliseconds."),
+		withFieldDescription(workspaceTextField("babel.delay_max_age_ms", "Sample max age", strconv.Itoa(babel.DelaySampleMaxAgeMillis), validateInt(251, 600000)),
+			"RTT and jitter freshness deadline in milliseconds."),
+		withFieldDescription(workspaceTextField("babel.delay_tau_ms", "Smoothing time", strconv.Itoa(babel.DelaySmoothingTimeConstantMillis), validateInt(1000, 600000)),
+			"Physical EWMA time constant in milliseconds."),
 		withFieldDescription(workspaceTextField("babel.max_paths", "Max paths", strconv.Itoa(babel.MultipathMaxPaths), validateInt(0, 8)),
 			"Maximum number of Babel next hops per prefix; 0 = default 4."),
 		withFieldDescription(workspaceTextField("babel.slack", "Path slack", strconv.Itoa(babel.MultipathSlack), validateInt(0, 65534)),
 			"Extra cost window for additional multipath candidates; 0 = equal cost only."),
-		withFieldDescription(workspaceTextField("babel.k_penalty", "Bottleneck K", strconv.FormatFloat(babel.WeightBottleneckPenalty, 'g', -1, 64), validateNonNegativeFloatInput),
-			"K / bottleneck_bw added to the route metric; 0 = delay-only primary path."),
+		withFieldDescription(workspaceTextField("babel.k_penalty", "Bandwidth K", strconv.FormatFloat(babel.WeightBottleneckPenalty, 'g', -1, 64), validateNonNegativeFloatInput),
+			"K / link bandwidth added once per hop; 0 = delay-only primary path."),
+		withFieldDescription(workspaceTextField("babel.bandwidth_exponent", "Bandwidth exponent", strconv.FormatFloat(babel.WeightBandwidthExponent, 'g', -1, 64), validateExponentInput),
+			"ECMP sensitivity to declared bottleneck bandwidth, from 0 to 4."),
+		withFieldDescription(workspaceTextField("babel.rtt_exponent", "RTT exponent", strconv.FormatFloat(babel.WeightRTTExponent, 'g', -1, 64), validateExponentInput),
+			"ECMP sensitivity to mean path RTT, from 0 to 4."),
+		withFieldDescription(workspaceTextField("babel.jitter_exponent", "Jitter exponent", strconv.FormatFloat(babel.WeightJitterExponent, 'g', -1, 64), validateExponentInput),
+			"ECMP sensitivity to path RTT variation, from 0 to 4."),
 		withFieldDescription(workspaceTextField("babel.advertise_sources", "Advertise sources", strings.Join(babel.Advertise.SourceInterfaces, ","), validateInterfaceListInput),
 			"Interfaces whose addresses are advertised; default is lo."),
 		withFieldDescription(workspaceTextField("babel.advertise_prefixes", "Advertised prefixes", formatPrefixList(babel.Advertise.AdvertisedPrefixes), validatePrefixListInput),
@@ -601,6 +695,7 @@ func settingsFields(settings config.Settings, effectiveRouterID string) []worksp
 		withFieldDescription(workspaceTextField("babel.exclude", "Exclude filter", formatPrefixList(babel.Advertise.Exclude), validatePrefixListInput),
 			"Prefixes never advertised; exclude wins over include."),
 		workspaceField{ID: "babel.external_interfaces", Label: "External Babel interfaces", Value: externalInterfacesSummary(babel.Interfaces), Kind: workspaceFieldNavigate},
+		workspaceField{ID: "babel.live_metrics", Label: "Live path metrics", Value: "Open", Kind: workspaceFieldNavigate},
 		withFieldDescription(workspaceToggleField("mptcp.enabled", "MPTCP endpoints", settings.Mptcp.Enabled),
 			"Register tunnel addresses as MPTCP endpoints; default off."),
 		withFieldDescription(workspaceChoiceField("mptcp.scheduler", "MPTCP scheduler", scheduler, schedulerButtons, schedulerSelected),
@@ -645,6 +740,14 @@ func validateBalanceInput(value string) error {
 	bias, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 	if err != nil || math.IsNaN(bias) || math.IsInf(bias, 0) || bias < -2 || bias > 2 {
 		return errors.New("balance must be between -2 (latency) and +2 (bandwidth)")
+	}
+	return nil
+}
+
+func validateExponentInput(value string) error {
+	exponent, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil || math.IsNaN(exponent) || math.IsInf(exponent, 0) || exponent < 0 || exponent > 4 {
+		return errors.New("exponent must be between 0 and 4")
 	}
 	return nil
 }
@@ -694,8 +797,16 @@ func (m settingsModel) mainView(width int) string {
 		workspaceDimStyle.Render(fit("TH / Settings", width)), "",
 		workspaceAccentStyle.Render(fit("Daemon settings", width)), status, "",
 	}
+	available := len(fields)
+	if m.height > 0 {
+		available = max(4, m.inlineHeight()-18)
+	}
+	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, available)
+	if window := workspaceWindowStatus(start, end, len(fields), width); window != "" {
+		lines = append(lines, window)
+	}
 	section := ""
-	for index := range fields {
+	for index := start; index < end; index++ {
 		field := fields[index]
 		next := "babel"
 		if strings.HasPrefix(field.ID, "mptcp.") {
@@ -774,6 +885,93 @@ func (m settingsModel) interfaceEditorView(width int) string {
 	return strings.Join(lines, "\n")
 }
 
+func (m settingsModel) metricsBodyLines(width int) []string {
+	lines := []string{workspaceAccentStyle.Render(fit("Delay estimators", width))}
+	if m.healthErr != nil {
+		lines = append(lines, workspaceErrorStyle.Render(fit(m.healthErr.Error(), width)))
+	} else if len(m.babel.Neighbours) == 0 {
+		lines = append(lines, workspaceDimStyle.Render("No Babel neighbours"))
+	} else {
+		for _, neighbour := range m.babel.Neighbours {
+			state := "stale"
+			if neighbour.Fresh {
+				state = "fresh"
+			}
+			lines = append(lines,
+				fit(fmt.Sprintf("%s  %s", neighbour.Interface, neighbour.Address), width),
+				workspaceDimStyle.Render(fit(fmt.Sprintf("  RTT %s  jitter %s  min %s  age %dms  %.0f%% %s  n=%d  spikes=%d",
+					formatBabelMicros(neighbour.RTTMicros), formatBabelMicros(neighbour.JitterMicros),
+					formatBabelMicros(neighbour.MinRTTMicros), neighbour.AgeMillis,
+					neighbour.Confidence*100, state, neighbour.Samples, neighbour.Outliers), width)),
+			)
+		}
+	}
+	lines = append(lines, "", workspaceAccentStyle.Render(fit("Weighted paths", width)))
+	if len(m.babel.Routes) == 0 {
+		lines = append(lines, workspaceDimStyle.Render("No selected Babel paths"))
+	} else {
+		for _, route := range m.babel.Routes {
+			weight := strconv.Itoa(route.DesiredWeight)
+			if route.InstalledWeight > 0 {
+				weight = fmt.Sprintf("%d -> %d", route.InstalledWeight, route.DesiredWeight)
+			}
+			lines = append(lines,
+				fit(fmt.Sprintf("%s  via %s  %s", route.Prefix, route.NextHop, route.Interface), width),
+				workspaceDimStyle.Render(fit(fmt.Sprintf("  metric %d  bw %dMbps  RTT %s  jitter %s  age %dms  score %.4g  weight %s",
+					route.Metric, route.BottleneckMbps, formatBabelMicros(route.RTTMicros),
+					formatBabelMicros(route.JitterMicros), route.AgeMillis, route.Score, weight), width)),
+			)
+		}
+	}
+	return lines
+}
+
+func (m settingsModel) metricsFooterLines(width int) []string {
+	lines := []string{""}
+	lines = append(lines, m.feedbackLines(width)...)
+	lines = append(lines, "")
+	lines = append(lines, workspaceHintLines(width,
+		"up/down  Scroll", "pgup/pgdown  Page", "home/end  Jump", "r  Refresh", "esc  Back")...)
+	return lines
+}
+
+func (m settingsModel) metricsViewportRows() int {
+	width := m.inlineWidth()
+	headerRows := 2
+	available := max(1, m.inlineHeight()-headerRows-len(m.metricsFooterLines(width)))
+	if len(m.metricsBodyLines(width)) > available {
+		available = max(1, available-1) // Scroll-position line.
+	}
+	return available
+}
+
+func (m settingsModel) metricsMaxOffset() int {
+	return max(0, len(m.metricsBodyLines(m.inlineWidth()))-m.metricsViewportRows())
+}
+
+func (m settingsModel) metricsView(width int) string {
+	header := []string{workspaceDimStyle.Render(fit("TH / Settings / Babel / Live path metrics", width)), ""}
+	body := m.metricsBodyLines(width)
+	rows := m.metricsViewportRows()
+	maximum := max(0, len(body)-rows)
+	start := min(max(m.metricsOffset, 0), maximum)
+	end := min(len(body), start+rows)
+	lines := append([]string(nil), header...)
+	if len(body) > rows {
+		lines = append(lines, workspaceWindowStatus(start, end, len(body), width))
+	}
+	lines = append(lines, body[start:end]...)
+	lines = append(lines, m.metricsFooterLines(width)...)
+	return strings.Join(lines, "\n")
+}
+
+func formatBabelMicros(value int64) string {
+	if value < 0 {
+		return "-"
+	}
+	return (time.Duration(value) * time.Microsecond).Round(time.Microsecond).String()
+}
+
 func (m settingsModel) View() string {
 	height := m.inlineHeight()
 	width := m.inlineWidth()
@@ -797,6 +995,8 @@ func (m settingsModel) View() string {
 		base = m.interfacesView(width)
 	case settingsInterface:
 		base = m.interfaceEditorView(width)
+	case settingsMetrics:
+		base = m.metricsView(width)
 	}
 	if m.overlay == nil {
 		return fitWorkspaceHeight(base, height)

@@ -38,6 +38,18 @@ type Update struct {
 	// carried in a PathMetrics sub-TLV and wrapped on the wire.
 	PathRTTMicros int64
 
+	// PathJitterMicros is a conservative end-to-end standard-deviation bound
+	// formed by adding per-hop standard deviations. Negative means unknown.
+	PathJitterMicros int64
+
+	// PathMetricAgeMillis is the age of the oldest per-hop sample. Negative
+	// means unknown. Receivers add local residence time before forwarding.
+	PathMetricAgeMillis int64
+
+	// PathMetricConfidence is a Q0.16 confidence value. Zero means unknown or
+	// stale; 65535 means fully warmed and fresh.
+	PathMetricConfidence uint16
+
 	// Sub-TLVs
 	SourcePrefix *Prefix
 }
@@ -56,6 +68,13 @@ func (u *Update) LogValue() slog.Value {
 	if u.SourcePrefix != nil {
 		attrs = append(attrs,
 			slog.Any("src_prefix", *u.SourcePrefix))
+	}
+	if u.PathRTTMicros >= 0 {
+		attrs = append(attrs,
+			slog.Int64("path_rtt_us", u.PathRTTMicros),
+			slog.Int64("path_jitter_us", u.PathJitterMicros),
+			slog.Int64("path_metric_age_ms", u.PathMetricAgeMillis),
+			slog.Uint64("path_metric_confidence", uint64(u.PathMetricConfidence)))
 	}
 
 	return slog.GroupValue(attrs...)

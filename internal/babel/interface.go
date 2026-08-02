@@ -360,7 +360,7 @@ func (i *Interface) sendMulticastHello() error {
 // sendUpdate implements the periodic full route dump (RFC 8966 Section 3.7.1).
 func (i *Interface) sendUpdate() error {
 	updates, retractions := i.speaker.advertisedRoutes(i)
-	values := i.speaker.encodeRoutes(i, updates, i.outgoingRTTMicros())
+	values := i.speaker.encodeRoutes(i, updates, i.outgoingDelayStats())
 	for _, r := range retractions {
 		values = append(values, i.speaker.encodeRetraction(r.Source.RouterID, r.SeqNo, r.Source.Prefix)...)
 	}
@@ -374,7 +374,7 @@ func (i *Interface) sendUpdate() error {
 // sendTriggered sends an urgent update for the given routes (RFC 8966
 // Section 3.7.2). Retractions are never subject to split horizon.
 func (i *Interface) sendTriggered(routes []*Route, retractions []*Route, urgent bool) {
-	values := i.speaker.encodeRoutes(i, routes, i.outgoingRTTMicros())
+	values := i.speaker.encodeRoutes(i, routes, i.outgoingDelayStats())
 	for _, r := range retractions {
 		values = append(values, i.speaker.encodeRetraction(r.Source.RouterID, r.SeqNo, r.Source.Prefix)...)
 	}
@@ -508,21 +508,20 @@ func (i *Interface) sourceAddress4() net.IP {
 	return nil
 }
 
-// outgoingRTTMicros returns the smoothed RTT of the single neighbour on this
-// interface, or zero when there is no unique neighbour (multicast shared
-// links advertise without a per-receiver RTT contribution).
-func (i *Interface) outgoingRTTMicros() int64 {
-	var rtt int64
+// outgoingDelayStats returns delay quality for the single neighbour on this
+// interface. Shared multicast links cannot advertise receiver-specific delay.
+func (i *Interface) outgoingDelayStats() DelayStats {
+	var stats DelayStats
 	count := 0
 	_ = i.Neighbours.Foreach(func(n *Neighbour) error {
 		count++
-		if count == 1 && n.HasRTT() {
-			rtt = n.RTT().Microseconds()
+		if count == 1 {
+			stats = n.DelayStats()
 		}
 		return nil
 	})
 	if count != 1 {
-		return 0
+		return DelayStats{}
 	}
-	return rtt
+	return stats
 }

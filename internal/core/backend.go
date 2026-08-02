@@ -37,7 +37,37 @@ type MptcpHealth struct {
 // identifier the running speaker actually uses: the configured value, or
 // the persisted auto-generated one when the configuration leaves it empty.
 type BabelHealth struct {
-	RouterID string `json:"router_id,omitempty"`
+	RouterID   string                 `json:"router_id,omitempty"`
+	Neighbours []BabelNeighbourHealth `json:"neighbours,omitempty"`
+	Routes     []BabelRouteHealth     `json:"routes,omitempty"`
+}
+
+type BabelNeighbourHealth struct {
+	Interface    string  `json:"interface"`
+	Address      string  `json:"address"`
+	RTTMicros    int64   `json:"rtt_micros"`
+	JitterMicros int64   `json:"jitter_micros"`
+	MinRTTMicros int64   `json:"min_rtt_micros"`
+	AgeMillis    int64   `json:"age_millis"`
+	Samples      uint32  `json:"samples"`
+	Outliers     uint32  `json:"outliers"`
+	Confidence   float64 `json:"confidence"`
+	Fresh        bool    `json:"fresh"`
+}
+
+type BabelRouteHealth struct {
+	Prefix          string  `json:"prefix"`
+	Interface       string  `json:"interface"`
+	NextHop         string  `json:"next_hop"`
+	Metric          uint16  `json:"metric"`
+	BottleneckMbps  int     `json:"bottleneck_mbps"`
+	RTTMicros       int64   `json:"rtt_micros"`
+	JitterMicros    int64   `json:"jitter_micros"`
+	AgeMillis       int64   `json:"age_millis"`
+	Confidence      float64 `json:"confidence"`
+	Score           float64 `json:"score"`
+	DesiredWeight   int     `json:"desired_weight"`
+	InstalledWeight int     `json:"installed_weight,omitempty"`
 }
 
 type BackendEventType string

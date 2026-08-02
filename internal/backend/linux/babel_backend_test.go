@@ -5,6 +5,7 @@ package linux
 import (
 	"encoding/hex"
 	"errors"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -27,7 +28,7 @@ func TestBabelWeightFromScores(t *testing.T) {
 		{1000, 100, 26},   // 10:1 -> weight 26
 		{1000, 1, 1},      // extremely bad path keeps a minimal weight
 		{0, 1000, 256},    // missing best signal -> default weight
-		{1000, 0, 256},    // missing candidate signal -> default weight
+		{1000, 0, 1},      // invalid candidate signal -> minimum safe weight
 	}
 	for _, tc := range cases {
 		if got := babelWeightFromScores(tc.best, tc.candidate); got != tc.want {
@@ -50,22 +51,50 @@ func TestBabelWeightFromScoresBandwidthLatencyExample(t *testing.T) {
 }
 
 func TestBabelPathScoreEndToEnd(t *testing.T) {
+	maxAge := 10 * time.Second
 	// End-to-end values win: bottleneck 10, path RTT 1000 us.
-	score := babelPathScore(10, 1000, 0, false, 1, 1)
-	if score != 10.0/1000.0 {
-		t.Fatalf("end-to-end score = %g, want %g", score, 10.0/1000.0)
+	route := babel.SelectedRoute{PathRTTMicros: 1000, PathJitterMicros: 0, PathMetricAgeMillis: 0, PathMetricConfidence: math.MaxUint16}
+	score := babelPathScore(10, route, babel.DelayStats{}, maxAge, 1, 1, 0)
+	if score != (10.0/babelReferenceBandwidthMbps)/(1000.0/babelReferenceRTTMicros) {
+		t.Fatalf("unexpected dimensionless end-to-end score %g", score)
 	}
 
 	// Missing path RTT falls back to the local first-hop RTT.
-	fallback := babelPathScore(1000, -1, 500*time.Microsecond, true, 1, 1)
-	if fallback != 1000.0/500.0 {
-		t.Fatalf("fallback score = %g, want %g", fallback, 1000.0/500.0)
+	local := babel.DelayStats{Mean: 500 * time.Microsecond, Samples: 4, LastSample: time.Now()}
+	fallback := babelPathScore(1000, babel.SelectedRoute{PathRTTMicros: -1}, local, maxAge, 1, 1, 0)
+	if fallback != (1000.0/babelReferenceBandwidthMbps)/(500.0/babelReferenceRTTMicros) {
+		t.Fatalf("unexpected dimensionless fallback score %g", fallback)
 	}
 
-	// Unknown RTT entirely: bandwidth term alone.
-	noRTT := babelPathScore(1000, -1, 0, false, 2, 1)
-	if noRTT != 1000*1000 {
-		t.Fatalf("bandwidth-only score = %g, want %g", noRTT, float64(1000*1000))
+	// Unknown RTT entirely uses the same conservative denominator as every
+	// other unknown candidate instead of receiving a unit-dependent boost.
+	noRTT := babelPathScore(1000, babel.SelectedRoute{PathRTTMicros: -1}, babel.DelayStats{}, maxAge, 2, 1, 0)
+	wantNoRTT := math.Pow(1000.0/babelReferenceBandwidthMbps, 2) /
+		(babelUnknownRTTMicros / babelReferenceRTTMicros) * babelMinimumConfidence
+	if noRTT != wantNoRTT {
+		t.Fatalf("unknown-RTT score = %g, want %g", noRTT, wantNoRTT)
+	}
+}
+
+func TestBabelPathScorePenalisesJitterAndStaleMetrics(t *testing.T) {
+	maxAge := 10 * time.Second
+	stable := babel.SelectedRoute{PathRTTMicros: 10_000, PathJitterMicros: 0, PathMetricAgeMillis: 0, PathMetricConfidence: math.MaxUint16}
+	shaky := stable
+	shaky.PathJitterMicros = 5_000
+	stableScore := babelPathScore(100, stable, babel.DelayStats{}, maxAge, 1, 1, 1)
+	shakyScore := babelPathScore(100, shaky, babel.DelayStats{}, maxAge, 1, 1, 1)
+	if shakyScore != stableScore/2 {
+		t.Fatalf("one reference jitter must halve score: stable=%g shaky=%g", stableScore, shakyScore)
+	}
+	stale := stable
+	stale.PathMetricAgeMillis = maxAge.Milliseconds()
+	local := babel.DelayStats{Mean: time.Millisecond, Samples: 4, LastSample: time.Now()}
+	staleScore := babelPathScore(100, stale, local, maxAge, 1, 1, 1)
+	if staleScore >= stableScore {
+		t.Fatalf("stale metrics must receive a lower conservative score: stale=%g stable=%g", staleScore, stableScore)
+	}
+	if want := babelPathScore(100, babel.SelectedRoute{PathRTTMicros: -1}, babel.DelayStats{}, maxAge, 1, 1, 1); staleScore != want {
+		t.Fatalf("known stale path used first-hop fallback: stale=%g conservative=%g", staleScore, want)
 	}
 }
 
@@ -94,13 +123,13 @@ func TestBabelEnginePerTunnelBalance(t *testing.T) {
 }
 
 func TestWeightsWithinTolerance(t *testing.T) {
-	if !weightsWithinTolerance("255,25", "240,27") {
+	if !weightsWithinTolerance("256,26", "240,25") {
 		t.Fatal("small weight changes must be within tolerance")
 	}
-	if weightsWithinTolerance("255,25", "200,25") {
+	if weightsWithinTolerance("256,26", "200,26") {
 		t.Fatal("a 22% weight change must exceed tolerance")
 	}
-	if weightsWithinTolerance("255,25", "255") {
+	if weightsWithinTolerance("256,26", "256") {
 		t.Fatal("fingerprints with different sizes must differ")
 	}
 }
@@ -127,6 +156,32 @@ func TestBabelSettingsFingerprint(t *testing.T) {
 	engine.routerID = [8]byte{2}
 	if got := engine.fingerprintLocked(); got == base {
 		t.Fatal("router id change must trigger a speaker rebuild")
+	}
+}
+
+func TestExplicitWeightPolicyChangeBypassesNoiseCooldown(t *testing.T) {
+	engine := &babelEngine{forceWeightRefresh: true}
+	current := netlink.Route{
+		Dst: prefixToIPNet(netip.MustParsePrefix("10.8.0.0/24")), Table: 254,
+		Protocol: managedRouteProtocol, Priority: babelRoutePriority, Scope: netlink.SCOPE_UNIVERSE,
+		MultiPath: []*netlink.NexthopInfo{
+			{LinkIndex: 1, Hops: 255, Gw: net.ParseIP("fe80::1")},
+			{LinkIndex: 2, Hops: 127, Gw: net.ParseIP("fe80::2")},
+		},
+	}
+	desired := current
+	desired.MultiPath = []*netlink.NexthopInfo{
+		{LinkIndex: 1, Hops: 255, Gw: net.ParseIP("fe80::1")},
+		{LinkIndex: 2, Hops: 31, Gw: net.ParseIP("fe80::2")},
+	}
+	if !babelWeightOnlyChange([]netlink.Route{current}, desired) {
+		t.Fatal("fixture must differ only in weights")
+	}
+	if shouldDampBabelWeightChange(engine.forceWeightRefresh, []netlink.Route{current}, desired) {
+		t.Fatal("explicit policy refresh must bypass automatic weight damping")
+	}
+	if !shouldDampBabelWeightChange(false, []netlink.Route{current}, desired) {
+		t.Fatal("automatic quality-only change must retain weight damping")
 	}
 }
 
@@ -158,21 +213,24 @@ func TestConfiguredBabelInterfaces(t *testing.T) {
 	}
 }
 
-func TestBabelWeightEqualTolerance(t *testing.T) {
-	cases := []struct {
-		current, desired int
-		equal            bool
-	}{
-		{255, 255, true},
-		{255, 240, true},  // 6% difference within tolerance
-		{255, 200, false}, // 22% difference must differ
-		{3, 4, true},      // single-unit difference always tolerated
-		{0, 1, true},
+func TestBabelWeightStateRequiresConfirmationAndPerPrefixCooldown(t *testing.T) {
+	now := time.Now()
+	state := babelWeightState{installed: "256,128"}
+	if state.shouldApply("256,64", now) {
+		t.Fatal("first significant observation must not apply")
 	}
-	for _, tc := range cases {
-		if got := babelWeightEqual(tc.current, tc.desired); got != tc.equal {
-			t.Errorf("babelWeightEqual(%d, %d) = %v, want %v", tc.current, tc.desired, got, tc.equal)
-		}
+	if !state.shouldApply("256,64", now.Add(time.Second)) {
+		t.Fatal("second consistent observation must apply when no cooldown exists")
+	}
+	state.applied("256,64", now.Add(time.Second))
+	if state.shouldApply("256,32", now.Add(2*time.Second)) {
+		t.Fatal("first post-install observation must not apply")
+	}
+	if state.shouldApply("256,32", now.Add(3*time.Second)) {
+		t.Fatal("per-prefix cooldown must suppress confirmed changes")
+	}
+	if !state.shouldApply("256,32", now.Add(babelWeightCooldown+time.Second)) {
+		t.Fatal("pending confirmed change must apply when its prefix cooldown expires")
 	}
 }
 
@@ -255,6 +313,32 @@ func TestBabelRoutesToNetlink(t *testing.T) {
 	}
 	if multi.Realm != 0 {
 		t.Error("Babel routes must not set realm: the kernel rejects it on IPv4 multipath routes")
+	}
+}
+
+func TestRouteHealthReportsDesiredAndInstalledWeights(t *testing.T) {
+	settings := config.Defaults().Babel
+	engine := &babelEngine{
+		settings: settings,
+		tunnels: map[string]babelTunnel{
+			"a": {interfaceName: "wg0", bandwidthMbps: 100},
+			"b": {interfaceName: "wg1", bandwidthMbps: 100},
+		},
+		weightStates: make(map[string]*babelWeightState),
+	}
+	prefix := netip.MustParsePrefix("10.9.0.0/24")
+	selected := []babel.SelectedRoute{
+		{Prefix: prefix, NextHop: netip.MustParseAddr("fe80::1"), Interface: "wg0", Metric: 100, BottleneckMbps: 100, PathRTTMicros: 10_000, PathJitterMicros: 0, PathMetricAgeMillis: 0, PathMetricConfidence: math.MaxUint16},
+		{Prefix: prefix, NextHop: netip.MustParseAddr("fe80::2"), Interface: "wg1", Metric: 100, BottleneckMbps: 100, PathRTTMicros: 20_000, PathJitterMicros: 0, PathMetricAgeMillis: 0, PathMetricConfidence: math.MaxUint16},
+	}
+	key := routeKey(netlink.Route{Table: 254, Dst: prefixToIPNet(prefix)})
+	engine.weightStates[key] = &babelWeightState{installed: "256,100"}
+	health := engine.routeHealthLocked(selected, 254)
+	if len(health) != 2 || health[0].InstalledWeight != 256 || health[1].InstalledWeight != 100 {
+		t.Fatalf("installed weights missing from health: %+v", health)
+	}
+	if health[0].DesiredWeight != 256 || health[1].DesiredWeight >= health[0].DesiredWeight {
+		t.Fatalf("desired weights do not reflect RTT score: %+v", health)
 	}
 }
 

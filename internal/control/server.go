@@ -534,12 +534,21 @@ func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
-	var settings DaemonSettings
+	current, err := s.manager.Settings()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	// Decode over the current values. This preserves settings added in a
+	// newer daemon when an older client sends a payload that cannot contain
+	// those fields, while fields explicitly present in the request still
+	// retain normal PUT replacement semantics.
+	settings := DaemonSettings{Babel: current.Babel, Mptcp: current.Mptcp}
 	if err := decodeJSON(r, &settings); err != nil {
 		writeBadRequest(w, err)
 		return
 	}
-	full := config.Defaults()
+	full := current
 	full.Babel = settings.Babel
 	full.Mptcp = settings.Mptcp
 	if err := s.manager.UpdateSettings(r.Context(), full); err != nil {

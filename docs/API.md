@@ -24,12 +24,27 @@ by Unix directory and socket permissions. Responses include
 - `POST /v1/apply?wait=true`
 - `POST /v1/admin/backup`
 - `POST /v1/admin/restore?check=true&wait=false`
+- `GET /v1/settings`
+- `PUT /v1/settings`
 
 The health response includes `alive`, configured-tunnel `ready`, daemon build
 information, the state schema version, backend capability status, and tunnel
 counts. A backend has `required: true` only when at least one enabled record
 currently uses it. Missing optional capabilities therefore do not make the
 daemon itself unready.
+
+The `babel` health object reports the effective router ID plus live
+`neighbours` and selected `routes`. Neighbour entries expose RTT, jitter,
+minimum RTT, sample age/count, robust-filter outlier count, confidence and
+freshness. Route entries expose propagated path quality, dimensionless score,
+and desired versus installed Linux nexthop weights. These arrays are omitted
+when empty.
+
+The settings endpoints expose only the operator-owned `babel` and `mptcp`
+sections; filesystem and socket layout remain daemon-owned. `PUT` validates,
+applies and persists the update. The server decodes over the current settings,
+so fields omitted by an older client are preserved instead of being reset to
+zero. Unknown JSON fields are still rejected.
 
 The event endpoint is a long-lived `application/x-ndjson` response. It begins
 with a `connected` item, replays retained events newer than `after`, then emits
