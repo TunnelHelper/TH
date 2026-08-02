@@ -30,10 +30,20 @@ type tuiApp struct {
 func runTUI(client *control.Client, timeout time.Duration) error {
 	output := ui.New(os.Stdout, os.Stderr, os.Stdin)
 	app := &tuiApp{client: client, timeout: timeout, ui: output, prompts: newPrompts(output)}
-	if err := app.loadHealth(); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		output.Warn("thd unavailable")
-	}
+	lastHealthWarning := ""
 	for {
+		if err := app.loadHealth(); err != nil {
+			warning := "thd unavailable"
+			if errors.Is(err, context.DeadlineExceeded) {
+				warning = "thd health check timed out"
+			}
+			if warning != lastHealthWarning {
+				output.Warn(warning)
+			}
+			lastHealthWarning = warning
+		} else {
+			lastHealthWarning = ""
+		}
 		choice := "manage"
 		output.Title("TH")
 		output.Dim(version.Current().Label())
@@ -51,8 +61,14 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 			continue
 		}
 		if choice == "watch" {
-			if err := runDashboard(app.client, app.timeout, output); err != nil && !errors.Is(err, ErrAborted) {
+			id, err := runDashboard(app.client, app.timeout, output)
+			if err != nil && !errors.Is(err, ErrAborted) {
 				output.Warn(err.Error())
+			}
+			if err == nil && id != "" {
+				if err := runManageWorkspace(app.client, app.timeout, output, id); err != nil && !errors.Is(err, ErrAborted) {
+					output.Warn(err.Error())
+				}
 			}
 			continue
 		}
@@ -103,7 +119,11 @@ func (a *tuiApp) mainMenuOptions() []ui.Option {
 		{Label: "Settings", Value: "settings"},
 	}
 	for i := range options {
-		_, options[i].Dimmed = a.unavailable(model.Kind(options[i].Value))
+		if _, unavailable := a.unavailable(model.Kind(options[i].Value)); unavailable {
+			options[i].Dimmed = true
+			options[i].Disabled = true
+			options[i].Label += " (unavailable)"
+		}
 	}
 	return options
 }
@@ -138,46 +158,7 @@ func (a *tuiApp) create(kind model.Kind) error {
 			return err
 		}
 	}
-	record, err := collectTunnel(a.prompts, kind, nil, suggestedTunnelName(kind, views), views)
-	if err != nil {
-		return err
-	}
-	if err := model.PrepareNew(&record, time.Now()); err != nil {
-		return err
-	}
-	if record.Kind == model.KindXFRMStatic {
-		showStaticXFRMPairing(a.ui, record.Spec.XFRMStatic)
-	}
-	showTunnelSummary(a.ui, record)
-	action := "enable"
-	if err := a.prompts.selectValue("Create tunnel", createActionOptions(), &action); err != nil {
-		return err
-	}
-	if action == "back" {
-		return nil
-	}
-	record.Enabled = action == "enable"
-	ctx, cancel = a.context()
-	view, err := a.client.Create(ctx, record)
-	cancel()
-	if err != nil {
-		return err
-	}
-	ctx, cancel = a.context()
-	reconciled, reconcileErr := a.client.Reconcile(ctx, view.Tunnel.ID)
-	cancel()
-	if reconcileErr != nil {
-		a.ui.Warn(fmt.Sprintf("Saved %s (%s), but applying it failed: %v", view.Tunnel.Name, view.Tunnel.ID, reconcileErr))
-		return nil
-	}
-	view = reconciled
-	if view.Status.Phase == model.PhaseError {
-		a.ui.Warn(fmt.Sprintf("Saved %s (%s), but it did not become ready", view.Tunnel.Name, view.Tunnel.ID))
-	} else {
-		a.ui.Ok(fmt.Sprintf("Created %s (%s): %s", view.Tunnel.Name, view.Tunnel.ID, view.Status.Phase))
-	}
-	showCreatedMaterial(a.ui, record, view)
-	return nil
+	return runCreateWorkspace(a.client, a.timeout, a.ui, kind, suggestedTunnelName(kind, views), views)
 }
 
 func createActionOptions() []ui.Option {

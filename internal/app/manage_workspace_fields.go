@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/TunnelHelper/TH/internal/model"
 	tea "github.com/charmbracelet/bubbletea"
@@ -37,7 +38,7 @@ type workspaceField struct {
 }
 
 func (m manageWorkspaceModel) updateTunnelEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
-	fields := workspaceTunnelFields(m.draft)
+	fields := m.tunnelFields()
 	changes := workspaceTunnelChanges(m.original, m.draft)
 	if len(fields) == 0 {
 		return m, nil
@@ -59,6 +60,10 @@ func (m manageWorkspaceModel) updateTunnelEditor(key tea.KeyMsg) (tea.Model, tea
 			return m, nil
 		case "esc":
 			m.changesFocus = false
+			return m, nil
+		case "enter", " ":
+			change := changes[min(m.changeSelected, len(changes)-1)]
+			m.beginInfo("Pending change", "Complete values for the selected pending change.", workspaceChangeDetailLines(change)...)
 			return m, nil
 		}
 	}
@@ -84,7 +89,15 @@ func (m manageWorkspaceModel) updateTunnelEditor(key tea.KeyMsg) (tea.Model, tea
 			m.notice = "No changes to save"
 			return m, nil
 		}
-		m.beginConfirm("save-tunnel", "Save changes", fmt.Sprintf("Apply %d pending change(s) to %s?", len(changes), m.draft.Name), "Save changes", "Keep editing", false)
+		if m.creating {
+			if err := m.validateCreateDraft(); err != nil {
+				m.err = err
+				return m, nil
+			}
+			m.beginConfirm("save-tunnel", "Create tunnel", fmt.Sprintf("Create %s with %d configured change(s)?", m.draft.Name, len(changes)), "Create tunnel", "Keep editing", false)
+		} else {
+			m.beginConfirm("save-tunnel", "Save changes", fmt.Sprintf("Apply %d pending change(s) to %s?", len(changes), m.draft.Name), "Save changes", "Keep editing", false)
+		}
 	case "q", "esc":
 		if len(workspaceTunnelChanges(m.original, m.draft)) == 0 {
 			m.page = workspaceTunnel
@@ -96,31 +109,73 @@ func (m manageWorkspaceModel) updateTunnelEditor(key tea.KeyMsg) (tea.Model, tea
 	return m, nil
 }
 
+func (m manageWorkspaceModel) validateCreateDraft() error {
+	next, err := model.Clone(m.draft)
+	if err != nil {
+		return err
+	}
+	if next.Kind != model.KindSRv6 {
+		next.Interface = interfaceName(next.Kind, next.Name)
+	}
+	if err := validateNewTunnelIdentity(next.Kind, next.Name, m.views); err != nil {
+		return err
+	}
+	return model.PrepareNew(&next, time.Now())
+}
+
 func (m manageWorkspaceModel) tunnelEditorView(width int) string {
-	fields := workspaceTunnelFields(m.draft)
+	fields := m.tunnelFields()
 	changes := workspaceTunnelChanges(m.original, m.draft)
 	status := workspaceGoodStyle.Render("Saved")
 	if len(changes) > 0 {
 		status = workspaceWarnStyle.Bold(true).Render(fmt.Sprintf("Unsaved  %d change(s)", len(changes)))
 	}
 	feedback := m.feedbackLines(width)
-	hints := workspaceHintLines(width, "enter  Edit field", "s  Save changes", "esc  Discard/back")
-	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, len(changes)+1)
-	header := []string{m.breadcrumb(width), "", workspaceAccentStyle.Render(fit("Edit "+m.draft.Name, width)), status, ""}
+	saveHint := "s  Save changes"
+	if m.creating {
+		saveHint = "s  Create tunnel"
+	}
+	hints := workspaceHintLines(width, "up/down  Select fields/changes", "enter  Edit field", saveHint, "esc  Discard/back")
+	if m.changesFocus {
+		hints = workspaceHintLines(width, "up/down  Select change", "enter  View complete values", saveHint, "esc  Fields")
+	}
+	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, workspaceChangeViewportRows)
+	title := "Edit " + m.draft.Name
+	if m.creating {
+		title = "Create " + string(m.draft.Kind)
+	}
+	header := []string{m.breadcrumb(width), "", workspaceAccentStyle.Render(fit(title, width)), status, ""}
 	fieldLines := []string{workspaceAccentStyle.Render("Configuration")}
-	for index := range fields {
+	available := max(4, m.inlineHeight()-18)
+	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, available)
+	if status := workspaceWindowStatus(start, end, len(fields), width); status != "" {
+		fieldLines = append(fieldLines, status)
+	}
+	for index := start; index < end; index++ {
 		fieldLines = append(fieldLines, renderWorkspaceField(fields[index], index == m.fieldSelected, width))
 	}
 	header = append(header, fieldLines...)
 	header = append(header, "")
 	header = append(header, changeLines...)
 	header = append(header, feedback...)
-	if m.busy != "" {
-		header = append(header, "", workspaceWarnStyle.Render(m.busy+"..."))
-	}
 	header = append(header, "")
 	header = append(header, hints...)
 	return strings.Join(header, "\n")
+}
+
+func (m manageWorkspaceModel) tunnelFields() []workspaceField {
+	fields := workspaceTunnelFields(m.draft)
+	if m.creating {
+		fields = append(fields, workspaceToggleField("enabled", "Initial state", m.draft.Enabled))
+		fields[0].Validator = func(value string) error {
+			value = prefixedTunnelName(m.draft.Kind, strings.TrimSpace(value))
+			if err := validateNameInput(value); err != nil {
+				return err
+			}
+			return validateNewTunnelIdentity(m.draft.Kind, value, m.views)
+		}
+	}
+	return fields
 }
 
 func renderWorkspaceField(field workspaceField, selected bool, width int) string {
@@ -217,8 +272,8 @@ func workspaceTunnelFields(tunnel model.Tunnel) []workspaceField {
 	case model.KindGRE:
 		spec := tunnel.Spec.GRE
 		fields = append(fields,
-			workspaceTextField("gre.remote", "Remote underlay", spec.Remote.String(), validateAddrInput),
-			workspaceTextField("gre.local", "Local underlay", spec.Local.String(), validateAddrInput),
+			workspaceTextField("gre.remote", "Remote underlay", validAddrText(spec.Remote), validateAddrInput),
+			workspaceTextField("gre.local", "Local underlay", validAddrText(spec.Local), validateAddrInput),
 			workspaceTextField("gre.addresses", "Interface addresses", formatPrefixes(spec.Addresses), validateInterfacePrefixesInput),
 			workspaceTextField("gre.mtu", "MTU", strconv.Itoa(spec.MTU), validateInt(68, 65535)),
 			workspaceTextField("gre.ttl", "TTL", strconv.Itoa(int(spec.TTL)), validateInt(1, 255)),
@@ -227,8 +282,8 @@ func workspaceTunnelFields(tunnel model.Tunnel) []workspaceField {
 		spec := tunnel.Spec.VXLAN
 		fields = append(fields,
 			workspaceTextField("vxlan.vni", "VNI", strconv.Itoa(spec.VNI), validateInt(1, 16777215)),
-			workspaceTextField("vxlan.remote", "Remote underlay", spec.Remote.String(), validateAddrInput),
-			workspaceTextField("vxlan.local", "Local underlay", spec.Local.String(), validateAddrInput),
+			workspaceTextField("vxlan.remote", "Remote underlay", validAddrText(spec.Remote), validateAddrInput),
+			workspaceTextField("vxlan.local", "Local underlay", validAddrText(spec.Local), validateAddrInput),
 			workspaceTextField("vxlan.underlay", "Underlay interface", spec.UnderlayInterface, validateInterfaceInput),
 			workspaceTextField("vxlan.port", "Destination port", strconv.Itoa(spec.DestinationPort), validateInt(1, 65535)),
 			workspaceToggleField("vxlan.learning", "MAC learning", spec.Learning),
@@ -255,8 +310,8 @@ func workspaceTunnelFields(tunnel model.Tunnel) []workspaceField {
 	case model.KindXFRMStatic:
 		spec := tunnel.Spec.XFRMStatic
 		fields = append(fields,
-			workspaceTextField("xfrm.remote", "Remote underlay", spec.Remote.String(), validateAddrInput),
-			workspaceTextField("xfrm.local", "Local underlay", spec.Local.String(), validateAddrInput),
+			workspaceTextField("xfrm.remote", "Remote underlay", validAddrText(spec.Remote), validateAddrInput),
+			workspaceTextField("xfrm.local", "Local underlay", validAddrText(spec.Local), validateAddrInput),
 			workspaceTextField("xfrm.underlay", "Underlay interface", spec.UnderlayInterface, validateInterfaceInput),
 			workspaceTextField("xfrm.addresses", "Interface addresses", formatPrefixes(spec.Addresses), validateInterfacePrefixesInput),
 			workspaceTextField("xfrm.mtu", "MTU", strconv.Itoa(spec.MTU), validateInt(68, 65535)),
@@ -379,6 +434,10 @@ func workspaceChoiceField(id, label, value string, buttons []workspaceButton, se
 func (m *manageWorkspaceModel) activateTunnelField(field workspaceField) error {
 	switch field.Kind {
 	case workspaceFieldInput:
+		if itemLabel, itemValidator, ok := workspaceListField(field); ok {
+			m.beginList("tunnel:"+field.ID, field.Label, field.Description, itemLabel, splitNonEmpty(field.EditValue), itemValidator, workspaceWholeListValidator(field.Validator))
+			return nil
+		}
 		m.beginInput("tunnel:"+field.ID, field.Label, field.Description, workspaceInputStep{
 			Label: field.Label, Value: field.EditValue, Secret: field.Secret, Validator: field.Validator,
 		})
@@ -410,6 +469,47 @@ func (m *manageWorkspaceModel) activateTunnelField(field workspaceField) error {
 	return nil
 }
 
+func workspaceListField(field workspaceField) (string, func(string) error, bool) {
+	switch field.ID {
+	case "babel.advertise_sources":
+		return "Interface", validateInterfaceInput, true
+	case "babel.advertise_prefixes", "babel.include", "babel.exclude",
+		"gre.addresses", "vxlan.addresses", "wg.addresses", "xfrm.addresses", "ike.addresses", "allowed":
+		return "Prefix", validatePrefixItem, true
+	case "iface.neighbours":
+		return "Neighbour address", validateNeighbourItem, true
+	default:
+		return "", nil, false
+	}
+}
+
+func workspaceWholeListValidator(validator func(string) error) func([]string) error {
+	return func(items []string) error {
+		if validator == nil {
+			return nil
+		}
+		return validator(strings.Join(items, ","))
+	}
+}
+
+func validatePrefixItem(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("prefix is required")
+	}
+	if _, err := netip.ParsePrefix(strings.TrimSpace(value)); err != nil {
+		return fmt.Errorf("invalid prefix %q", value)
+	}
+	return nil
+}
+
+func validateNeighbourItem(value string) error {
+	address, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || !address.IsValid() || address.IsUnspecified() {
+		return errors.New("neighbour must be a specified IP address")
+	}
+	return nil
+}
+
 func (m *manageWorkspaceModel) toggleWorkspaceField(id string) error {
 	switch id {
 	case "vxlan.learning":
@@ -424,6 +524,8 @@ func (m *manageWorkspaceModel) toggleWorkspaceField(id string) error {
 			babel.Multicast = &multicast
 			m.notice = "Babel enabled: peer AllowedIPs do not cover ff02::1:6; using unicast mode with auto-derived neighbours."
 		}
+	case "enabled":
+		m.draft.Enabled = !m.draft.Enabled
 	default:
 		return fmt.Errorf("unsupported toggle field %q", id)
 	}
@@ -465,6 +567,9 @@ func (m *manageWorkspaceModel) applyTunnelInput(id, value string) error {
 	switch id {
 	case "name":
 		m.draft.Name = prefixedTunnelName(m.draft.Kind, value)
+		if m.creating && m.draft.Kind != model.KindSRv6 {
+			m.draft.Interface = interfaceName(m.draft.Kind, m.draft.Name)
+		}
 	case "gre.remote", "gre.local":
 		address, _ := netip.ParseAddr(value)
 		if id == "gre.remote" {
@@ -641,9 +746,16 @@ func (m *manageWorkspaceModel) applyWorkspaceChoice(action, value string) error 
 func (m *manageWorkspaceModel) applyWorkspaceConfirm(action string) (tea.Cmd, error) {
 	switch action {
 	case "save-tunnel":
-		m.busy = "Saving and reconciling changes"
+		if m.creating {
+			m.busy = "Creating and reconciling tunnel"
+		} else {
+			m.busy = "Saving and reconciling changes"
+		}
 		return m.saveTunnel(), nil
 	case "discard-tunnel":
+		if m.creating {
+			return tea.Quit, nil
+		}
 		m.page = workspaceTunnel
 		m.original, m.draft = model.Tunnel{}, model.Tunnel{}
 		m.notice = "Changes discarded"
@@ -651,6 +763,9 @@ func (m *manageWorkspaceModel) applyWorkspaceConfirm(action string) (tea.Cmd, er
 	case "delete-tunnel":
 		m.busy = "Deleting tunnel"
 		return m.deleteTunnel(), nil
+	case "toggle-tunnel":
+		m.busy = "Updating tunnel state"
+		return m.toggleTunnel(), nil
 	case "rotate-wg-key":
 		spec := workspaceWireGuardSpec(&m.draft)
 		spec.PrivateKey, spec.PublicKey = "", ""
@@ -813,7 +928,17 @@ func workspacePairingMaterial(tunnel model.Tunnel, generatedReplacement bool) []
 	case model.KindWireGuard, model.KindAmneziaWG:
 		spec := workspaceWireGuardSpec(&tunnel)
 		if spec.PrivateKey != "" {
-			return []string{"Local public key: " + spec.PublicKey}
+			lines := []string{"Local public key: " + spec.PublicKey}
+			if spec.ListenPort != 0 {
+				lines = append(lines, fmt.Sprintf("Peer endpoint: <this-host>:%d", spec.ListenPort))
+			}
+			if addresses := formatPrefixes(spec.Addresses); addresses != "" {
+				lines = append(lines, "Peer AllowedIPs for this host: "+addresses)
+			}
+			if tunnel.Kind == model.KindAmneziaWG {
+				lines = append(lines, "Peer obfuscation parameters: "+formatAmneziaParameters(tunnel.Spec.AmneziaWG))
+			}
+			return lines
 		}
 	case model.KindXFRMStatic:
 		spec := tunnel.Spec.XFRMStatic

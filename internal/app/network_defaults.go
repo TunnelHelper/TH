@@ -107,7 +107,10 @@ func validateNewInterface(kindLabel, name string) error {
 }
 
 func validateNewTunnelIdentity(kind model.Kind, name string, managed []model.TunnelView) error {
-	candidateInterface := interfaceName(kind, name)
+	candidateInterface := ""
+	if kind != model.KindSRv6 {
+		candidateInterface = interfaceName(kind, name)
+	}
 	for _, view := range managed {
 		if view.Tunnel.Name == name {
 			return fmt.Errorf("tunnel name %q is already managed", name)

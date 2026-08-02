@@ -30,6 +30,12 @@ func TestMainMenuDimsUnavailableBackends(t *testing.T) {
 					if option.Dimmed != test.dimmed {
 						t.Fatalf("Dimmed = %t, want %t", option.Dimmed, test.dimmed)
 					}
+					if option.Disabled != test.dimmed {
+						t.Fatalf("Disabled = %t, want %t", option.Disabled, test.dimmed)
+					}
+					if test.dimmed && !strings.Contains(option.Label, "unavailable") {
+						t.Fatalf("unavailable option has no text status: %q", option.Label)
+					}
 					return
 				}
 			}

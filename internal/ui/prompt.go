@@ -27,6 +27,7 @@ type Option struct {
 	Label       string
 	Value       string
 	Dimmed      bool
+	Disabled    bool
 	Destructive bool
 }
 
@@ -70,6 +71,14 @@ func newSelectPrompt(output *UI, kind promptKind, title, description string, opt
 		if options[index].Value == value {
 			selected = index
 			break
+		}
+	}
+	if len(options) > 0 && options[selected].Disabled {
+		for index := range options {
+			if !options[index].Disabled {
+				selected = index
+				break
+			}
 		}
 	}
 	return promptModel{
@@ -232,19 +241,48 @@ func (m promptModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch key.String() {
 	case "up", "left", "k", "shift+tab":
-		m.selected = (m.selected - 1 + len(m.options)) % len(m.options)
+		m.moveSelection(-1)
 	case "down", "right", "j", "tab":
-		m.selected = (m.selected + 1) % len(m.options)
+		m.moveSelection(1)
 	case "home":
-		m.selected = 0
+		m.selectBoundary(0, 1)
 	case "end":
-		m.selected = len(m.options) - 1
+		m.selectBoundary(len(m.options)-1, -1)
 	case "enter", " ":
+		if m.options[m.selected].Disabled {
+			return m, nil
+		}
 		m.value = m.options[m.selected].Value
 		m.done = true
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+func (m *promptModel) moveSelection(direction int) {
+	if len(m.options) == 0 {
+		return
+	}
+	for step := 1; step <= len(m.options); step++ {
+		index := (m.selected + direction*step) % len(m.options)
+		if index < 0 {
+			index += len(m.options)
+		}
+		if !m.options[index].Disabled {
+			m.selected = index
+			return
+		}
+	}
+}
+
+func (m *promptModel) selectBoundary(index, direction int) {
+	for index >= 0 && index < len(m.options) {
+		if !m.options[index].Disabled {
+			m.selected = index
+			return
+		}
+		index += direction
+	}
 }
 
 func (m promptModel) View() string {
@@ -274,7 +312,7 @@ func (m promptModel) View() string {
 		for index := range m.options {
 			marker := "  "
 			style := lipgloss.NewStyle()
-			if m.options[index].Dimmed {
+			if m.options[index].Dimmed || m.options[index].Disabled {
 				style = m.ui.dim
 			}
 			if index == m.selected {
@@ -372,6 +410,9 @@ func (p *Prompter) SelectWithHint(title string, options []Option, value *string,
 	i, err := strconv.Atoi(line)
 	if err != nil || i < 1 || i > len(options) {
 		return errors.New("invalid selection")
+	}
+	if options[i-1].Disabled {
+		return errors.New("selection is unavailable")
 	}
 	*value = options[i-1].Value
 	return nil

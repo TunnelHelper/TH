@@ -18,14 +18,17 @@ type workspaceChange struct {
 	After  string
 }
 
+const workspaceChangeViewportRows = 6
+
 func workspaceTunnelChanges(before, after model.Tunnel) []workspaceChange {
 	type editableTunnel struct {
-		Name string     `json:"name"`
-		Spec model.Spec `json:"spec"`
+		Name    string     `json:"name"`
+		Enabled bool       `json:"enabled"`
+		Spec    model.Spec `json:"spec"`
 	}
 	changes := workspaceStructuredChanges(
-		editableTunnel{Name: before.Name, Spec: before.Spec},
-		editableTunnel{Name: after.Name, Spec: after.Spec},
+		editableTunnel{Name: before.Name, Enabled: before.Enabled, Spec: before.Spec},
+		editableTunnel{Name: after.Name, Enabled: after.Enabled, Spec: after.Spec},
 	)
 	if replacementSecretsRequired(before, after) && !workspaceHasChange(changes, "Key material") && !workspaceHasChange(changes, "Authentication material") {
 		label := "Key material"
@@ -88,6 +91,12 @@ func collectWorkspaceChanges(path string, before, after any, changes *[]workspac
 	beforeMap, beforeIsMap := before.(map[string]any)
 	afterMap, afterIsMap := after.(map[string]any)
 	if beforeIsMap || afterIsMap {
+		if beforeIsMap != afterIsMap && len(beforeMap) == 0 && len(afterMap) == 0 {
+			*changes = append(*changes, workspaceChange{
+				Path: humanWorkspacePath(path), Before: workspaceDiffValue(before), After: workspaceDiffValue(after),
+			})
+			return
+		}
 		keys := make(map[string]struct{}, len(beforeMap)+len(afterMap))
 		for key := range beforeMap {
 			keys[key] = struct{}{}
@@ -108,6 +117,12 @@ func collectWorkspaceChanges(path string, before, after any, changes *[]workspac
 	beforeList, beforeIsList := before.([]any)
 	afterList, afterIsList := after.([]any)
 	if beforeIsList || afterIsList {
+		if beforeIsList != afterIsList && len(beforeList) == 0 && len(afterList) == 0 {
+			*changes = append(*changes, workspaceChange{
+				Path: humanWorkspacePath(path), Before: workspaceDiffValue(before), After: workspaceDiffValue(after),
+			})
+			return
+		}
 		length := max(len(beforeList), len(afterList))
 		for index := 0; index < length; index++ {
 			var left, right any
@@ -252,40 +267,53 @@ func humanWorkspaceSegment(value string) string {
 }
 
 func workspaceDiffLines(changes []workspaceChange, width, maxLines int) []string {
-	lines := []string{workspaceAccentStyle.Render("Pending changes")}
+	lines := []string{workspaceAccentStyle.Render(fmt.Sprintf("Pending changes  %d", len(changes)))}
 	if len(changes) == 0 {
 		return append(lines, workspaceDimStyle.Render("No pending changes"))
 	}
 	for index := range changes {
 		change := changes[index]
 		line := fmt.Sprintf("%s: %s -> %s", change.Path, change.Before, change.After)
-		lines = append(lines, fit(line, max(10, width)))
+		lines = append(lines, wrapDisplayText(line, max(10, width))...)
 	}
 	return lines
 }
 
-// workspaceDiffWindow renders every pending change in full; height limiting
-// is intentionally disabled, so the block never hides changes behind a
-// scroll window or a "N more change(s)" marker.
-func workspaceDiffWindow(changes []workspaceChange, selected int, focused bool, width, maxLines int) []string {
-	lines := []string{workspaceAccentStyle.Render("Pending changes")}
+func workspaceDiffWindow(changes []workspaceChange, selected int, focused bool, width, visibleRows int) []string {
+	lines := []string{workspaceAccentStyle.Render(fmt.Sprintf("Pending changes  %d", len(changes)))}
 	if len(changes) == 0 {
 		return append(lines, workspaceDimStyle.Render("No pending changes"))
 	}
-	content := make([]string, len(changes))
-	for index, change := range changes {
+	selected = max(0, min(selected, len(changes)-1))
+	start, end := workspaceVisibleRange(len(changes), selected, max(1, visibleRows))
+	if status := workspaceWindowStatus(start, end, len(changes), width); status != "" {
+		lines = append(lines, status)
+	}
+	for index := start; index < end; index++ {
+		change := changes[index]
 		line := fmt.Sprintf("%s: %s -> %s", change.Path, change.Before, change.After)
 		if focused && index == selected {
 			line = "> " + line
 		} else {
 			line = "  " + line
 		}
-		content[index] = fit(line, max(10, width))
-	}
-	for _, line := range content {
+		line = fit(line, max(10, width))
+		if focused && index == selected {
+			line = workspaceFocusStyle.Render(line)
+		}
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+func workspaceChangeDetailLines(change workspaceChange) []string {
+	return []string{
+		"Field:  " + change.Path,
+		"",
+		"Before: " + change.Before,
+		"",
+		"After:  " + change.After,
+	}
 }
 
 func workspaceHasChange(changes []workspaceChange, path string) bool {

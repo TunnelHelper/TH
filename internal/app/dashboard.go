@@ -26,9 +26,14 @@ type dashboardModel struct {
 	streamErrors <-chan error
 	views        []model.TunnelView
 	selected     int
+	detailsFocus bool
+	peerOffset   int
 	width        int
 	height       int
+	loading      bool
+	refreshing   bool
 	lastSequence uint64
+	openID       string
 	err          error
 }
 
@@ -49,26 +54,33 @@ type dashboardReconnectMsg struct {
 
 const dashboardMaxInlineHeight = 20
 
-func runDashboard(client *control.Client, timeout time.Duration, output *ui.UI) error {
+func runDashboard(client *control.Client, timeout time.Duration, output *ui.UI) (string, error) {
 	if !output.TTY {
-		return errors.New("live status requires a terminal")
+		return "", errors.New("live status requires a terminal")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	events, streamErrors, err := client.WatchEvents(ctx, 0)
 	if err != nil {
-		return err
+		return "", err
 	}
 	model := dashboardModel{
 		ctx: ctx, client: client, timeout: timeout,
-		events: events, streamErrors: streamErrors,
+		events: events, streamErrors: streamErrors, loading: true,
 	}
 	program := tea.NewProgram(model,
 		tea.WithInput(output.Input),
 		tea.WithOutput(output.Out),
 	)
-	_, err = program.Run()
-	return err
+	final, err := program.Run()
+	if err != nil {
+		return "", err
+	}
+	result, ok := final.(dashboardModel)
+	if !ok {
+		return "", errors.New("unexpected dashboard state")
+	}
+	return result.openID, nil
 }
 
 func (m dashboardModel) Init() tea.Cmd {
@@ -78,28 +90,64 @@ func (m dashboardModel) Init() tea.Cmd {
 func (m dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.KeyMsg:
+		if m.detailsFocus {
+			m.peerOffset = min(m.peerOffset, m.peerMaxOffset())
+			maxOffset := m.peerMaxOffset()
+			switch message.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			case "esc", "tab", "shift+tab":
+				m.detailsFocus = false
+			case "up", "k":
+				m.peerOffset = max(0, m.peerOffset-1)
+			case "down", "j":
+				m.peerOffset = min(maxOffset, m.peerOffset+1)
+			case "pgup":
+				m.peerOffset = max(0, m.peerOffset-dashboardPeerViewportRows)
+			case "pgdown":
+				m.peerOffset = min(maxOffset, m.peerOffset+dashboardPeerViewportRows)
+			}
+			return m, nil
+		}
 		switch message.String() {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
 		case "up", "k":
 			if m.selected > 0 {
 				m.selected--
+				m.peerOffset = 0
 			}
 		case "down", "j":
 			if m.selected+1 < len(m.views) {
 				m.selected++
+				m.peerOffset = 0
 			}
 		case "r":
+			m.refreshing = true
 			return m, m.loadViews()
+		case "enter":
+			if id := m.selectedTunnelID(); id != "" {
+				m.openID = id
+				return m, tea.Quit
+			}
+		case "tab":
+			if len(m.peerLines(max(20, m.width))) > 1 {
+				m.detailsFocus = true
+				m.peerOffset = 0
+			}
 		}
 	case tea.WindowSizeMsg:
 		m.width, m.height = message.Width, message.Height
 	case dashboardViewsMsg:
+		m.loading = false
+		m.refreshing = false
 		m.err = message.err
 		if message.err == nil {
+			selectedID := m.selectedTunnelID()
 			m.views = message.views
 			sortDashboardViews(m.views)
-			m.clampSelection()
+			m.restoreSelection(selectedID)
+			m.peerOffset = min(m.peerOffset, m.peerMaxOffset())
 		}
 	case dashboardEventMsg:
 		m.err = nil
@@ -150,7 +198,11 @@ func (m dashboardModel) View() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")).Render("TH live status")
 	lines := []string{title, ""}
 	if len(m.views) == 0 {
-		lines = append(lines, "No managed tunnels")
+		if m.loading {
+			lines = append(lines, "Loading tunnels...")
+		} else {
+			lines = append(lines, "No managed tunnels")
+		}
 	} else {
 		lines = append(lines, m.tableHeader(width))
 		start, end := 0, len(m.views)
@@ -158,14 +210,59 @@ func (m dashboardModel) View() string {
 			lines = append(lines, m.tableRow(index, width))
 		}
 		lines = append(lines, "")
-		lines = append(lines, m.peerLines(width)...)
+		lines = append(lines, m.peerViewportLines(width)...)
+	}
+	feedback := ""
+	feedbackStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	if m.refreshing {
+		feedback = "Refreshing status..."
+		feedbackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
 	}
 	if m.err != nil {
-		lines = append(lines, "", lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(fit(m.err.Error(), width)))
+		feedback = m.err.Error()
+		feedbackStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	}
+	lines = append(lines, "", feedbackStyle.Render(fit(feedback, width)))
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	lines = append(lines, "", hintStyle.Render(fit("up/down or j/k: select   r: refresh", width)), hintStyle.Render("q/esc: back"))
+	if m.detailsFocus {
+		lines = append(lines, "", hintStyle.Render(fit("up/down: scroll details   pgup/pgdown: page", width)), hintStyle.Render("tab/esc: tunnel table   q: back"))
+	} else {
+		lines = append(lines, "",
+			hintStyle.Render(fit("up/down or j/k: select", width)),
+			hintStyle.Render(fit("enter: manage   tab: details", width)),
+			hintStyle.Render(fit("r: refresh   q/esc: back", width)),
+		)
+	}
 	return fitWorkspaceHeight(strings.Join(lines, "\n"), height)
+}
+
+const dashboardPeerViewportRows = 8
+
+func (m dashboardModel) peerViewportLines(width int) []string {
+	all := m.peerLines(width)
+	if len(all) == 0 {
+		return all
+	}
+	header, content := all[0], all[1:]
+	start, end := workspaceScrollRange(len(content), m.peerOffset, dashboardPeerViewportRows)
+	lines := []string{header}
+	marker := workspaceWindowStatus(start, end, len(content), width)
+	if marker != "" {
+		if m.detailsFocus {
+			marker = workspaceFocusStyle.Render(marker)
+		}
+	}
+	lines = append(lines, marker)
+	lines = append(lines, content[start:end]...)
+	for rendered := end - start; rendered < dashboardPeerViewportRows; rendered++ {
+		lines = append(lines, "")
+	}
+	return lines
+}
+
+func (m dashboardModel) peerMaxOffset() int {
+	contentRows := max(0, len(m.peerLines(max(20, m.width)))-1)
+	return max(0, contentRows-dashboardPeerViewportRows)
 }
 
 func (m dashboardModel) loadViews() tea.Cmd {
@@ -215,17 +312,18 @@ func dashboardTick() tea.Cmd {
 }
 
 func (m *dashboardModel) upsert(view model.TunnelView) {
+	selectedID := m.selectedTunnelID()
 	for index := range m.views {
 		if m.views[index].Tunnel.ID == view.Tunnel.ID {
 			m.views[index] = view
 			sortDashboardViews(m.views)
-			m.clampSelection()
+			m.restoreSelection(selectedID)
 			return
 		}
 	}
 	m.views = append(m.views, view)
 	sortDashboardViews(m.views)
-	m.clampSelection()
+	m.restoreSelection(selectedID)
 }
 
 func (m *dashboardModel) applyStatusEvent(event core.Event) bool {
@@ -236,23 +334,48 @@ func (m *dashboardModel) applyStatusEvent(event core.Event) bool {
 		if m.views[index].Tunnel.ID != event.TunnelID {
 			continue
 		}
+		selectedID := m.selectedTunnelID()
 		m.views[index].Tunnel.Name = event.TunnelName
 		m.views[index].Tunnel.Kind = event.TunnelKind
 		m.views[index].Tunnel.Enabled = event.Enabled
 		m.views[index].Tunnel.Generation = event.Generation
 		m.views[index].Status = *event.Status
 		sortDashboardViews(m.views)
-		m.clampSelection()
+		m.restoreSelection(selectedID)
 		return true
 	}
 	return false
 }
 
 func (m *dashboardModel) remove(id string) {
+	selectedID := m.selectedTunnelID()
 	for index := range m.views {
 		if m.views[index].Tunnel.ID == id {
 			m.views = append(m.views[:index], m.views[index+1:]...)
 			break
+		}
+	}
+	if selectedID == id {
+		m.clampSelection()
+	} else {
+		m.restoreSelection(selectedID)
+	}
+}
+
+func (m dashboardModel) selectedTunnelID() string {
+	if m.selected < 0 || m.selected >= len(m.views) {
+		return ""
+	}
+	return m.views[m.selected].Tunnel.ID
+}
+
+func (m *dashboardModel) restoreSelection(id string) {
+	if id != "" {
+		for index := range m.views {
+			if m.views[index].Tunnel.ID == id {
+				m.selected = index
+				return
+			}
 		}
 	}
 	m.clampSelection()

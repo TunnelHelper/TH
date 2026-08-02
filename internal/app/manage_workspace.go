@@ -36,6 +36,9 @@ const (
 	workspaceOverlayInput workspaceOverlayKind = iota + 1
 	workspaceOverlayChoice
 	workspaceOverlayConfirm
+	workspaceOverlayInfo
+	workspaceOverlayList
+	workspaceOverlaySearch
 )
 
 type workspaceInputStep struct {
@@ -52,16 +55,24 @@ type workspaceButton struct {
 }
 
 type workspaceOverlay struct {
-	Kind        workspaceOverlayKind
-	Title       string
-	Description string
-	Action      string
-	Steps       []workspaceInputStep
-	Values      []string
-	Step        int
-	Buttons     []workspaceButton
-	Selected    int
-	Err         error
+	Kind          workspaceOverlayKind
+	Title         string
+	Description   string
+	Action        string
+	Steps         []workspaceInputStep
+	Values        []string
+	Step          int
+	Buttons       []workspaceButton
+	Selected      int
+	Lines         []string
+	Offset        int
+	Items         []string
+	Editing       bool
+	EditIndex     int
+	ItemLabel     string
+	ItemValidator func(string) error
+	ListValidator func([]string) error
+	Err           error
 }
 
 type manageWorkspaceModel struct {
@@ -69,6 +80,7 @@ type manageWorkspaceModel struct {
 	client    *control.Client
 	timeout   time.Duration
 	initialID string
+	creating  bool
 
 	page     workspacePage
 	views    []model.TunnelView
@@ -150,6 +162,9 @@ func newManageWorkspaceModel(ctx context.Context, client *control.Client, timeou
 }
 
 func (m manageWorkspaceModel) Init() tea.Cmd {
+	if m.creating {
+		return nil
+	}
 	return m.loadViews()
 }
 
@@ -166,11 +181,15 @@ func (m manageWorkspaceModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case workspaceListMsg:
 		m.loading = false
+		if m.busy == "Refreshing tunnels" {
+			m.busy = ""
+		}
 		m.err = message.err
 		if message.err == nil {
+			selectedID := m.selectedTunnelID()
 			m.views = message.views
 			sortWorkspaceViews(m.views)
-			m.clampTunnelSelection()
+			m.restoreTunnelSelection(selectedID)
 			if m.initialID != "" {
 				for index := range m.views {
 					if m.views[index].Tunnel.ID == m.initialID {
@@ -195,9 +214,13 @@ func (m manageWorkspaceModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.warning == "" {
 			m.notice = workspaceMutationNotice(message.op, message.view)
 		}
-		m.material = message.material
-		if message.op == "save" {
+		if message.op == "save" || message.op == "create" || message.material != nil {
+			m.material = message.material
+		}
+		m.detailOffset = min(m.detailOffset, m.detailMaxOffset())
+		if message.op == "save" || message.op == "create" {
 			m.page = workspaceTunnel
+			m.creating = false
 			m.original = model.Tunnel{}
 			m.draft = model.Tunnel{}
 			m.fieldSelected = 0
@@ -263,12 +286,15 @@ func (m manageWorkspaceModel) updateTunnelList(key tea.KeyMsg) (tea.Model, tea.C
 		m.openSelectedTunnel()
 	case "r":
 		m.loading = true
+		m.busy = "Refreshing tunnels"
 		return m, m.loadViews()
 	}
 	return m, nil
 }
 
 func (m manageWorkspaceModel) updateTunnelDetail(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.detailOffset = min(m.detailOffset, m.detailMaxOffset())
+	maxOffset := m.detailMaxOffset()
 	switch key.String() {
 	case "q", "esc":
 		m.page = workspaceTunnels
@@ -284,9 +310,12 @@ func (m manageWorkspaceModel) updateTunnelDetail(key tea.KeyMsg) (tea.Model, tea
 	case "a":
 		m.busy = "Reconciling tunnel"
 		return m, m.reconcileTunnel()
-	case " ", "t":
-		m.busy = "Updating tunnel state"
-		return m, m.toggleTunnel()
+	case "t":
+		action, state := "Enable", "enabled"
+		if m.view.Tunnel.Enabled {
+			action, state = "Disable", "disabled"
+		}
+		m.beginConfirm("toggle-tunnel", action+" tunnel", fmt.Sprintf("Set %s to %s and apply the change?", m.view.Tunnel.Name, state), action+" tunnel", "Cancel", m.view.Tunnel.Enabled)
 	case "d":
 		target := m.view.Tunnel.Name
 		if m.view.Tunnel.Interface != "" {
@@ -298,11 +327,11 @@ func (m manageWorkspaceModel) updateTunnelDetail(key tea.KeyMsg) (tea.Model, tea
 			m.detailOffset--
 		}
 	case "down", "j":
-		m.detailOffset++
+		m.detailOffset = min(maxOffset, m.detailOffset+1)
 	case "pgup":
 		m.detailOffset = max(0, m.detailOffset-5)
 	case "pgdown":
-		m.detailOffset += 5
+		m.detailOffset = min(maxOffset, m.detailOffset+5)
 	}
 	return m, nil
 }
@@ -367,7 +396,7 @@ func (m manageWorkspaceModel) View() string {
 
 func (m manageWorkspaceModel) tunnelListView(width int) string {
 	lines := []string{m.breadcrumb(width), "", workspaceAccentStyle.Render("Managed tunnels")}
-	if m.loading {
+	if m.loading && len(m.views) == 0 {
 		lines = append(lines, "", workspaceDimStyle.Render("Loading tunnels..."))
 	} else if len(m.views) == 0 {
 		lines = append(lines, "", "No managed tunnels")
@@ -391,19 +420,72 @@ func (m manageWorkspaceModel) tunnelListView(width int) string {
 func (m manageWorkspaceModel) tunnelDetailView(width int) string {
 	lines := []string{m.breadcrumb(width), ""}
 	feedback := m.feedbackLines(width)
-	hints := workspaceHintLines(width, "e  Edit", "space  Enable/disable", "r  Refresh", "a  Reconcile", "d  Delete", "esc  Back")
+	hints := workspaceHintLines(width, "up/down  Scroll", "e  Edit", "t  Enable/disable", "r  Refresh", "a  Reconcile", "d  Delete", "esc  Back")
 	status := workspaceStatusLines(m.view, width)
-	lines = append(lines, status...)
-	lines = append(lines, feedback...)
-	if m.busy != "" {
-		lines = append(lines, "", workspaceWarnStyle.Render(m.busy+"..."))
+	if len(status) > 0 {
+		lines = append(lines, status[0])
+		content := status[1:]
+		available := m.detailViewportRows()
+		start, end := workspaceScrollRange(len(content), m.detailOffset, available)
+		if m.height > 0 {
+			lines = append(lines, workspaceWindowStatus(start, end, len(content), width))
+		} else if marker := workspaceWindowStatus(start, end, len(content), width); marker != "" {
+			lines = append(lines, marker)
+		}
+		lines = append(lines, content[start:end]...)
+		if m.height > 0 {
+			for rendered := end - start; rendered < available; rendered++ {
+				lines = append(lines, "")
+			}
+		}
 	}
+	lines = append(lines, feedback...)
 	lines = append(lines, "")
 	lines = append(lines, hints...)
 	return strings.Join(lines, "\n")
 }
 
+func (m manageWorkspaceModel) detailViewportRows() int {
+	contentRows := max(0, len(workspaceStatusLines(m.view, m.inlineWidth()))-1)
+	if m.height <= 0 {
+		return contentRows
+	}
+	// Breadcrumb, blank line, title, feedback, separator, and hints stay fixed.
+	fixedRows := 3 + len(m.feedbackLines(m.inlineWidth())) + len(workspaceHintLines(m.inlineWidth(), "up/down  Scroll", "e  Edit", "t  Enable/disable", "r  Refresh", "a  Reconcile", "d  Delete", "esc  Back")) + 2
+	return max(3, m.height-fixedRows-1)
+}
+
+func (m manageWorkspaceModel) detailMaxOffset() int {
+	contentRows := max(0, len(workspaceStatusLines(m.view, m.inlineWidth()))-1)
+	return max(0, contentRows-m.detailViewportRows())
+}
+
+func workspaceScrollRange(length, offset, available int) (int, int) {
+	if length <= 0 {
+		return 0, 0
+	}
+	if available < 1 || available >= length {
+		return 0, length
+	}
+	offset = max(0, min(offset, length-available))
+	return offset, offset + available
+}
+
 func (m manageWorkspaceModel) breadcrumb(width int) string {
+	if m.creating {
+		parts := []string{"TH", "Create", string(m.draft.Kind)}
+		switch m.page {
+		case workspacePeers:
+			parts = append(parts, "Peers")
+		case workspacePeer:
+			parts = append(parts, "Peers", workspacePeerCrumb(m.peerDraft, m.peerAdding))
+		case workspaceSources:
+			parts = append(parts, "Sources")
+		case workspaceSource:
+			parts = append(parts, "Sources", workspaceSourceCrumb(m.sourceDraft, m.sourceAdding))
+		}
+		return workspaceDimStyle.Render(fit(strings.Join(parts, " / "), width))
+	}
 	parts := []string{"TH", "Manage"}
 	if m.page != workspaceTunnels && m.view.Tunnel.Name != "" {
 		parts = append(parts, m.view.Tunnel.Name)
@@ -424,21 +506,28 @@ func (m manageWorkspaceModel) breadcrumb(width int) string {
 }
 
 func (m manageWorkspaceModel) feedbackLines(width int) []string {
-	lines := make([]string, 0, 5)
+	message := ""
+	style := workspaceDimStyle
 	if m.notice != "" {
-		style := workspaceGoodStyle
+		message = m.notice
+		style = workspaceGoodStyle
 		if strings.Contains(strings.ToLower(m.notice), "failed") || strings.Contains(strings.ToLower(m.notice), "error") {
 			style = workspaceWarnStyle
 		}
-		lines = append(lines, "", style.Render(fit(m.notice, width)))
+	}
+	if m.busy != "" {
+		message = m.busy + "..."
+		style = workspaceWarnStyle
 	}
 	if m.err != nil {
-		lines = append(lines, "", workspaceErrorStyle.Render(fit(m.err.Error(), width)))
+		message = m.err.Error()
+		style = workspaceErrorStyle
 	}
+	lines := []string{"", style.Render(fit(message, width))}
 	if len(m.material) > 0 {
 		lines = append(lines, "", workspaceWarnStyle.Bold(true).Render("New pairing material"))
 		for _, line := range m.material {
-			lines = append(lines, fit(line, width))
+			lines = append(lines, wrapDisplayText(line, width)...)
 		}
 	}
 	return lines
@@ -607,12 +696,39 @@ func (m manageWorkspaceModel) toggleTunnel() tea.Cmd {
 func (m manageWorkspaceModel) saveTunnel() tea.Cmd {
 	current, currentErr := model.Clone(m.original)
 	next, nextErr := model.Clone(m.draft)
+	creating := m.creating
+	views := append([]model.TunnelView(nil), m.views...)
 	return func() tea.Msg {
 		if currentErr != nil {
 			return workspaceMutationMsg{op: "save", err: currentErr}
 		}
 		if nextErr != nil {
 			return workspaceMutationMsg{op: "save", err: nextErr}
+		}
+		if creating {
+			if next.Kind != model.KindSRv6 {
+				next.Interface = interfaceName(next.Kind, next.Name)
+			}
+			if err := validateNewTunnelIdentity(next.Kind, next.Name, views); err != nil {
+				return workspaceMutationMsg{op: "create", err: err}
+			}
+			if err := model.PrepareNew(&next, time.Now()); err != nil {
+				return workspaceMutationMsg{op: "create", err: err}
+			}
+			material := workspacePairingMaterial(next, true)
+			ctx, cancel := context.WithTimeout(m.ctx, m.timeout)
+			view, err := m.client.Create(ctx, next)
+			cancel()
+			if err != nil {
+				return workspaceMutationMsg{op: "create", err: err}
+			}
+			ctx, cancel = context.WithTimeout(m.ctx, m.timeout)
+			reconciled, reconcileErr := m.client.Reconcile(ctx, view.Tunnel.ID)
+			cancel()
+			if reconcileErr != nil {
+				return workspaceMutationMsg{op: "create", view: view, warning: fmt.Sprintf("Tunnel was created, but applying it failed: %v", reconcileErr), material: material}
+			}
+			return workspaceMutationMsg{op: "create", view: reconciled, material: material}
 		}
 		generatedReplacement := replacementSecretsRequired(current, next)
 		if generatedReplacement {
@@ -660,6 +776,8 @@ func workspaceMutationNotice(operation string, view model.TunnelView) string {
 		return "Disabled " + view.Tunnel.Name
 	case "save":
 		return fmt.Sprintf("Saved %s: %s", view.Tunnel.Name, view.Status.Phase)
+	case "create":
+		return fmt.Sprintf("Created %s: %s", view.Tunnel.Name, view.Status.Phase)
 	default:
 		return "Updated"
 	}
@@ -681,7 +799,7 @@ func (m *manageWorkspaceModel) upsertView(view model.TunnelView) {
 	}
 	m.views = append(m.views, view)
 	sortWorkspaceViews(m.views)
-	m.clampTunnelSelection()
+	m.restoreTunnelSelection(view.Tunnel.ID)
 }
 
 func (m *manageWorkspaceModel) removeView(id string) {
@@ -702,6 +820,25 @@ func (m *manageWorkspaceModel) clampTunnelSelection() {
 	}
 }
 
+func (m manageWorkspaceModel) selectedTunnelID() string {
+	if m.selected < 0 || m.selected >= len(m.views) {
+		return ""
+	}
+	return m.views[m.selected].Tunnel.ID
+}
+
+func (m *manageWorkspaceModel) restoreTunnelSelection(id string) {
+	if id != "" {
+		for index := range m.views {
+			if m.views[index].Tunnel.ID == id {
+				m.selected = index
+				return
+			}
+		}
+	}
+	m.clampTunnelSelection()
+}
+
 func sortWorkspaceViews(views []model.TunnelView) {
 	sort.SliceStable(views, func(i, j int) bool { return views[i].Tunnel.Name < views[j].Tunnel.Name })
 }
@@ -710,9 +847,28 @@ func workspaceVisibleRange(length, selected, available int) (int, int) {
 	if length <= 0 {
 		return 0, 0
 	}
-	// Views intentionally render in full; terminal height is not used to
-	// hide content, so the whole range is always visible.
-	return 0, length
+	if available < 1 || available >= length {
+		return 0, length
+	}
+	selected = max(0, min(selected, length-1))
+	start := selected - available/2
+	start = max(0, min(start, length-available))
+	return start, start + available
+}
+
+func workspaceWindowStatus(start, end, total, width int) string {
+	if total <= 0 || (start == 0 && end >= total) {
+		return ""
+	}
+	left, right := "", ""
+	if start > 0 {
+		left = fmt.Sprintf("↑ %d above", start)
+	}
+	if end < total {
+		right = fmt.Sprintf("↓ %d below", total-end)
+	}
+	position := fmt.Sprintf("%d-%d of %d", start+1, end, total)
+	return workspaceDimStyle.Render(fit(strings.TrimSpace(strings.Join([]string{left, position, right}, "  ")), width))
 }
 
 func (m manageWorkspaceModel) inlineHeight() int {

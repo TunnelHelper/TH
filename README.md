@@ -202,9 +202,10 @@ The TUI management view is a persistent workspace rather than a sequence of
 prompts. Tunnel, WireGuard peer, and SRv6 source editors keep changes in a local
 draft, show breadcrumbs and a redacted field-level diff, and use the same
 keyboard-selectable Save/Discard confirmation component. Nothing is sent to the
-daemon until the tunnel-level Save action is confirmed. All interactive controls
-are Bubble Tea components rendered inline with a compact height limit; the client
-does not switch to an alternate full-screen buffer.
+daemon until the tunnel-level Save action is confirmed. Home menus and primary
+tunnel tables render in full; details, pending changes, peers, and route sources
+use labelled keyboard-scrollable viewports. All controls render inline without
+switching to an alternate full-screen buffer.
 
 Use `-` instead of a filename for JSON on stdin. Updates require the current
 `id` and `generation`, so a stale client cannot overwrite a newer record.

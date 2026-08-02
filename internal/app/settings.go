@@ -56,10 +56,17 @@ func validateInterfaceListInput(value string) error {
 }
 
 func validatePrefixListInput(value string) error {
+	seen := make(map[netip.Prefix]struct{})
 	for _, token := range splitNonEmpty(value) {
-		if _, err := netip.ParsePrefix(token); err != nil {
+		prefix, err := netip.ParsePrefix(token)
+		if err != nil {
 			return fmt.Errorf("invalid prefix %q", token)
 		}
+		prefix = prefix.Masked()
+		if _, exists := seen[prefix]; exists {
+			return fmt.Errorf("duplicate prefix %s", prefix)
+		}
+		seen[prefix] = struct{}{}
 	}
 	return nil
 }
@@ -117,11 +124,16 @@ func validateNeighbourListInput(value string) error {
 	if strings.TrimSpace(value) == "" {
 		return errors.New("unicast mode requires at least one neighbour address")
 	}
+	seen := make(map[netip.Addr]struct{})
 	for _, token := range splitNonEmpty(value) {
 		addr, err := netip.ParseAddr(token)
 		if err != nil || !addr.IsValid() || addr.IsUnspecified() {
 			return fmt.Errorf("invalid neighbour address %q", token)
 		}
+		if _, exists := seen[addr]; exists {
+			return fmt.Errorf("duplicate neighbour address %s", addr)
+		}
+		seen[addr] = struct{}{}
 	}
 	return nil
 }

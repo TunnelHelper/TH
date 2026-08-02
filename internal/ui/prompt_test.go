@@ -170,6 +170,23 @@ func TestPromptSelectShowsAllOptionsWithoutWindow(t *testing.T) {
 	}
 }
 
+func TestPromptSkipsDisabledOptions(t *testing.T) {
+	output := New(&bytes.Buffer{}, &bytes.Buffer{}, strings.NewReader(""))
+	model := newSelectPrompt(output, promptSelect, "Action", "", []Option{
+		{Label: "Unavailable", Value: "disabled", Disabled: true},
+		{Label: "Manage", Value: "manage"},
+		{Label: "Settings", Value: "settings"},
+	}, "disabled")
+	if model.selected != 1 {
+		t.Fatalf("initial selection = %d, want first enabled option", model.selected)
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(promptModel)
+	if model.selected != 2 {
+		t.Fatalf("up selected disabled option, index=%d", model.selected)
+	}
+}
+
 func TestRenderButtonsWrapsWithoutOverflow(t *testing.T) {
 	buttons := []Button{{Label: "Save a very long configuration"}, {Label: "Discard changes"}}
 	rendered := RenderButtons(buttons, 0, 18)

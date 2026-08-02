@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -511,6 +512,220 @@ func TestWorkspaceKeepsPairingMaterialAndActionsVisible(t *testing.T) {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("priority content %q was clipped:\n%s", expected, view)
 		}
+	}
+}
+
+func TestTunnelStateToggleRequiresExplicitConfirmation(t *testing.T) {
+	tunnel := workspaceTestTunnel(model.KindGRE)
+	workspace := manageWorkspaceModel{page: workspaceTunnel, view: model.TunnelView{Tunnel: tunnel}, width: 80, height: 24}
+	updated, command := workspace.updateTunnelDetail(tea.KeyMsg{Type: tea.KeySpace})
+	workspace = updated.(manageWorkspaceModel)
+	if command != nil || workspace.overlay != nil || workspace.busy != "" {
+		t.Fatal("space changed tunnel state or opened an action")
+	}
+	updated, command = workspace.updateTunnelDetail(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	workspace = updated.(manageWorkspaceModel)
+	if command != nil || workspace.overlay == nil || workspace.overlay.Action != "toggle-tunnel" || workspace.overlay.Selected != 1 {
+		t.Fatalf("explicit toggle did not open a cancel-default confirmation: %+v", workspace.overlay)
+	}
+}
+
+func TestWorkspaceUpsertSelectsNewTunnelAfterSort(t *testing.T) {
+	workspace := manageWorkspaceModel{
+		views:    []model.TunnelView{{Tunnel: model.Tunnel{ID: "a", Name: "alpha"}}},
+		selected: 0,
+	}
+	workspace.upsertView(model.TunnelView{Tunnel: model.Tunnel{ID: "z", Name: "zulu"}})
+	if got := workspace.selectedTunnelID(); got != "z" {
+		t.Fatalf("selection after inserting a sorted tunnel = %q, want z", got)
+	}
+}
+
+func TestWorkspaceRefreshAndReconcileKeepLayoutStable(t *testing.T) {
+	tunnel := workspaceTestTunnel(model.KindGRE)
+	view := model.TunnelView{Tunnel: tunnel, Status: model.Status{Phase: model.PhaseReady}}
+	detail := manageWorkspaceModel{page: workspaceTunnel, view: view, views: []model.TunnelView{view}, width: 80, height: 24}
+	beforeLines := strings.Count(detail.View(), "\n")
+	for _, key := range []string{"r", "a"} {
+		updated, command := detail.updateTunnelDetail(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		if command == nil {
+			t.Fatalf("%s did not start its operation", key)
+		}
+		after := updated.(manageWorkspaceModel).View()
+		if lines := strings.Count(after, "\n"); lines != beforeLines {
+			t.Fatalf("%s changed detail layout from %d to %d lines:\n%s", key, beforeLines, lines, after)
+		}
+	}
+
+	list := manageWorkspaceModel{page: workspaceTunnels, views: []model.TunnelView{view}, width: 80, height: 24}
+	before := list.View()
+	updated, command := list.updateTunnelList(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	after := updated.(manageWorkspaceModel).View()
+	if command == nil || !strings.Contains(after, tunnel.Name) || strings.Count(after, "\n") != strings.Count(before, "\n") {
+		t.Fatalf("refresh replaced or shifted the tunnel table:\n%s", after)
+	}
+}
+
+func TestWorkspaceTunnelListShowsAllRowsRegardlessOfHeight(t *testing.T) {
+	views := make([]model.TunnelView, 30)
+	for index := range views {
+		views[index] = model.TunnelView{Tunnel: model.Tunnel{ID: fmt.Sprintf("id-%02d", index), Name: fmt.Sprintf("tunnel-%02d", index), Kind: model.KindGRE}}
+	}
+	for _, height := range []int{10, 80} {
+		workspace := manageWorkspaceModel{page: workspaceTunnels, views: views, width: 80, height: height}
+		rendered := workspace.View()
+		for index := range views {
+			if !strings.Contains(rendered, views[index].Tunnel.Name) {
+				t.Fatalf("height %d hid tunnel row %q:\n%s", height, views[index].Tunnel.Name, rendered)
+			}
+		}
+	}
+}
+
+func TestStatusActionsPreserveOneTimePairingMaterial(t *testing.T) {
+	tunnel := workspaceTestTunnel(model.KindWireGuard)
+	view := model.TunnelView{Tunnel: tunnel, Status: model.Status{Phase: model.PhaseReady}}
+	workspace := manageWorkspaceModel{
+		page: workspaceTunnel, view: view, views: []model.TunnelView{view},
+		material: []string{"Local public key: one-time-value"},
+	}
+	for _, operation := range []string{"refresh", "reconcile", "toggle"} {
+		updated, _ := workspace.Update(workspaceMutationMsg{op: operation, view: view})
+		workspace = updated.(manageWorkspaceModel)
+		if len(workspace.material) != 1 || !strings.Contains(workspace.material[0], "one-time-value") {
+			t.Fatalf("%s cleared one-time pairing material: %+v", operation, workspace.material)
+		}
+	}
+}
+
+func TestTunnelDetailScrollStopsAtViewportBoundary(t *testing.T) {
+	tunnel := workspaceTestTunnel(model.KindWireGuard)
+	peers := make([]model.PeerStatus, 10)
+	for index := range peers {
+		peers[index].PublicKey = fmt.Sprintf("peer-%02d", index)
+	}
+	workspace := manageWorkspaceModel{
+		page:  workspaceTunnel,
+		view:  model.TunnelView{Tunnel: tunnel, Status: model.Status{Peers: peers}},
+		width: 60, height: 18,
+	}
+	for index := 0; index < 100; index++ {
+		updated, _ := workspace.updateTunnelDetail(tea.KeyMsg{Type: tea.KeyDown})
+		workspace = updated.(manageWorkspaceModel)
+	}
+	maximum := workspace.detailMaxOffset()
+	if workspace.detailOffset != maximum || maximum == 0 {
+		t.Fatalf("detail offset = %d, want bottom %d", workspace.detailOffset, maximum)
+	}
+	updated, _ := workspace.updateTunnelDetail(tea.KeyMsg{Type: tea.KeyUp})
+	workspace = updated.(manageWorkspaceModel)
+	if workspace.detailOffset != maximum-1 {
+		t.Fatalf("one up key from bottom moved to %d, want %d", workspace.detailOffset, maximum-1)
+	}
+}
+
+func TestPairingMaterialWrapsWithoutTruncation(t *testing.T) {
+	material := "Local public key: " + strings.Repeat("A", 80)
+	workspace := manageWorkspaceModel{material: []string{material}}
+	rendered := strings.Join(workspace.feedbackLines(24), "\n")
+	if strings.Contains(rendered, "…") || strings.Count(rendered, "A") != 80 {
+		t.Fatalf("pairing material was truncated:\n%s", rendered)
+	}
+}
+
+func TestWorkspaceDiffWindowScrollsAndOpensCompleteValue(t *testing.T) {
+	changes := make([]workspaceChange, 12)
+	for index := range changes {
+		changes[index] = workspaceChange{Path: fmt.Sprintf("Field %02d", index), Before: "old", After: strings.Repeat("new-value-", 20)}
+	}
+	window := strings.Join(workspaceDiffWindow(changes, 9, true, 60, workspaceChangeViewportRows), "\n")
+	if !strings.Contains(window, "Field 09") || !strings.Contains(window, "above") || !strings.Contains(window, "7-12 of 12") {
+		t.Fatalf("change viewport did not follow selection or show scroll state:\n%s", window)
+	}
+	workspace := manageWorkspaceModel{
+		page: workspaceEdit, original: workspaceTestTunnel(model.KindGRE), draft: workspaceTestTunnel(model.KindGRE),
+		width: 60, height: 18,
+	}
+	workspace.beginInfo("Pending change", "", workspaceChangeDetailLines(changes[9])...)
+	view := workspace.overlayView(60)
+	if !strings.Contains(view, "Before:") || !strings.Contains(view, "After:") || !strings.Contains(view, "Scroll") {
+		t.Fatalf("complete change viewer is incomplete:\n%s", view)
+	}
+}
+
+func TestCreateWorkspaceCreatesAndReconcilesTunnel(t *testing.T) {
+	var created model.Tunnel
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/tunnels", func(writer http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&created); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(model.TunnelView{Tunnel: created, Status: model.Status{Phase: model.PhasePending}})
+	})
+	mux.HandleFunc("POST /v1/tunnels/{id}/reconcile", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(model.TunnelView{Tunnel: created, Status: model.Status{Phase: model.PhaseReady}})
+	})
+	socketPath := filepath.Join(t.TempDir(), "create.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: mux}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	})
+	client := control.NewClient(socketPath, time.Second)
+	t.Cleanup(client.CloseIdleConnections)
+	workspace := newCreateWorkspaceModel(context.Background(), client, time.Second, model.KindGRE, "create-test", nil)
+	workspace.draft.Spec.GRE.Local = netip.MustParseAddr("192.0.2.1")
+	workspace.draft.Spec.GRE.Remote = netip.MustParseAddr("192.0.2.2")
+	workspace.draft.Spec.GRE.Addresses = []netip.Prefix{netip.MustParsePrefix("10.0.0.1/30")}
+	message := workspace.saveTunnel()().(workspaceMutationMsg)
+	if message.err != nil {
+		t.Fatal(message.err)
+	}
+	if message.op != "create" || message.view.Status.Phase != model.PhaseReady || created.ID == "" || created.Generation != 1 {
+		t.Fatalf("create result=%+v created=%+v", message, created)
+	}
+}
+
+func TestCreateWorkspaceCoversEveryTunnelKindAndConfirmsDiscard(t *testing.T) {
+	for _, kind := range []model.Kind{
+		model.KindGRE, model.KindVXLAN, model.KindWireGuard, model.KindAmneziaWG,
+		model.KindXFRMStatic, model.KindXFRMIKEv2, model.KindSRv6,
+	} {
+		t.Run(string(kind), func(t *testing.T) {
+			workspace := newCreateWorkspaceModel(context.Background(), nil, time.Second, kind, "draft", nil)
+			workspace.width, workspace.height = 60, 24
+			if !workspace.creating || workspace.page != workspaceEdit || len(workspace.tunnelFields()) < 2 {
+				t.Fatalf("invalid create workspace: %+v", workspace)
+			}
+			for lineNumber, line := range strings.Split(workspace.View(), "\n") {
+				if got := ansi.StringWidth(line); got > workspace.width {
+					t.Fatalf("line %d exceeds width: %d > %d\n%s", lineNumber+1, got, workspace.width, line)
+				}
+			}
+			updated, command := workspace.updateTunnelEditor(tea.KeyMsg{Type: tea.KeyEsc})
+			workspace = updated.(manageWorkspaceModel)
+			if command != nil || workspace.overlay == nil || workspace.overlay.Action != "discard-tunnel" || workspace.overlay.Selected != 1 {
+				t.Fatalf("escape did not open cancel-default discard confirmation: %+v", workspace.overlay)
+			}
+		})
+	}
+}
+
+func TestCreateWorkspaceValidatesBeforeConfirmation(t *testing.T) {
+	workspace := newCreateWorkspaceModel(context.Background(), nil, time.Second, model.KindGRE, "invalid", nil)
+	updated, command := workspace.updateTunnelEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	workspace = updated.(manageWorkspaceModel)
+	if command != nil || workspace.overlay != nil || workspace.err == nil {
+		t.Fatalf("invalid create draft reached confirmation: overlay=%+v err=%v", workspace.overlay, workspace.err)
 	}
 }
 

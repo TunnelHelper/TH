@@ -39,6 +39,7 @@ func (m manageWorkspaceModel) updatePeerList(key tea.KeyMsg) (tea.Model, tea.Cmd
 			m.peerDraft = peers[m.peerSelected]
 		}
 		m.fieldSelected = 0
+		m.changeSelected, m.changesFocus = 0, false
 		m.page = workspacePeer
 		m.notice = ""
 	case "a":
@@ -48,10 +49,11 @@ func (m manageWorkspaceModel) updatePeerList(key tea.KeyMsg) (tea.Model, tea.Cmd
 		m.peerOriginal = model.WireGuardPeer{}
 		m.peerDraft = model.WireGuardPeer{AllowedIPs: allowed}
 		m.fieldSelected = 0
+		m.changeSelected, m.changesFocus = 0, false
 		m.page = workspacePeer
 	case "q", "esc":
 		m.page = workspaceEdit
-		m.fieldSelected = workspaceFieldIndex(workspaceTunnelFields(m.draft), "wg.peers")
+		m.fieldSelected = workspaceFieldIndex(m.tunnelFields(), "wg.peers")
 	}
 	return m, nil
 }
@@ -60,6 +62,9 @@ func (m manageWorkspaceModel) peerListView(width int) string {
 	peers := workspaceWireGuardSpec(&m.draft).Peers
 	lines := []string{m.breadcrumb(width), "", workspaceAccentStyle.Render(fmt.Sprintf("WireGuard peers  %d", len(peers))), ""}
 	start, end := workspaceVisibleRange(len(peers)+1, m.peerSelected, max(1, m.inlineHeight()-8))
+	if status := workspaceWindowStatus(start, end, len(peers)+1, width); status != "" {
+		lines = append(lines, status)
+	}
 	for index := start; index < end; index++ {
 		selected := index == m.peerSelected
 		line := "> "
@@ -86,7 +91,31 @@ func (m manageWorkspaceModel) peerListView(width int) string {
 
 func (m manageWorkspaceModel) updatePeerEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	fields := workspacePeerFields(m.peerDraft)
+	changes := workspacePeerChanges(m.peerOriginal, m.peerDraft, m.peerAdding)
 	m.fieldSelected = min(m.fieldSelected, len(fields)-1)
+	if m.changesFocus && len(changes) > 0 {
+		switch key.String() {
+		case "up", "k":
+			if m.changeSelected > 0 {
+				m.changeSelected--
+			} else {
+				m.changesFocus = false
+			}
+			return m, nil
+		case "down", "j":
+			if m.changeSelected+1 < len(changes) {
+				m.changeSelected++
+			}
+			return m, nil
+		case "enter", " ":
+			change := changes[min(m.changeSelected, len(changes)-1)]
+			m.beginInfo("Pending peer change", "Complete values for the selected pending change.", workspaceChangeDetailLines(change)...)
+			return m, nil
+		case "esc":
+			m.changesFocus = false
+			return m, nil
+		}
+	}
 	switch key.String() {
 	case "up", "k":
 		if m.fieldSelected > 0 {
@@ -95,6 +124,9 @@ func (m manageWorkspaceModel) updatePeerEditor(key tea.KeyMsg) (tea.Model, tea.C
 	case "down", "j":
 		if m.fieldSelected+1 < len(fields) {
 			m.fieldSelected++
+		} else if len(changes) > 0 {
+			m.changesFocus = true
+			m.changeSelected = min(m.changeSelected, len(changes)-1)
 		}
 	case "enter", " ":
 		if err := m.activatePeerField(fields[m.fieldSelected]); err != nil {
@@ -134,15 +166,22 @@ func (m manageWorkspaceModel) peerEditorView(width int) string {
 		status = workspaceGoodStyle.Render("Saved in draft")
 	}
 	lines := []string{m.breadcrumb(width), "", workspaceAccentStyle.Render(fit(workspacePeerCrumb(m.peerDraft, m.peerAdding), width)), status, ""}
-	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, max(1, m.inlineHeight()-13))
+	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, max(3, m.inlineHeight()-18))
+	if status := workspaceWindowStatus(start, end, len(fields), width); status != "" {
+		lines = append(lines, status)
+	}
 	for index := start; index < end; index++ {
 		lines = append(lines, renderWorkspaceField(fields[index], index == m.fieldSelected, width))
 	}
 	lines = append(lines, "")
-	lines = append(lines, workspaceDiffLines(changes, width, 5)...)
+	lines = append(lines, workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, workspaceChangeViewportRows)...)
 	lines = append(lines, m.feedbackLines(width)...)
 	lines = append(lines, "")
-	lines = append(lines, workspaceHintLines(width, "enter  Edit field", "s  Save peer", "d  Remove/discard", "esc  Back")...)
+	hints := workspaceHintLines(width, "up/down  Select fields/changes", "enter  Edit field", "s  Save peer", "d  Remove/discard", "esc  Back")
+	if m.changesFocus {
+		hints = workspaceHintLines(width, "up/down  Select change", "enter  View complete values", "s  Save peer", "esc  Fields")
+	}
+	lines = append(lines, hints...)
 	return strings.Join(lines, "\n")
 }
 
@@ -167,6 +206,10 @@ func workspacePeerFields(peer model.WireGuardPeer) []workspaceField {
 func (m *manageWorkspaceModel) activatePeerField(field workspaceField) error {
 	if field.Kind == workspaceFieldChoice {
 		m.beginChoice("peer:"+field.ID, field.Label, "Choose how this update should handle the redacted secret.", field.Buttons, field.Selected)
+		return nil
+	}
+	if itemLabel, itemValidator, ok := workspaceListField(field); ok {
+		m.beginList("peer:"+field.ID, field.Label, field.Description, itemLabel, splitNonEmpty(field.EditValue), itemValidator, workspaceWholeListValidator(field.Validator))
 		return nil
 	}
 	m.beginInput("peer:"+field.ID, field.Label, field.Description, workspaceInputStep{
@@ -289,6 +332,7 @@ func (m *manageWorkspaceModel) closePeerEditor() {
 	m.peerAdding = false
 	m.peerOriginal, m.peerDraft = model.WireGuardPeer{}, model.WireGuardPeer{}
 	m.fieldSelected = 0
+	m.changeSelected, m.changesFocus = 0, false
 }
 
 func normalizeWorkspaceEndpoint(value string) (string, error) {
@@ -355,6 +399,7 @@ func (m manageWorkspaceModel) updateSourceList(key tea.KeyMsg) (tea.Model, tea.C
 			m.sourceAdding, m.sourceIndex = false, m.sourceSelected
 			m.sourceOriginal, m.sourceDraft = sources[m.sourceSelected], sources[m.sourceSelected]
 			m.fieldSelected = 0
+			m.changeSelected, m.changesFocus = 0, false
 			m.page = workspaceSource
 		}
 		m.notice = ""
@@ -363,7 +408,7 @@ func (m manageWorkspaceModel) updateSourceList(key tea.KeyMsg) (tea.Model, tea.C
 		m.beginSourceAdd(sources)
 	case "q", "esc":
 		m.page = workspaceEdit
-		m.fieldSelected = workspaceFieldIndex(workspaceTunnelFields(m.draft), "srv6.sources")
+		m.fieldSelected = workspaceFieldIndex(m.tunnelFields(), "srv6.sources")
 	}
 	return m, nil
 }
@@ -373,6 +418,7 @@ func (m *manageWorkspaceModel) beginSourceAdd(sources []model.SRv6Source) {
 	m.sourceOriginal = model.SRv6Source{}
 	m.sourceDraft = model.SRv6Source{Name: suggestedSRv6SourceName(sources), Priority: model.NextSRv6SourcePriority(sources), MTU: 1500}
 	m.fieldSelected = 0
+	m.changeSelected, m.changesFocus = 0, false
 	m.beginChoice("srv6-source-family", "Address family", "", []workspaceButton{
 		{Label: "IPv4", Value: string(model.SRv6FamilyIPv4)},
 		{Label: "IPv6", Value: string(model.SRv6FamilyIPv6)},
@@ -383,6 +429,9 @@ func (m manageWorkspaceModel) sourceListView(width int) string {
 	sources := m.draft.Spec.SRv6.Sources
 	lines := []string{m.breadcrumb(width), "", workspaceAccentStyle.Render(fmt.Sprintf("SRv6 route sources  %d", len(sources))), ""}
 	start, end := workspaceVisibleRange(len(sources)+1, m.sourceSelected, max(1, m.inlineHeight()-8))
+	if status := workspaceWindowStatus(start, end, len(sources)+1, width); status != "" {
+		lines = append(lines, status)
+	}
 	for index := start; index < end; index++ {
 		selected := index == m.sourceSelected
 		line := "> "
@@ -410,7 +459,31 @@ func (m manageWorkspaceModel) sourceListView(width int) string {
 
 func (m manageWorkspaceModel) updateSourceEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	fields := workspaceSourceFields(m.sourceDraft)
+	changes := workspaceSourceChanges(m.sourceOriginal, m.sourceDraft, m.sourceAdding)
 	m.fieldSelected = min(m.fieldSelected, len(fields)-1)
+	if m.changesFocus && len(changes) > 0 {
+		switch key.String() {
+		case "up", "k":
+			if m.changeSelected > 0 {
+				m.changeSelected--
+			} else {
+				m.changesFocus = false
+			}
+			return m, nil
+		case "down", "j":
+			if m.changeSelected+1 < len(changes) {
+				m.changeSelected++
+			}
+			return m, nil
+		case "enter", " ":
+			change := changes[min(m.changeSelected, len(changes)-1)]
+			m.beginInfo("Pending source change", "Complete values for the selected pending change.", workspaceChangeDetailLines(change)...)
+			return m, nil
+		case "esc":
+			m.changesFocus = false
+			return m, nil
+		}
+	}
 	switch key.String() {
 	case "up", "k":
 		if m.fieldSelected > 0 {
@@ -419,6 +492,9 @@ func (m manageWorkspaceModel) updateSourceEditor(key tea.KeyMsg) (tea.Model, tea
 	case "down", "j":
 		if m.fieldSelected+1 < len(fields) {
 			m.fieldSelected++
+		} else if len(changes) > 0 {
+			m.changesFocus = true
+			m.changeSelected = min(m.changeSelected, len(changes)-1)
 		}
 	case "enter", " ":
 		field := fields[m.fieldSelected]
@@ -463,14 +539,22 @@ func (m manageWorkspaceModel) sourceEditorView(width int) string {
 		status = workspaceGoodStyle.Render("Saved in draft")
 	}
 	lines := []string{m.breadcrumb(width), "", workspaceAccentStyle.Render(fit(workspaceSourceCrumb(m.sourceDraft, m.sourceAdding), width)), status, ""}
-	for index, field := range fields {
-		lines = append(lines, renderWorkspaceField(field, index == m.fieldSelected, width))
+	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, max(3, m.inlineHeight()-18))
+	if status := workspaceWindowStatus(start, end, len(fields), width); status != "" {
+		lines = append(lines, status)
+	}
+	for index := start; index < end; index++ {
+		lines = append(lines, renderWorkspaceField(fields[index], index == m.fieldSelected, width))
 	}
 	lines = append(lines, "")
-	lines = append(lines, workspaceDiffLines(changes, width, 5)...)
+	lines = append(lines, workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, workspaceChangeViewportRows)...)
 	lines = append(lines, m.feedbackLines(width)...)
 	lines = append(lines, "")
-	lines = append(lines, workspaceHintLines(width, "enter  Edit field", "s  Save source", "d  Remove/discard", "esc  Back")...)
+	hints := workspaceHintLines(width, "up/down  Select fields/changes", "enter  Edit field", "s  Save source", "d  Remove/discard", "esc  Back")
+	if m.changesFocus {
+		hints = workspaceHintLines(width, "up/down  Select change", "enter  View complete values", "s  Save source", "esc  Fields")
+	}
+	lines = append(lines, hints...)
 	return strings.Join(lines, "\n")
 }
 
@@ -573,6 +657,7 @@ func (m *manageWorkspaceModel) closeSourceEditor() {
 	m.sourceAdding = false
 	m.sourceOriginal, m.sourceDraft = model.SRv6Source{}, model.SRv6Source{}
 	m.fieldSelected = 0
+	m.changeSelected, m.changesFocus = 0, false
 }
 
 func workspaceSourceSaveLabel(adding bool) string {

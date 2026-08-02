@@ -391,6 +391,9 @@ func TestNewTunnelIdentityRejectsManagedConflicts(t *testing.T) {
 	if err := validateNewTunnelIdentity(model.KindWireGuard, "new", managed); err == nil || !strings.Contains(err.Error(), "interface") {
 		t.Fatalf("managed interface conflict = %v", err)
 	}
+	if err := validateNewTunnelIdentity(model.KindSRv6, "wg-new", managed); err != nil {
+		t.Fatalf("SRv6 identity incorrectly collided with a managed interface: %v", err)
+	}
 }
 
 func TestSuggestedTunnelNameAccountsForStoredPrefix(t *testing.T) {

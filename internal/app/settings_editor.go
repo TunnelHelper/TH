@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,10 +29,11 @@ const (
 )
 
 type settingsLoadMsg struct {
-	settings config.Settings
-	babel    core.BabelHealth
-	mptcp    core.MptcpHealth
-	err      error
+	settings  config.Settings
+	babel     core.BabelHealth
+	mptcp     core.MptcpHealth
+	err       error
+	healthErr error
 }
 
 type settingsSaveMsg struct{ err error }
@@ -58,14 +61,16 @@ type settingsModel struct {
 	ifaceName      string
 	ifaceDraft     config.BabelExternalInterface
 
-	width   int
-	height  int
-	loading bool
-	busy    string
-	err     error
-	notice  string
-	overlay *workspaceOverlay
-	input   textinput.Model
+	width     int
+	height    int
+	loaded    bool
+	loading   bool
+	busy      string
+	err       error
+	healthErr error
+	notice    string
+	overlay   *workspaceOverlay
+	input     textinput.Model
 }
 
 func runSettingsEditor(client *control.Client, timeout time.Duration, output *ui.UI) error {
@@ -101,7 +106,7 @@ func (m settingsModel) load() tea.Cmd {
 		}
 		health, healthErr := m.client.Health(ctx)
 		if healthErr != nil {
-			return settingsLoadMsg{err: healthErr}
+			return settingsLoadMsg{settings: settings, healthErr: healthErr}
 		}
 		return settingsLoadMsg{settings: settings, babel: health.Babel, mptcp: health.Mptcp}
 	}
@@ -128,13 +133,17 @@ func (m settingsModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case settingsLoadMsg:
 		m.loading = false
+		m.busy = ""
 		m.err = message.err
-		if message.err == nil {
-			m.original = message.settings
-			m.draft = message.settings
-			m.babel = message.babel
-			m.mptcp = message.mptcp
+		if message.err != nil {
+			return m, nil
 		}
+		m.loaded = true
+		m.original = cloneSettings(message.settings)
+		m.draft = cloneSettings(message.settings)
+		m.babel = message.babel
+		m.mptcp = message.mptcp
+		m.healthErr = message.healthErr
 		return m, nil
 	case settingsSaveMsg:
 		m.busy = ""
@@ -142,10 +151,29 @@ func (m settingsModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.err != nil {
 			return m, nil
 		}
-		m.original = m.draft
+		m.original = cloneSettings(m.draft)
 		m.notice = "Settings saved"
 		m.fieldSelected = 0
+		m.loading = true
+		m.busy = "Refreshing settings"
 		return m, m.load()
+	}
+	if !m.loaded {
+		key, ok := message.(tea.KeyMsg)
+		if !ok {
+			return m, nil
+		}
+		switch key.String() {
+		case "q", "esc":
+			return m, tea.Quit
+		case "r":
+			if !m.loading {
+				m.loading = true
+				m.err = nil
+				return m, m.load()
+			}
+		}
+		return m, nil
 	}
 
 	if m.overlay != nil {
@@ -191,6 +219,10 @@ func (m settingsModel) updateMain(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.changesFocus = false
 			return m, nil
+		case "enter", " ":
+			change := changes[min(m.changeSelected, len(changes)-1)]
+			m.beginInfo("Pending change", "Complete values for the selected pending change.", workspaceChangeDetailLines(change)...)
+			return m, nil
 		}
 	}
 	switch key.String() {
@@ -217,17 +249,34 @@ func (m settingsModel) updateMain(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "s", "ctrl+s":
 		changes := settingsChanges(m.original, m.draft)
+		if err := m.draft.Validate(); err != nil {
+			m.err = err
+			return m, nil
+		}
 		if len(changes) == 0 {
 			m.notice = "No changes to save"
 			return m, nil
 		}
 		m.beginConfirm("save-settings", "Save settings", fmt.Sprintf("Apply %d pending change(s)?", len(changes)), "Save changes", "Keep editing", false)
+	case "r":
+		if len(changes) > 0 {
+			m.beginConfirm("refresh-settings", "Reload settings", "Discard pending changes and reload settings from the daemon?", "Discard and reload", "Keep editing", true)
+			return m, nil
+		}
+		m.loading = true
+		m.busy = "Refreshing settings"
+		return m, m.load()
 	}
 	return m, nil
 }
 
 func (m settingsModel) updateInterfaceList(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	names := sortedInterfaceNames(m.draft.Babel.Interfaces)
+	if len(names) == 0 {
+		m.ifaceSelected = 0
+	} else {
+		m.ifaceSelected = min(m.ifaceSelected, len(names)-1)
+	}
 	switch key.String() {
 	case "q", "esc":
 		m.page = settingsMain
@@ -244,7 +293,16 @@ func (m settingsModel) updateInterfaceList(key tea.KeyMsg) (tea.Model, tea.Cmd) 
 			m.openInterface(names[m.ifaceSelected])
 		}
 	case "a":
-		m.beginInput("add-interface-name", "Add external Babel interface", "External interfaces are created outside TH; TH only runs Babel on them.", workspaceInputStep{
+		buttons, err := discoverExternalInterfaceButtons(m.draft.Babel.Interfaces)
+		if err != nil {
+			m.err = err
+		} else if len(buttons) == 0 {
+			m.notice = "No unconfigured system interfaces found"
+		} else {
+			m.beginSearch("add-interface-select", "Add external Babel interface", "Type to filter system interfaces, then select one.", buttons)
+		}
+	case "n":
+		m.beginInput("add-interface-name", "Enter external Babel interface", "Use this when the interface will be created after TH is configured.", workspaceInputStep{
 			Label: "Interface name (1-15 chars)", Value: "", Validator: validateInterfaceInput,
 		})
 	case "d":
@@ -294,11 +352,21 @@ func (m *settingsModel) commitInterface() {
 		m.draft.Babel.Interfaces = make(map[string]config.BabelExternalInterface)
 	}
 	m.draft.Babel.Interfaces[m.ifaceName] = m.ifaceDraft
+	for index, name := range sortedInterfaceNames(m.draft.Babel.Interfaces) {
+		if name == m.ifaceName {
+			m.ifaceSelected = index
+			break
+		}
+	}
 }
 
 func (m *settingsModel) activateSettingsField(field workspaceField) error {
 	switch field.Kind {
 	case workspaceFieldInput:
+		if itemLabel, itemValidator, ok := workspaceListField(field); ok {
+			m.beginList("settings:"+field.ID, field.Label, field.Description, itemLabel, splitNonEmpty(field.EditValue), itemValidator, workspaceWholeListValidator(field.Validator))
+			return nil
+		}
 		m.beginInput("settings:"+field.ID, field.Label, field.Description, workspaceInputStep{
 			Label: field.Label, Value: field.EditValue, Validator: field.Validator,
 		})
@@ -350,7 +418,7 @@ func (m *settingsModel) applySettingsInput(action string, values []string) error
 		}
 		m.ifaceName = name
 		m.ifaceAdding = true
-		m.ifaceDraft = config.BabelExternalInterface{}
+		m.ifaceDraft = config.BabelExternalInterface{Multicast: true}
 		m.fieldSelected = 0
 		m.page = settingsInterface
 		return nil
@@ -398,6 +466,20 @@ func (m *settingsModel) applySettingsInput(action string, values []string) error
 
 func (m *settingsModel) applySettingsChoice(action, value string) error {
 	m.notice = ""
+	if action == "add-interface-select" {
+		if err := validateInterfaceInput(value); err != nil {
+			return err
+		}
+		if _, exists := m.draft.Babel.Interfaces[value]; exists {
+			return fmt.Errorf("interface %q is already configured", value)
+		}
+		m.ifaceName = value
+		m.ifaceAdding = true
+		m.ifaceDraft = config.BabelExternalInterface{Multicast: true}
+		m.fieldSelected = 0
+		m.page = settingsInterface
+		return nil
+	}
 	if !strings.HasPrefix(action, "settings:") {
 		return fmt.Errorf("unsupported settings action %q", action)
 	}
@@ -419,16 +501,42 @@ func (m *settingsModel) applySettingsConfirm(action string) (tea.Cmd, error) {
 		m.busy = "Saving settings"
 		return m.save(), nil
 	case "discard-settings":
-		m.draft = m.original
+		m.draft = cloneSettings(m.original)
 		m.notice = ""
 		return nil, nil
 	case "remove-interface":
 		delete(m.draft.Babel.Interfaces, m.ifaceName)
+		m.ifaceSelected = min(m.ifaceSelected, max(0, len(m.draft.Babel.Interfaces)-1))
 		m.page = settingsInterfaces
 		return nil, nil
+	case "refresh-settings":
+		m.loading = true
+		m.busy = "Refreshing settings"
+		m.err = nil
+		return m.load(), nil
 	default:
 		return nil, fmt.Errorf("unsupported settings action %q", action)
 	}
+}
+
+func cloneSettings(settings config.Settings) config.Settings {
+	cloned := settings
+	if settings.Babel.DelayMetric != nil {
+		delayMetric := *settings.Babel.DelayMetric
+		cloned.Babel.DelayMetric = &delayMetric
+	}
+	cloned.Babel.Advertise.SourceInterfaces = append([]string(nil), settings.Babel.Advertise.SourceInterfaces...)
+	cloned.Babel.Advertise.AdvertisedPrefixes = append([]netip.Prefix(nil), settings.Babel.Advertise.AdvertisedPrefixes...)
+	cloned.Babel.Advertise.Include = append([]netip.Prefix(nil), settings.Babel.Advertise.Include...)
+	cloned.Babel.Advertise.Exclude = append([]netip.Prefix(nil), settings.Babel.Advertise.Exclude...)
+	if settings.Babel.Interfaces != nil {
+		cloned.Babel.Interfaces = make(map[string]config.BabelExternalInterface, len(settings.Babel.Interfaces))
+		for name, iface := range settings.Babel.Interfaces {
+			iface.Neighbours = append([]netip.Addr(nil), iface.Neighbours...)
+			cloned.Babel.Interfaces[name] = iface
+		}
+	}
+	return cloned
 }
 
 // settingsFields lists every operator-editable setting as an editor field.
@@ -514,7 +622,7 @@ func externalInterfaceFields(name string, external config.BabelExternalInterface
 	}
 	if !external.Multicast {
 		fields = append(fields, withFieldDescription(workspaceTextField("iface.neighbours", "Neighbours", formatNeighbourList(external.Neighbours), validateNeighbourListInput),
-			"Unicast Babel neighbour addresses, comma separated."))
+			"Unicast Babel neighbour addresses."))
 	}
 	_ = name
 	return fields
@@ -559,6 +667,9 @@ func settingsChanges(before, after config.Settings) []workspaceChange {
 }
 
 func (m settingsModel) mptcpStatusLabel() string {
+	if m.healthErr != nil {
+		return "unavailable"
+	}
 	label := m.mptcp.Status
 	if !m.mptcp.Supported && m.mptcp.Message != "" {
 		label += " (" + m.mptcp.Message + ")"
@@ -574,8 +685,11 @@ func (m settingsModel) mainView(width int) string {
 		status = workspaceWarnStyle.Bold(true).Render(fmt.Sprintf("Unsaved  %d change(s)", len(changes)))
 	}
 	feedback := m.feedbackLines(width)
-	hints := workspaceHintLines(width, "enter  Edit field", "s  Save settings", "esc  Back")
-	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, len(changes)+1)
+	hints := workspaceHintLines(width, "up/down  Select fields/changes", "enter  Edit field", "s  Save settings", "r  Refresh", "esc  Back")
+	if m.changesFocus {
+		hints = workspaceHintLines(width, "up/down  Select change", "enter  View complete values", "s  Save settings", "esc  Fields")
+	}
+	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, workspaceChangeViewportRows)
 	lines := []string{
 		workspaceDimStyle.Render(fit("TH / Settings", width)), "",
 		workspaceAccentStyle.Render(fit("Daemon settings", width)), status, "",
@@ -605,9 +719,6 @@ func (m settingsModel) mainView(width int) string {
 	lines = append(lines, "")
 	lines = append(lines, changeLines...)
 	lines = append(lines, feedback...)
-	if m.busy != "" {
-		lines = append(lines, "", workspaceWarnStyle.Render(m.busy+"..."))
-	}
 	lines = append(lines, "")
 	lines = append(lines, hints...)
 	return strings.Join(lines, "\n")
@@ -617,12 +728,15 @@ func (m settingsModel) interfacesView(width int) string {
 	names := sortedInterfaceNames(m.draft.Babel.Interfaces)
 	lines := []string{
 		workspaceDimStyle.Render(fit("TH / Settings / Babel / External interfaces", width)), "",
-		workspaceAccentStyle.Render("External Babel interfaces"), "",
+		workspaceAccentStyle.Render(fit("External Babel interfaces", width)), "",
 	}
 	if len(names) == 0 {
 		lines = append(lines, "No external interfaces configured")
 	} else {
 		start, end := workspaceVisibleRange(len(names), m.ifaceSelected, max(3, m.inlineHeight()-10))
+		if status := workspaceWindowStatus(start, end, len(names), width); status != "" {
+			lines = append(lines, status)
+		}
 		for index := start; index < end; index++ {
 			name := names[index]
 			marker := "  "
@@ -636,7 +750,7 @@ func (m settingsModel) interfacesView(width int) string {
 	}
 	lines = append(lines, m.feedbackLines(width)...)
 	lines = append(lines, "")
-	lines = append(lines, workspaceHintLines(width, "enter  Edit", "a  Add interface", "d  Remove", "esc  Back")...)
+	lines = append(lines, workspaceHintLines(width, "enter  Edit", "a  Add from system", "n  Enter name", "d  Remove", "esc  Back")...)
 	return strings.Join(lines, "\n")
 }
 
@@ -647,6 +761,9 @@ func (m settingsModel) interfaceEditorView(width int) string {
 		workspaceAccentStyle.Render(fit("External interface "+m.ifaceName, width)), "",
 	}
 	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, max(3, m.inlineHeight()-8))
+	if status := workspaceWindowStatus(start, end, len(fields), width); status != "" {
+		lines = append(lines, status)
+	}
 	for index := start; index < end; index++ {
 		lines = append(lines, renderWorkspaceField(fields[index], index == m.fieldSelected, width))
 	}
@@ -660,6 +777,18 @@ func (m settingsModel) interfaceEditorView(width int) string {
 func (m settingsModel) View() string {
 	height := m.inlineHeight()
 	width := m.inlineWidth()
+	if !m.loaded {
+		lines := []string{
+			workspaceDimStyle.Render(fit("TH / Settings", width)), "",
+			workspaceAccentStyle.Render("Daemon settings"), "",
+		}
+		if m.loading {
+			lines = append(lines, workspaceDimStyle.Render("Loading settings..."))
+		} else if m.err != nil {
+			lines = append(lines, workspaceErrorStyle.Render(fit(m.err.Error(), width)), "", workspaceDimStyle.Render("r  Retry    esc  Back"))
+		}
+		return strings.Join(lines, "\n")
+	}
 	var base string
 	switch m.page {
 	case settingsMain:
@@ -693,16 +822,28 @@ func (m settingsModel) inlineWidth() int {
 }
 
 func (m settingsModel) feedbackLines(width int) []string {
-	lines := make([]string, 0, 3)
+	message := ""
+	style := workspaceDimStyle
 	if m.notice != "" {
-		style := workspaceGoodStyle
+		message = m.notice
+		style = workspaceGoodStyle
 		if strings.Contains(strings.ToLower(m.notice), "failed") || strings.Contains(strings.ToLower(m.notice), "error") {
 			style = workspaceWarnStyle
 		}
-		lines = append(lines, "", style.Render(fit(m.notice, width)))
+	}
+	if m.busy != "" {
+		message = m.busy + "..."
+		style = workspaceWarnStyle
 	}
 	if m.err != nil {
-		lines = append(lines, "", workspaceErrorStyle.Render(fit(m.err.Error(), width)))
+		message = m.err.Error()
+		style = workspaceErrorStyle
+	}
+	lines := []string{"", style.Render(fit(message, width))}
+	if m.healthErr != nil {
+		lines = append(lines, workspaceWarnStyle.Render(fit("Health unavailable: "+m.healthErr.Error(), width)))
+	} else {
+		lines = append(lines, "")
 	}
 	return lines
 }
@@ -742,6 +883,30 @@ func (m *settingsModel) beginConfirm(action, title, description, confirmLabel, c
 	}
 }
 
+func (m *settingsModel) beginInfo(title, description string, lines ...string) {
+	m.overlay = &workspaceOverlay{
+		Kind: workspaceOverlayInfo, Title: title, Description: description,
+		Lines: append([]string(nil), lines...),
+	}
+}
+
+func (m *settingsModel) beginList(action, title, description, itemLabel string, items []string, itemValidator func(string) error, listValidator func([]string) error) {
+	m.overlay = workspaceListOverlay(action, title, description, itemLabel, items, itemValidator, listValidator)
+}
+
+func (m *settingsModel) beginSearch(action, title, description string, buttons []workspaceButton) {
+	input := textinput.New()
+	input.Prompt = "Filter> "
+	input.CharLimit = 128
+	input.Width = max(12, min(76, m.width-10))
+	input.Focus()
+	m.input = input
+	m.overlay = &workspaceOverlay{
+		Kind: workspaceOverlaySearch, Action: action, Title: title, Description: description,
+		Buttons: append([]workspaceButton(nil), buttons...),
+	}
+}
+
 func (m *settingsModel) configureInputStep() {
 	if m.overlay == nil || m.overlay.Kind != workspaceOverlayInput || m.overlay.Step >= len(m.overlay.Steps) {
 		return
@@ -762,13 +927,35 @@ func (m *settingsModel) configureInputStep() {
 }
 
 func (m *settingsModel) resizeInput() {
-	if m.overlay != nil && m.overlay.Kind == workspaceOverlayInput {
+	if m.overlay != nil && (m.overlay.Kind == workspaceOverlayInput || m.overlay.Kind == workspaceOverlayList && m.overlay.Editing) {
 		m.input.Width = max(12, min(76, m.width-6))
+	} else if m.overlay != nil && m.overlay.Kind == workspaceOverlaySearch {
+		m.input.Width = max(12, min(76, m.width-10))
 	}
 }
 
 func (m settingsModel) updateOverlay(message tea.Msg) (tea.Model, tea.Cmd) {
 	key, isKey := message.(tea.KeyMsg)
+	if m.overlay.Kind == workspaceOverlaySearch {
+		return m.updateSearchOverlay(message)
+	}
+	if m.overlay.Kind == workspaceOverlayList {
+		var event workspaceListEvent
+		var command tea.Cmd
+		m.input, command, event = workspaceUpdateListOverlay(m.overlay, m.input, message, m.width)
+		switch event {
+		case workspaceListCancel:
+			m.overlay = nil
+		case workspaceListApply:
+			action := m.overlay.Action
+			value := strings.Join(m.overlay.Items, ",")
+			m.overlay = nil
+			if err := m.applySettingsInput(action, []string{value}); err != nil {
+				m.err = err
+			}
+		}
+		return m, command
+	}
 	if !isKey {
 		if m.overlay.Kind == workspaceOverlayInput {
 			var command tea.Cmd
@@ -779,6 +966,10 @@ func (m settingsModel) updateOverlay(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if key.String() == "esc" {
 		m.overlay = nil
+		return m, nil
+	}
+	if m.overlay.Kind == workspaceOverlayInfo {
+		workspaceUpdateInfoOverlay(m.overlay, key, m.width, m.height)
 		return m, nil
 	}
 	if m.overlay.Kind == workspaceOverlayInput {
@@ -852,7 +1043,18 @@ func (m settingsModel) overlayView(width int) string {
 	}
 	lines := []string{workspaceAccentStyle.Render(fit(m.overlay.Title, width))}
 	if m.overlay.Description != "" {
-		lines = append(lines, workspaceDimStyle.Render(fit(m.overlay.Description, width)))
+		for _, line := range wrapDisplayText(m.overlay.Description, width) {
+			lines = append(lines, workspaceDimStyle.Render(line))
+		}
+	}
+	if m.overlay.Kind == workspaceOverlayInfo {
+		return workspaceRenderInfoOverlay(m.overlay, lines, width, m.height)
+	}
+	if m.overlay.Kind == workspaceOverlayList {
+		return workspaceRenderListOverlay(m.overlay, m.input, lines, width, m.height)
+	}
+	if m.overlay.Kind == workspaceOverlaySearch {
+		return m.searchOverlayView(lines, width)
 	}
 	if m.overlay.Kind == workspaceOverlayInput {
 		step := m.overlay.Steps[m.overlay.Step]
@@ -873,4 +1075,106 @@ func (m settingsModel) overlayView(width int) string {
 	}
 	lines = append(lines, workspaceHintLines(width, "arrows/tab  Select", "enter  Apply", "esc  Cancel")...)
 	return strings.Join(lines, "\n")
+}
+
+func (m settingsModel) updateSearchOverlay(message tea.Msg) (tea.Model, tea.Cmd) {
+	key, isKey := message.(tea.KeyMsg)
+	if !isKey {
+		var command tea.Cmd
+		m.input, command = m.input.Update(message)
+		return m, command
+	}
+	buttons := workspaceFilteredButtons(m.overlay.Buttons, m.input.Value())
+	switch key.String() {
+	case "esc":
+		m.overlay = nil
+		return m, nil
+	case "up", "shift+tab":
+		if len(buttons) > 0 {
+			m.overlay.Selected = (m.overlay.Selected - 1 + len(buttons)) % len(buttons)
+		}
+	case "down", "tab":
+		if len(buttons) > 0 {
+			m.overlay.Selected = (m.overlay.Selected + 1) % len(buttons)
+		}
+	case "enter":
+		if len(buttons) == 0 {
+			return m, nil
+		}
+		m.overlay.Selected = min(m.overlay.Selected, len(buttons)-1)
+		action, value := m.overlay.Action, buttons[m.overlay.Selected].Value
+		m.overlay = nil
+		if err := m.applySettingsChoice(action, value); err != nil {
+			m.err = err
+		}
+		return m, nil
+	default:
+		var command tea.Cmd
+		m.input, command = m.input.Update(message)
+		m.overlay.Selected = 0
+		return m, command
+	}
+	return m, nil
+}
+
+func (m settingsModel) searchOverlayView(prefix []string, width int) string {
+	lines := append([]string(nil), prefix...)
+	lines = append(lines, m.input.View())
+	buttons := workspaceFilteredButtons(m.overlay.Buttons, m.input.Value())
+	if len(buttons) == 0 {
+		lines = append(lines, workspaceDimStyle.Render("No matching interfaces"))
+	} else {
+		selected := min(m.overlay.Selected, len(buttons)-1)
+		start, end := workspaceVisibleRange(len(buttons), selected, 8)
+		if status := workspaceWindowStatus(start, end, len(buttons), width); status != "" {
+			lines = append(lines, status)
+		}
+		for index := start; index < end; index++ {
+			marker := "  "
+			if index == selected {
+				marker = "> "
+			}
+			line := fit(marker+buttons[index].Label, width)
+			if index == selected {
+				line = workspaceFocusStyle.Render(line)
+			}
+			lines = append(lines, line)
+		}
+	}
+	lines = append(lines, workspaceHintLines(width, "type  Filter", "up/down  Select", "enter  Add", "esc  Cancel")...)
+	return strings.Join(lines, "\n")
+}
+
+func workspaceFilteredButtons(buttons []workspaceButton, query string) []workspaceButton {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return buttons
+	}
+	filtered := make([]workspaceButton, 0, len(buttons))
+	for _, button := range buttons {
+		if strings.Contains(strings.ToLower(button.Label), query) || strings.Contains(strings.ToLower(button.Value), query) {
+			filtered = append(filtered, button)
+		}
+	}
+	return filtered
+}
+
+func discoverExternalInterfaceButtons(configured map[string]config.BabelExternalInterface) ([]workspaceButton, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("list system interfaces: %w", err)
+	}
+	buttons := make([]workspaceButton, 0, len(interfaces))
+	for _, iface := range interfaces {
+		if _, exists := configured[iface.Name]; exists {
+			continue
+		}
+		state := "down"
+		if iface.Flags&net.FlagUp != 0 {
+			state = "up"
+		}
+		buttons = append(buttons, workspaceButton{Label: fmt.Sprintf("%-15s  %s", iface.Name, state), Value: iface.Name})
+	}
+	sort.SliceStable(buttons, func(i, j int) bool { return buttons[i].Value < buttons[j].Value })
+	return buttons, nil
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/TunnelHelper/TH/internal/ui"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestDashboardRefreshUsesReadOnlyListEndpoint(t *testing.T) {
@@ -66,6 +67,76 @@ func TestDashboardUpsertSortAndDelete(t *testing.T) {
 	modelState.remove("a")
 	if len(modelState.views) != 1 || modelState.views[0].Tunnel.ID != "b" {
 		t.Fatalf("remaining views = %+v", modelState.views)
+	}
+}
+
+func TestDashboardRefreshPreservesSelectedTunnelID(t *testing.T) {
+	dashboard := dashboardModel{views: []model.TunnelView{
+		{Tunnel: model.Tunnel{ID: "b", Name: "bravo"}},
+		{Tunnel: model.Tunnel{ID: "c", Name: "charlie"}},
+	}, selected: 1}
+	updated, _ := dashboard.Update(dashboardViewsMsg{views: []model.TunnelView{
+		{Tunnel: model.Tunnel{ID: "a", Name: "alpha"}},
+		{Tunnel: model.Tunnel{ID: "b", Name: "bravo"}},
+		{Tunnel: model.Tunnel{ID: "c", Name: "charlie"}},
+	}})
+	dashboard = updated.(dashboardModel)
+	if got := dashboard.selectedTunnelID(); got != "c" {
+		t.Fatalf("selected tunnel after refresh = %q, want c", got)
+	}
+}
+
+func TestDashboardEnterOpensSelectedTunnelInManage(t *testing.T) {
+	dashboard := dashboardModel{views: []model.TunnelView{{Tunnel: model.Tunnel{ID: "selected", Name: "tunnel"}}}}
+	updated, command := dashboard.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	dashboard = updated.(dashboardModel)
+	if command == nil || dashboard.openID != "selected" {
+		t.Fatalf("enter result: openID=%q command=%v", dashboard.openID, command)
+	}
+}
+
+func TestDashboardPeerDetailsUseScrollableLocalViewport(t *testing.T) {
+	peers := make([]model.PeerStatus, 8)
+	for index := range peers {
+		peers[index].PublicKey = strings.Repeat(string(rune('a'+index)), 16)
+	}
+	view := model.TunnelView{Tunnel: model.Tunnel{ID: "wg", Name: "wg", Kind: model.KindWireGuard}, Status: model.Status{Peers: peers}}
+	dashboard := dashboardModel{views: []model.TunnelView{view}, width: 80, height: 24, detailsFocus: true}
+	first := strings.Join(dashboard.peerViewportLines(80), "\n")
+	dashboard.peerOffset = 12
+	later := strings.Join(dashboard.peerViewportLines(80), "\n")
+	if first == later || !strings.Contains(first, "below") || !strings.Contains(later, "above") {
+		t.Fatalf("peer viewport does not expose scroll state:\nfirst:\n%s\nlater:\n%s", first, later)
+	}
+}
+
+func TestDashboardPeerViewportKeepsStableHeightAcrossRefresh(t *testing.T) {
+	view := model.TunnelView{Tunnel: model.Tunnel{ID: "wg", Name: "wg", Kind: model.KindWireGuard}}
+	dashboard := dashboardModel{views: []model.TunnelView{view}, width: 80, height: 24}
+	before := len(dashboard.peerViewportLines(80))
+	dashboard.views[0].Status.Peers = []model.PeerStatus{{PublicKey: "peer"}, {PublicKey: "peer2"}}
+	after := len(dashboard.peerViewportLines(80))
+	if before != after || after != dashboardPeerViewportRows+2 {
+		t.Fatalf("peer viewport height changed across refresh: before=%d after=%d", before, after)
+	}
+}
+
+func TestDashboardPeerScrollStopsAtViewportBoundary(t *testing.T) {
+	peers := make([]model.PeerStatus, 10)
+	view := model.TunnelView{Tunnel: model.Tunnel{ID: "wg", Name: "wg", Kind: model.KindWireGuard}, Status: model.Status{Peers: peers}}
+	dashboard := dashboardModel{views: []model.TunnelView{view}, width: 80, height: 24, detailsFocus: true}
+	for index := 0; index < 100; index++ {
+		updated, _ := dashboard.Update(tea.KeyMsg{Type: tea.KeyDown})
+		dashboard = updated.(dashboardModel)
+	}
+	maximum := dashboard.peerMaxOffset()
+	if dashboard.peerOffset != maximum || maximum == 0 {
+		t.Fatalf("peer offset = %d, want bottom %d", dashboard.peerOffset, maximum)
+	}
+	updated, _ := dashboard.Update(tea.KeyMsg{Type: tea.KeyUp})
+	dashboard = updated.(dashboardModel)
+	if dashboard.peerOffset != maximum-1 {
+		t.Fatalf("one up key from bottom moved to %d, want %d", dashboard.peerOffset, maximum-1)
 	}
 }
 
@@ -119,7 +190,7 @@ func TestDashboardPeerDetailsShowLiveHandshakeAndBothCounterSources(t *testing.T
 	}
 }
 
-func TestDashboardPeerDetailsRenderWithoutHeightLimit(t *testing.T) {
+func TestDashboardPeerDetailsRemainReachableThroughViewport(t *testing.T) {
 	peers := make([]model.PeerStatus, 3)
 	for index := range peers {
 		peers[index] = model.PeerStatus{PublicKey: strings.Repeat(string(rune('a'+index)), 16)}
@@ -128,10 +199,13 @@ func TestDashboardPeerDetailsRenderWithoutHeightLimit(t *testing.T) {
 	for index := range views {
 		views[index] = model.TunnelView{Tunnel: model.Tunnel{Name: "wg", Kind: model.KindWireGuard}, Status: model.Status{Peers: peers}}
 	}
-	dashboard := (dashboardModel{views: views, width: 100, height: 20}).View()
-	if strings.Contains(dashboard, "more peers") {
-		t.Fatalf("dashboard hid peer details behind a more-marker:\n%s", dashboard)
+	model := dashboardModel{views: views, width: 100, height: 20}
+	var rendered strings.Builder
+	for offset := 0; offset < 12; offset++ {
+		model.peerOffset = offset
+		rendered.WriteString(strings.Join(model.peerViewportLines(100), "\n"))
 	}
+	dashboard := rendered.String()
 	for _, key := range []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"} {
 		if !strings.Contains(dashboard, "Peer "+key) {
 			t.Fatalf("dashboard did not render peer %q in full:\n%s", key, dashboard)

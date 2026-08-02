@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/netip"
@@ -28,8 +29,39 @@ func settingsEditorFixture() settingsModel {
 	settings.Mptcp.Scheduler = "roundrobin"
 	return settingsModel{
 		ctx: context.Background(), timeout: time.Second,
-		page: settingsMain, original: settings, draft: settings,
-		mptcp: core.MptcpHealth{Supported: true, Enabled: true, Status: "enabled", Endpoints: 2},
+		page: settingsMain, original: cloneSettings(settings), draft: cloneSettings(settings),
+		loaded: true,
+		mptcp:  core.MptcpHealth{Supported: true, Enabled: true, Status: "enabled", Endpoints: 2},
+	}
+}
+
+func TestSettingsDraftDoesNotMutateAuthoritativeSnapshot(t *testing.T) {
+	settings := config.Defaults()
+	settings.Babel.Interfaces = map[string]config.BabelExternalInterface{
+		"ext0": {Multicast: false, Neighbours: []netip.Addr{netip.MustParseAddr("fe80::1")}},
+	}
+	settings.Babel.Advertise.Include = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	model := newSettingsModel(context.Background(), nil, time.Second)
+	updated, _ := model.Update(settingsLoadMsg{settings: settings})
+	model = updated.(settingsModel)
+
+	delete(model.draft.Babel.Interfaces, "ext0")
+	model.draft.Babel.Advertise.Include[0] = netip.MustParsePrefix("192.0.2.0/24")
+	if _, ok := model.original.Babel.Interfaces["ext0"]; !ok {
+		t.Fatal("editing the draft mutated the authoritative interface map")
+	}
+	if got := model.original.Babel.Advertise.Include[0]; got != netip.MustParsePrefix("10.0.0.0/8") {
+		t.Fatalf("editing the draft mutated the authoritative include list: %s", got)
+	}
+
+	if _, err := model.applySettingsConfirm("discard-settings"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := model.draft.Babel.Interfaces["ext0"]; !ok {
+		t.Fatal("discard did not restore the authoritative interface map")
+	}
+	if got := model.draft.Babel.Advertise.Include[0]; got != netip.MustParsePrefix("10.0.0.0/8") {
+		t.Fatalf("discard did not restore the authoritative include list: %s", got)
 	}
 }
 
@@ -118,20 +150,93 @@ func TestSettingsInputOverlayAcceptsTyping(t *testing.T) {
 
 	opened, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = opened.(settingsModel)
-	if model.overlay == nil || !model.input.Focused() {
-		t.Fatal("opening a settings text field must focus its input")
+	if model.overlay == nil || model.overlay.Kind != workspaceOverlayList {
+		t.Fatal("opening a prefix-list field must open the structured list editor")
+	}
+	adding, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = adding.(settingsModel)
+	if !model.input.Focused() {
+		t.Fatal("adding a list item must focus its input")
 	}
 
 	typed, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("10.0.0.0/8")})
 	model = typed.(settingsModel)
-	applied, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	kept, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = kept.(settingsModel)
+	applied, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
 	model = applied.(settingsModel)
 	if model.overlay != nil {
-		t.Fatal("enter must apply and close the input overlay")
+		t.Fatal("applying the list must close the overlay")
 	}
 	want := netip.MustParsePrefix("10.0.0.0/8")
 	if len(model.draft.Babel.Advertise.Include) != 1 || model.draft.Babel.Advertise.Include[0] != want {
 		t.Fatalf("include filter = %+v, want [%s]", model.draft.Babel.Advertise.Include, want)
+	}
+}
+
+func TestSettingsListInputResizesWithTerminal(t *testing.T) {
+	model := settingsEditorFixture()
+	model.width = 120
+	model.beginList("settings:babel.include", "Include filter", "", "Prefix", nil, validatePrefixItem, nil)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(settingsModel)
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 24, Height: 20})
+	model = updated.(settingsModel)
+	if model.input.Width > 18 {
+		t.Fatalf("resized list input width = %d, want <= 18", model.input.Width)
+	}
+}
+
+func TestSettingsBlocksEditingUntilSettingsLoad(t *testing.T) {
+	model := newSettingsModel(context.Background(), nil, time.Second)
+	updated, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(settingsModel)
+	if command != nil || model.overlay != nil {
+		t.Fatal("settings editor accepted input before the daemon settings loaded")
+	}
+	if !strings.Contains(model.View(), "Loading settings") {
+		t.Fatalf("initial view does not expose loading state:\n%s", model.View())
+	}
+}
+
+func TestSettingsHealthFailureKeepsAuthoritativeSettingsEditable(t *testing.T) {
+	model := newSettingsModel(context.Background(), nil, time.Second)
+	settings := config.Defaults()
+	settings.Babel.RouterID = "0011223344556677"
+	updated, _ := model.Update(settingsLoadMsg{settings: settings, healthErr: errors.New("health unavailable")})
+	model = updated.(settingsModel)
+	if !model.loaded || model.draft.Babel.RouterID != settings.Babel.RouterID {
+		t.Fatalf("health failure discarded loaded settings: loaded=%t draft=%+v", model.loaded, model.draft.Babel)
+	}
+	if !strings.Contains(model.View(), "Health unavailable") {
+		t.Fatalf("health warning is not visible:\n%s", model.View())
+	}
+}
+
+func TestSettingsReloadFailureKeepsCurrentDraft(t *testing.T) {
+	model := settingsEditorFixture()
+	before := model.draft
+	model.loading = true
+	updated, _ := model.Update(settingsLoadMsg{err: errors.New("reload failed")})
+	model = updated.(settingsModel)
+	if !model.loaded || model.draft.Babel.RouterID != before.Babel.RouterID {
+		t.Fatalf("reload failure replaced the current settings: loaded=%t draft=%+v", model.loaded, model.draft)
+	}
+}
+
+func TestSettingsSearchTreatsLettersAsFilterInput(t *testing.T) {
+	model := settingsEditorFixture()
+	model.beginSearch("add-interface-select", "Add interface", "", []workspaceButton{
+		{Label: "jack0  up", Value: "jack0"},
+		{Label: "eth0  up", Value: "eth0"},
+	})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("jk")})
+	model = updated.(settingsModel)
+	if got := model.input.Value(); got != "jk" {
+		t.Fatalf("search input = %q, want jk", got)
+	}
+	if buttons := workspaceFilteredButtons(model.overlay.Buttons, model.input.Value()); len(buttons) != 0 {
+		t.Fatalf("filter jk unexpectedly matched %+v", buttons)
 	}
 }
 
@@ -152,6 +257,21 @@ func TestSettingsChangesDiff(t *testing.T) {
 	}
 }
 
+func TestSettingsValidatesDraftBeforeConfirmation(t *testing.T) {
+	model := settingsEditorFixture()
+	model.draft.Babel.Interfaces = map[string]config.BabelExternalInterface{
+		"ext0": {Multicast: false},
+	}
+	updated, command := model.updateMain(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	model = updated.(settingsModel)
+	if command != nil || model.overlay != nil || model.err == nil {
+		t.Fatalf("invalid settings reached confirmation: overlay=%+v err=%v", model.overlay, model.err)
+	}
+	if len(settingsChanges(model.original, model.draft)) == 0 {
+		t.Fatal("diff omitted the newly added empty interface object")
+	}
+}
+
 func TestExternalInterfaceEditorFlow(t *testing.T) {
 	model := settingsEditorFixture()
 	model.draft.Babel.Interfaces = map[string]config.BabelExternalInterface{
@@ -167,6 +287,9 @@ func TestExternalInterfaceEditorFlow(t *testing.T) {
 		t.Fatalf("add flow = page %v adding %t name %q", model.page, model.ifaceAdding, model.ifaceName)
 	}
 	if err := model.applySettingsInput("settings:iface.bandwidth", []string{"50"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := model.toggleSettingsField("iface.multicast"); err != nil {
 		t.Fatal(err)
 	}
 	if err := model.applySettingsInput("settings:iface.neighbours", []string{"fe80::1"}); err != nil {
@@ -197,6 +320,28 @@ func TestExternalInterfaceEditorFlow(t *testing.T) {
 	}
 	if len(model.draft.Babel.Interfaces) != 1 {
 		t.Fatalf("interfaces after removal = %+v", model.draft.Babel.Interfaces)
+	}
+}
+
+func TestRemovingLastSelectedInterfaceClampsSelection(t *testing.T) {
+	model := settingsEditorFixture()
+	model.page = settingsInterfaces
+	model.draft.Babel.Interfaces = map[string]config.BabelExternalInterface{
+		"ext0": {Multicast: true},
+		"ext1": {Multicast: true},
+	}
+	model.ifaceSelected = 1
+	model.ifaceName = "ext1"
+	if _, err := model.applySettingsConfirm("remove-interface"); err != nil {
+		t.Fatal(err)
+	}
+	if model.ifaceSelected != 0 {
+		t.Fatalf("selection after removing last interface = %d, want 0", model.ifaceSelected)
+	}
+	updated, _ := model.updateInterfaceList(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(settingsModel)
+	if model.page != settingsInterface || model.ifaceName != "ext0" {
+		t.Fatalf("enter after removal opened page=%d interface=%q", model.page, model.ifaceName)
 	}
 }
 
@@ -292,22 +437,28 @@ func TestSettingsSaveFlow(t *testing.T) {
 }
 
 func TestSettingsViewsRespectTerminalWidth(t *testing.T) {
-	model := settingsEditorFixture()
-	model.width, model.height = 120, 40
-	views := []string{model.mainView(120)}
-	model.draft.Babel.Interfaces = map[string]config.BabelExternalInterface{
-		"tun-ext1": {BandwidthMbps: 10, Neighbours: []netip.Addr{netip.MustParseAddr("fe80::1")}},
-	}
-	model.page = settingsInterfaces
-	views = append(views, model.interfacesView(120))
-	model.page = settingsInterface
-	model.ifaceName = "tun-ext1"
-	model.ifaceDraft = model.draft.Babel.Interfaces["tun-ext1"]
-	views = append(views, model.interfaceEditorView(120))
-	for _, view := range views {
-		for _, line := range strings.Split(view, "\n") {
-			if got := ansi.StringWidth(line); got > 120 {
-				t.Fatalf("line exceeds width 120 by %d cells:\n%s", got-120, line)
+	for _, width := range []int{24, 40, 72, 120} {
+		model := settingsEditorFixture()
+		model.width, model.height = width, 40
+		views := []string{model.mainView(width)}
+		model.draft.Babel.Interfaces = map[string]config.BabelExternalInterface{
+			"tun-ext1": {BandwidthMbps: 10, Neighbours: []netip.Addr{netip.MustParseAddr("fe80::1")}},
+		}
+		model.page = settingsInterfaces
+		views = append(views, model.interfacesView(width))
+		model.page = settingsInterface
+		model.ifaceName = "tun-ext1"
+		model.ifaceDraft = model.draft.Babel.Interfaces["tun-ext1"]
+		views = append(views, model.interfaceEditorView(width))
+		model.beginList("settings:babel.include", "Include filter", strings.Repeat("long description ", 8), "Prefix", []string{"10.0.0.0/8"}, validatePrefixItem, nil)
+		views = append(views, model.View())
+		model.beginSearch("add-interface-select", "Add external Babel interface", "Filter system interfaces", []workspaceButton{{Label: strings.Repeat("interface-name-", 5), Value: "eth0"}})
+		views = append(views, model.View())
+		for _, view := range views {
+			for _, line := range strings.Split(view, "\n") {
+				if got := ansi.StringWidth(line); got > width {
+					t.Fatalf("line exceeds width %d by %d cells:\n%s", width, got-width, line)
+				}
 			}
 		}
 	}
