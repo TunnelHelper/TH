@@ -100,13 +100,13 @@ func WireGuardRouteTable(t Tunnel, spec *WireGuardSpec) int {
 	return mainRouteTable
 }
 
-// BabelRouteTable returns the kernel table Babel-installed routes are
-// reconciled into. Zero in the spec means the main table.
-func BabelRouteTable(t Tunnel) int {
-	if t.Kind == KindBabel && t.Spec.Babel != nil && t.Spec.Babel.RouteTable != 0 {
-		return t.Spec.Babel.RouteTable
-	}
-	return mainRouteTable
+// BabelManagedRealm is the engine-level route ownership tag shared by every
+// route the daemon-wide Babel engine installs. It is deliberately not tied
+// to a single tunnel record: a Babel route may be reached through several
+// tunnels, and removing any one of them must not orphan the others.
+func BabelManagedRealm() int {
+	digest := sha256.Sum256([]byte("th-babel-engine"))
+	return managedRouteRealmPrefix | int(binary.BigEndian.Uint32(digest[8:12])&managedRouteRealmMask)
 }
 
 func ManagedRouteClaims(t Tunnel) []RouteClaim {

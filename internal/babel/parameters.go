@@ -43,6 +43,29 @@ type Parameters struct {
 	// SplitHorizon enables the RFC 8966 Section 3.7.4 optimisation for
 	// symmetric, transitive interfaces. It SHOULD be enabled for tunnels.
 	SplitHorizon bool
+
+	// DelayMetric enables the RFC 9616 delay-based metric: link costs are
+	// derived from measured RTT instead of the fixed nominal cost.
+	DelayMetric bool
+
+	// DelayMin is the RTT below which a link keeps its nominal cost.
+	DelayMin time.Duration
+
+	// DelayMax is the RTT at and above which the maximum penalty applies.
+	DelayMax time.Duration
+
+	// DelayMaxPenalty is added to the nominal cost for links at or above
+	// DelayMax.
+	DelayMaxPenalty uint16
+
+	// DelaySmoothingAlpha is the exponential-smoothing factor applied to
+	// RTT samples before they are mapped to a cost.
+	DelaySmoothingAlpha float64
+
+	// BottleneckPenalty (K) optionally adds K / bottleneck_bw to the route
+	// metric so bandwidth participates in primary-path selection and
+	// admission. Zero (the default) keeps selection purely delay-based.
+	BottleneckPenalty float64
 }
 
 const (
@@ -59,6 +82,10 @@ const (
 	DefaultWiredLinkCost     = 96
 	DefaultSmoothingAlpha    = 0.25
 	DefaultMaxPaths          = 4
+	DefaultDelayMin          = 10 * time.Millisecond
+	DefaultDelayMax          = 120 * time.Millisecond
+	DefaultDelayMaxPenalty   = 150
+	DefaultDelayAlpha        = 0.25
 )
 
 var DefaultParameters = Parameters{
@@ -75,6 +102,11 @@ var DefaultParameters = Parameters{
 	SmoothingAlpha:         DefaultSmoothingAlpha,
 	MaxPaths:               DefaultMaxPaths,
 	SplitHorizon:           true,
+	DelayMetric:            true,
+	DelayMin:               DefaultDelayMin,
+	DelayMax:               DefaultDelayMax,
+	DelayMaxPenalty:        DefaultDelayMaxPenalty,
+	DelaySmoothingAlpha:    DefaultDelayAlpha,
 }
 
 // LocalRouteMetric is the metric advertised for directly attached or

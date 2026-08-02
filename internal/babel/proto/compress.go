@@ -22,7 +22,10 @@ func addressEncoding(a *Address) AddressEncoding {
 	case a.IsUnspecified():
 		return AddressEncodingWildcard
 	case a.Is4In6():
-		return AddressEncodingIPv4inIPv6
+		// Per RFC 9229 Section 2.4, AE 4 (v4-via-v6) is only valid for
+		// network prefixes, never for addresses: an IPv4 address is
+		// always encoded with AE 1.
+		return AddressEncodingIPv4
 	case a.Is6() && a.IsLinkLocalUnicast():
 		return AddressEncodingIPv6LinkLocal
 	case a.Is4():

@@ -1,7 +1,6 @@
 package model
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -37,37 +36,40 @@ func Validate(t *Tunnel) error {
 	if len(t.Name) == 0 || len(t.Name) > 64 || !namePattern.MatchString(t.Name) {
 		return errors.New("name must be 1-64 characters using letters, digits, dot, underscore, or dash")
 	}
-	if t.Kind != KindSRv6 && t.Kind != KindBabel {
+	if t.Kind != KindSRv6 {
 		if err := validateInterface(t.Interface); err != nil {
 			return err
 		}
 	} else if t.Interface != "" {
-		return errors.New("srv6 and babel records must not set interface")
+		return errors.New("srv6 records must not set interface")
 	}
 	if err := validateSpecChoice(t); err != nil {
 		return err
 	}
 
+	var kindErr error
 	switch t.Kind {
 	case KindGRE:
-		return validateGRE(t.Spec.GRE)
+		kindErr = validateGRE(t.Spec.GRE)
 	case KindVXLAN:
-		return validateVXLAN(t.Spec.VXLAN)
+		kindErr = validateVXLAN(t.Spec.VXLAN)
 	case KindWireGuard:
-		return validateWireGuard(t.Spec.WireGuard)
+		kindErr = validateWireGuard(t.Spec.WireGuard)
 	case KindAmneziaWG:
-		return validateAmneziaWG(t.Spec.AmneziaWG)
+		kindErr = validateAmneziaWG(t.Spec.AmneziaWG)
 	case KindXFRMStatic:
-		return validateXFRMStatic(t.Spec.XFRMStatic)
+		kindErr = validateXFRMStatic(t.Spec.XFRMStatic)
 	case KindXFRMIKEv2:
-		return validateXFRMIKEv2(t.Spec.XFRMIKEv2)
+		kindErr = validateXFRMIKEv2(t.Spec.XFRMIKEv2)
 	case KindSRv6:
-		return validateSRv6(t.Spec.SRv6)
-	case KindBabel:
-		return validateBabel(t.Spec.Babel)
+		kindErr = validateSRv6(t.Spec.SRv6)
 	default:
-		return fmt.Errorf("unsupported tunnel kind %q", t.Kind)
+		kindErr = fmt.Errorf("unsupported tunnel kind %q", t.Kind)
 	}
+	if kindErr != nil {
+		return kindErr
+	}
+	return validateTunnelBabel(t)
 }
 
 func validateSpecChoice(t *Tunnel) error {
@@ -80,7 +82,6 @@ func validateSpecChoice(t *Tunnel) error {
 		t.Spec.XFRMStatic != nil,
 		t.Spec.XFRMIKEv2 != nil,
 		t.Spec.SRv6 != nil,
-		t.Spec.Babel != nil,
 	} {
 		if set {
 			count++
@@ -97,7 +98,6 @@ func validateSpecChoice(t *Tunnel) error {
 		KindXFRMStatic: t.Spec.XFRMStatic != nil,
 		KindXFRMIKEv2:  t.Spec.XFRMIKEv2 != nil,
 		KindSRv6:       t.Spec.SRv6 != nil,
-		KindBabel:      t.Spec.Babel != nil,
 	}
 	if !matches[t.Kind] {
 		return fmt.Errorf("spec does not match kind %q", t.Kind)
@@ -324,108 +324,62 @@ func validateMagicHeader(value string) error {
 }
 
 const (
-	MaxBabelInterfaces     = 8
-	MaxBabelAdvertised     = 256
-	MaxBabelMaxPaths       = 8
-	MaxBabelMultipathSlack = 65534
+	MaxBabelNeighbours    = 64
+	MaxBabelBandwidthMbps = 400000
 )
 
-func validateBabel(spec *BabelSpec) error {
+// validateTunnelBabel validates the optional per-tunnel Babel switch.
+func validateTunnelBabel(t *Tunnel) error {
+	spec := t.Spec.Babel
 	if spec == nil {
-		return errors.New("babel spec is required")
+		return nil
 	}
-	if len(spec.Interfaces) == 0 {
-		return errors.New("interfaces must contain at least one interface")
+	if t.Kind == KindSRv6 {
+		return errors.New("srv6 records cannot participate in Babel")
 	}
-	if len(spec.Interfaces) > MaxBabelInterfaces {
-		return fmt.Errorf("interfaces exceeds %d entries", MaxBabelInterfaces)
+	if spec.BandwidthMbps < 0 || spec.BandwidthMbps > MaxBabelBandwidthMbps {
+		return fmt.Errorf("bandwidth_mbps must be between 0 and %d", MaxBabelBandwidthMbps)
 	}
-	seenInterfaces := make(map[string]struct{}, len(spec.Interfaces))
-	for _, name := range spec.Interfaces {
-		if err := validateInterface(name); err != nil {
-			return fmt.Errorf("interfaces: %w", err)
-		}
-		if _, ok := seenInterfaces[name]; ok {
-			return fmt.Errorf("duplicate interface %q", name)
-		}
-		seenInterfaces[name] = struct{}{}
+	if len(spec.Neighbours) > MaxBabelNeighbours {
+		return fmt.Errorf("neighbours exceeds %d entries", MaxBabelNeighbours)
 	}
-
-	for name, neighbours := range spec.StaticNeighbours {
-		if _, ok := seenInterfaces[name]; !ok {
-			return fmt.Errorf("static_neighbours references unknown interface %q", name)
+	seen := make(map[netip.Addr]struct{}, len(spec.Neighbours))
+	for _, addr := range spec.Neighbours {
+		if !addr.IsValid() || addr.IsUnspecified() {
+			return errors.New("neighbours contains an invalid address")
 		}
-		if len(neighbours) > MaxBabelInterfaces*64 {
-			return fmt.Errorf("static_neighbours for %q exceeds limit", name)
+		if _, ok := seen[addr]; ok {
+			return fmt.Errorf("duplicate neighbour %s", addr)
 		}
-		seen := make(map[netip.Addr]struct{}, len(neighbours))
-		for _, addr := range neighbours {
-			if !addr.IsValid() || addr.IsUnspecified() {
-				return fmt.Errorf("static_neighbours[%q] contains an invalid address", name)
+		seen[addr] = struct{}{}
+	}
+	if t.Kind == KindWireGuard || t.Kind == KindAmneziaWG {
+		peers := t.Spec.WireGuard.Peers
+		if t.Kind == KindAmneziaWG && t.Spec.AmneziaWG != nil {
+			peers = t.Spec.AmneziaWG.Peers
+		}
+		multicast := spec.Multicast
+		if multicast == nil {
+			enabled := len(peers) <= 1
+			multicast = &enabled
+		}
+		if *multicast {
+			if !peerAllowedIPsCoverBabelMulticast(peers) {
+				return errors.New("Babel multicast on a WireGuard tunnel requires at least one peer AllowedIPs to cover ff02::1:6 (for example ::/0 or ff02::/16)")
 			}
-			if _, ok := seen[addr]; ok {
-				return fmt.Errorf("duplicate static neighbour %s on %q", addr, name)
-			}
-			seen[addr] = struct{}{}
-		}
-	}
-
-	if spec.UnicastHelloSeconds < 0 || spec.UnicastHelloSeconds > 3600 {
-		return errors.New("unicast_hello_seconds must be between 0 and 3600")
-	}
-	if spec.RouteTable < 0 || int64(spec.RouteTable) > 2147483647 {
-		return errors.New("route_table must be between 0 and 2147483647")
-	}
-	if err := validateNetworks(spec.AdvertisedPrefixes); err != nil {
-		return fmt.Errorf("advertised_prefixes: %w", err)
-	}
-	if len(spec.AdvertisedPrefixes) > MaxBabelAdvertised {
-		return fmt.Errorf("advertised_prefixes exceeds %d entries", MaxBabelAdvertised)
-	}
-	if spec.MaxPaths < 0 || spec.MaxPaths > MaxBabelMaxPaths {
-		return fmt.Errorf("max_paths must be between 0 and %d", MaxBabelMaxPaths)
-	}
-	if spec.MultipathSlack < 0 || spec.MultipathSlack > MaxBabelMultipathSlack {
-		return fmt.Errorf("multipath_slack must be between 0 and %d", MaxBabelMultipathSlack)
-	}
-	if spec.StrictNeighbours && spec.Multicast {
-		return errors.New("strict_neighbours requires multicast to be disabled")
-	}
-	if spec.StrictNeighbours && len(spec.StaticNeighbours) == 0 {
-		return errors.New("strict_neighbours requires at least one static neighbour")
-	}
-	if spec.RouterID != "" {
-		if len(spec.RouterID) != 16 {
-			return errors.New("router_id must be exactly 16 lowercase hex characters")
-		}
-		decoded, err := hex.DecodeString(spec.RouterID)
-		if err != nil {
-			return errors.New("router_id must be 16 hex characters")
-		}
-		if isAllZeros(decoded) {
-			return errors.New("router_id must not be all zeroes")
-		}
-		if isAllOnes(decoded) {
-			return errors.New("router_id must not be all ones")
 		}
 	}
 	return nil
 }
 
-func isAllZeros(b []byte) bool {
-	for _, value := range b {
-		if value != 0 {
-			return false
+func peerAllowedIPsCoverBabelMulticast(peers []WireGuardPeer) bool {
+	group := netip.MustParseAddr("ff02::1:6")
+	for _, peer := range peers {
+		for _, allowed := range peer.AllowedIPs {
+			if allowed.Contains(group) {
+				return true
+			}
 		}
 	}
-	return true
-}
-
-func isAllOnes(b []byte) bool {
-	for _, value := range b {
-		if value != 0xff {
-			return false
-		}
-	}
-	return true
+	return false
 }

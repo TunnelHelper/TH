@@ -56,10 +56,11 @@ const (
 // Babel Sub-TLV Types
 // https://www.iana.org/assignments/babel/babel.xhtml#sub-tlv-types
 const (
-	SubTypePad1      ValueType = iota // RFC 8966
-	SubTypePadN                       // RFC 8966
-	SubTypeDiversity                  // draft-chroboczek-babel-diversity-routing
-	SubTypeTimestamp                  // draft-jonglez-babel-rtt-extension
+	SubTypePad1        ValueType = iota // RFC 8966
+	SubTypePadN                         // RFC 8966
+	SubTypeDiversity                    // draft-chroboczek-babel-diversity-routing
+	SubTypeTimestamp                    // draft-jonglez-babel-rtt-extension
+	SubTypePathMetrics                  // TH extension: end-to-end bottleneck bandwidth and path RTT
 
 	SubTypeSourcePrefix ValueType = 128 //	RFC 9079
 )

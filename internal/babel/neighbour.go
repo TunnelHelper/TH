@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/babel/internal/deadline"
@@ -50,9 +51,23 @@ type Neighbour struct {
 	// or latency into routing decisions.
 	costOverride *proto.Metric
 
+	// RFC 9616 delay-based metric state.
+	lastHelloOrigin    proto.Timestamp // timestamp of the last Hello received from this neighbour
+	lastHelloReceive   proto.Timestamp // local receive time of that Hello
+	hasHelloTimestamps bool
+	lastTxHello        proto.Timestamp // timestamp of the last Hello we sent to this neighbour
+	rtt                atomic.Int64    // nanoseconds, written by the read loop, read by the engine
+	hasRTT             atomic.Bool
+
 	done      chan struct{}
 	stopped   chan struct{}
 	closeOnce sync.Once
+}
+
+// timestampNow returns the current time in microseconds, wrapped to 32 bits
+// as required by the RFC 9616 timestamp extension.
+func timestampNow() proto.Timestamp {
+	return proto.Timestamp(time.Now().UnixMicro())
 }
 
 func (i *Interface) NewNeighbour(addr proto.Address) (*Neighbour, error) {
@@ -67,6 +82,13 @@ func (i *Interface) NewNeighbour(addr proto.Address) (*Neighbour, error) {
 		Port: Port,
 		Zone: zone,
 	}
+	if addr.Is4In6() {
+		neighbourAddr = &net.UDPAddr{
+			IP: addr.Unmap().AsSlice(),
+			// The IPv4 socket has no zone.
+			Port: Port,
+		}
+	}
 
 	n := &Neighbour{
 		Address: addr,
@@ -76,10 +98,12 @@ func (i *Interface) NewNeighbour(addr proto.Address) (*Neighbour, error) {
 		TxCost: i.nominalCost,
 
 		queue: queue.NewQueue(i.MTU, &netx.PacketConnWriter{
-			PacketConn: i.speaker.conn,
-			Dest:       neighbourAddr,
-			Src:        i.sourceAddress(),
-			IfIndex:    i.Index,
+			Conn6:   i.speaker.conn6,
+			Conn4:   i.speaker.conn4,
+			Dest:    neighbourAddr,
+			Src:     i.sourceAddress(),
+			Src4:    i.sourceAddress4(),
+			IfIndex: i.Index,
 		}),
 
 		ihuTimeout: deadline.NewDeadline(),
@@ -150,11 +174,16 @@ func (n *Neighbour) onUpdate(upd *proto.Update) {
 	n.intf.speaker.onUpdateReceived(n, upd)
 }
 
-func (n *Neighbour) onHello(hello *proto.Hello) {
+func (n *Neighbour) onHello(hello *proto.Hello, rxTime proto.Timestamp) {
 	if isUnicast := hello.Flags&proto.FlagHelloUnicast != 0; isUnicast {
 		n.helloUnicast.Update(hello.Seqno)
 	} else {
 		n.helloMulticast.Update(hello.Seqno)
+	}
+	if hello.Timestamp != nil {
+		n.lastHelloOrigin = hello.Timestamp.Transmit
+		n.lastHelloReceive = rxTime
+		n.hasHelloTimestamps = true
 	}
 
 	n.logger.Debug("Handled Hello", "rxcost", n.RxCost())
@@ -202,7 +231,10 @@ func (n *Neighbour) onAcknowledgmentRequest(ar *proto.AcknowledgmentRequest) {
 func (n *Neighbour) onAcknowledgment(a *proto.Acknowledgment) {
 }
 
-func (n *Neighbour) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address) error {
+func (n *Neighbour) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address, rxTime proto.Timestamp) error {
+	var helloTimestamp *proto.TimestampHello
+	var ihuTimestamp *proto.TimestampIHU
+
 	for _, value := range pkt.Body {
 		typ := proto.ValuesType(value).String()
 		n.logger.Debug("Received value",
@@ -217,9 +249,11 @@ func (n *Neighbour) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address) 
 		case *proto.AcknowledgmentRequest:
 			n.onAcknowledgmentRequest(value)
 		case *proto.Hello:
-			n.onHello(value)
+			n.onHello(value, rxTime)
+			helloTimestamp = value.Timestamp
 		case *proto.IHU:
 			n.onIHU(value)
+			ihuTimestamp = value.Timestamp
 		case *proto.RouteRequest:
 			n.onRouteRequest(value)
 		case *proto.SeqnoRequest:
@@ -227,27 +261,106 @@ func (n *Neighbour) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address) 
 		}
 	}
 
+	if helloTimestamp != nil && ihuTimestamp != nil {
+		n.computeRTT(rxTime, helloTimestamp, ihuTimestamp)
+	}
+
 	return nil
+}
+
+// computeRTT implements the Mills-style RTT estimation from RFC 9616
+// Section 3.2: RTT = (t2 - t1) - (t2' - t1'), where t1/t1' are the Origin
+// and Receive timestamps carried by the peer's IHU and t2' is the peer's
+// Hello transmit timestamp.
+func (n *Neighbour) computeRTT(t2 proto.Timestamp, hello *proto.TimestampHello, ihu *proto.TimestampIHU) {
+	s := n.intf.speaker
+	if !s.config.DelayMetric {
+		return
+	}
+	const maxTimestampAge = uint32(3 * time.Minute / time.Microsecond)
+
+	// RFC 9616 Section 3.3: discard stale or nonsensical samples.
+	originAge := int32(t2 - ihu.Origin)
+	if originAge < 0 || uint32(originAge) > maxTimestampAge {
+		return
+	}
+	processingDelay := int32(hello.Transmit - ihu.Receive)
+	if processingDelay < 0 || uint32(processingDelay) > maxTimestampAge {
+		return
+	}
+	rttMicros := int32((t2 - ihu.Origin) - (hello.Transmit - ihu.Receive))
+	if rttMicros < 0 || uint32(rttMicros) > maxTimestampAge {
+		return
+	}
+
+	sample := time.Duration(rttMicros) * time.Microsecond
+	if !n.hasRTT.Load() {
+		n.rtt.Store(int64(sample))
+	} else {
+		alpha := s.config.DelaySmoothingAlpha
+		current := time.Duration(n.rtt.Load())
+		smoothed := current + time.Duration(alpha*float64(sample-current))
+		n.rtt.Store(int64(smoothed))
+	}
+	n.hasRTT.Store(true)
+	n.logger.Debug("RTT sample", slog.Duration("rtt", n.RTT()))
+	s.onNeighbourCostChanged(n)
+}
+
+// RTT returns the smoothed round-trip time measured for this neighbour.
+func (n *Neighbour) RTT() time.Duration {
+	return time.Duration(n.rtt.Load())
+}
+
+// HasRTT reports whether at least one valid RTT sample was measured.
+func (n *Neighbour) HasRTT() bool {
+	return n.hasRTT.Load()
 }
 
 func (n *Neighbour) sendUnicastHello() error {
 	n.outgoingUnicastHelloSeqNo++
-
-	n.queue.SendValue(&proto.Hello{
+	hello := &proto.Hello{
 		Flags:    proto.FlagHelloUnicast,
 		Seqno:    n.outgoingUnicastHelloSeqNo,
 		Interval: n.intf.speaker.config.UnicastHelloInterval,
-	}, n.intf.speaker.config.UnicastHelloInterval*3/5)
+	}
+	if n.intf.speaker.config.DelayMetric {
+		n.lastTxHello = timestampNow()
+		hello.Timestamp = &proto.TimestampHello{Transmit: n.lastTxHello}
+	}
+	n.queue.SendValue(hello, n.intf.speaker.config.UnicastHelloInterval*3/5)
 
 	return nil
 }
 
 func (n *Neighbour) sendIHU() error {
-	n.queue.SendValue(&proto.IHU{
+	ihu := &proto.IHU{
 		RxCost:   n.RxCost(),
 		Address:  n.Address,
 		Interval: n.intf.speaker.config.IHUInterval,
-	}, n.intf.speaker.config.IHUInterval*3/5)
+	}
+	values := []proto.Value{ihu}
+	if n.intf.speaker.config.DelayMetric {
+		// RFC 9616 Section 3.2: the IHU must travel in a packet that also
+		// carries a timestamped Hello, and echoes the timestamps of the
+		// last Hello received from this neighbour.
+		n.outgoingUnicastHelloSeqNo++
+		hello := &proto.Hello{
+			Flags:     proto.FlagHelloUnicast,
+			Seqno:     n.outgoingUnicastHelloSeqNo,
+			Interval:  n.intf.speaker.config.UnicastHelloInterval,
+			Timestamp: &proto.TimestampHello{Transmit: timestampNow()},
+		}
+		n.lastTxHello = hello.Timestamp.Transmit
+		if n.hasHelloTimestamps {
+			ihu.Timestamp = &proto.TimestampIHU{
+				Origin:  n.lastHelloOrigin,
+				Receive: n.lastHelloReceive,
+			}
+		}
+		values = []proto.Value{hello, ihu}
+	}
+	n.queue.SendValues(values, n.intf.speaker.config.IHUInterval*3/5)
 
 	return nil
 }
@@ -274,7 +387,11 @@ func (n *Neighbour) Cost() proto.Metric {
 	if n.costOverride != nil {
 		return *n.costOverride
 	}
-	return n.intf.speaker.costProvider.Combine(n.RxCost(), n.TxCost)
+	s := n.intf.speaker
+	if s.config.DelayMetric && n.HasRTT() {
+		return DelayCost(n.RTT(), n.intf.nominalCost, s.config.DelayMin, s.config.DelayMax, s.config.DelayMaxPenalty)
+	}
+	return s.costProvider.Combine(n.RxCost(), n.TxCost)
 }
 
 // SetCostOverride replaces the nominal cost used for this neighbour with an
@@ -299,7 +416,11 @@ func (n *Neighbour) sendUpdateForRoutes(routes []*Route, urgent bool) {
 	if urgent {
 		maxDelay = n.intf.speaker.config.UrgentTimeout
 	}
-	values := n.intf.speaker.encodeRoutes(n.intf, routes)
+	rttMicros := int64(0)
+	if n.HasRTT() {
+		rttMicros = n.RTT().Microseconds()
+	}
+	values := n.intf.speaker.encodeRoutes(n.intf, routes, rttMicros)
 	if len(values) == 0 {
 		return
 	}
@@ -314,7 +435,11 @@ func (n *Neighbour) sendRetraction(pfx proto.Prefix) {
 
 func (n *Neighbour) sendFullDump() {
 	updates, retractions := n.intf.speaker.advertisedRoutes(n.intf)
-	values := n.intf.speaker.encodeRoutes(n.intf, updates)
+	rttMicros := int64(0)
+	if n.HasRTT() {
+		rttMicros = n.RTT().Microseconds()
+	}
+	values := n.intf.speaker.encodeRoutes(n.intf, updates, rttMicros)
 	for _, r := range retractions {
 		values = append(values, n.intf.speaker.encodeRetraction(r.Source.RouterID, r.SeqNo, r.Source.Prefix)...)
 	}

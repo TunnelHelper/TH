@@ -127,6 +127,24 @@ func (b *Backend) reconcileAddresses(record model.Tunnel, link netlink.Link, des
 }
 
 func managedLinkLocalPrefix(record model.Tunnel) netip.Prefix {
+	// WireGuard-style interfaces get their stable link-local address from
+	// the tunnel's own public key. Every peer knows that public key, so it
+	// can compute the address and form a unicast Babel adjacency without
+	// any manual neighbour configuration.
+	switch record.Kind {
+	case model.KindWireGuard:
+		if record.Spec.WireGuard != nil {
+			if addr, ok := wgLinkLocal(record.Spec.WireGuard.PublicKey); ok {
+				return netip.PrefixFrom(addr, 64)
+			}
+		}
+	case model.KindAmneziaWG:
+		if record.Spec.AmneziaWG != nil {
+			if addr, ok := wgLinkLocal(record.Spec.AmneziaWG.PublicKey); ok {
+				return netip.PrefixFrom(addr, 64)
+			}
+		}
+	}
 	digest := sha256.Sum256([]byte("th-link-local\x00" + record.ID))
 	var address [16]byte
 	address[0], address[1] = 0xfe, 0x80

@@ -42,6 +42,19 @@ func (p *prompts) selectValue(title string, options []ui.Option, value *string) 
 	}
 }
 
+func (p *prompts) slider(title string, min, max, step float64, value *float64, render func(float64) string) error {
+	for {
+		err := p.prompter.Slider(title, min, max, step, value, render)
+		if err == nil {
+			return nil
+		}
+		if wrapped := wrapAbort(err); errors.Is(wrapped, ErrAborted) {
+			return wrapped
+		}
+		p.ui.Warn(err.Error())
+	}
+}
+
 func (p *prompts) input(title string, value *string, validate func(string) error) error {
 	return p.inputWithPrefix(title, "", value, validate)
 }

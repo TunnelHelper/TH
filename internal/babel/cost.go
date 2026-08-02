@@ -3,7 +3,11 @@
 
 package babel
 
-import "github.com/TunnelHelper/TH/internal/babel/proto"
+import (
+	"time"
+
+	"github.com/TunnelHelper/TH/internal/babel/proto"
+)
 
 // CostProvider makes the cost and metric computation of a Babel node
 // pluggable. RFC 8966 Section 3.4.3 explicitly leaves the combination of
@@ -85,4 +89,20 @@ func BandwidthCost(bps uint64) proto.Metric {
 		return proto.Retraction - 1
 	}
 	return proto.Metric(cost)
+}
+
+// DelayCost maps a measured RTT to a link cost using the bounded linear
+// mapping recommended by RFC 9616 Section 4.2: the nominal cost below
+// rtt-min, a linear increase between rtt-min and rtt-max, and the constant
+// nominal + max-rtt-penalty at or above rtt-max.
+func DelayCost(rtt time.Duration, nominal uint16, min, max time.Duration, maxPenalty uint16) proto.Metric {
+	if rtt <= min {
+		return nominal
+	}
+	if rtt >= max {
+		return nominal + maxPenalty
+	}
+	fraction := float64(rtt-min) / float64(max-min)
+	extra := uint16(fraction*float64(maxPenalty) + 0.5)
+	return nominal + extra
 }

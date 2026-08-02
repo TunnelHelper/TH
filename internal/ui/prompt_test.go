@@ -3,6 +3,7 @@ package ui
 import (
 	"bytes"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -177,5 +178,33 @@ func TestRenderButtonsWrapsWithoutOverflow(t *testing.T) {
 		if width := lipgloss.Width(line); width > 18 {
 			t.Fatalf("button line is %d cells wide: %q", width, line)
 		}
+	}
+}
+
+func TestSliderAdjustsWithArrowKeys(t *testing.T) {
+	userInterface := New(&bytes.Buffer{}, &bytes.Buffer{}, strings.NewReader(""))
+	userInterface.TTY = true
+	model := newSliderPrompt(userInterface, "Balance", "", -1, 1, 0.1, 0,
+		func(value float64) string { return "value=" + strconv.FormatFloat(value, 'g', -1, 64) })
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	result := updated.(promptModel)
+	if result.sliderValue != -0.1 {
+		t.Fatalf("left arrow must decrease the slider, got %v", result.sliderValue)
+	}
+	if !strings.Contains(result.View(), "value=-0.1") {
+		t.Fatalf("slider view must render the position:\n%s", result.View())
+	}
+
+	updated, _ = result.Update(tea.KeyMsg{Type: tea.KeyRight})
+	result = updated.(promptModel)
+	if result.sliderValue != 0 {
+		t.Fatalf("right arrow must increase the slider, got %v", result.sliderValue)
+	}
+
+	updated, command := result.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	result = updated.(promptModel)
+	if command == nil || !result.done || result.value != "0" {
+		t.Fatalf("enter must confirm the slider value, got %q", result.value)
 	}
 }

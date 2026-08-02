@@ -98,3 +98,19 @@ func TestValidateRejectsDangerousDirectoryLayouts(t *testing.T) {
 		t.Fatal("overlapping state and runtime directories were accepted")
 	}
 }
+
+func TestBabelSettingsWeightExponents(t *testing.T) {
+	settings := Defaults()
+	if settings.Babel.WeightBandwidthExponent != 1 || settings.Babel.WeightRTTExponent != 1 {
+		t.Fatalf("default weight exponents = (%v, %v), want (1, 1)", settings.Babel.WeightBandwidthExponent, settings.Babel.WeightRTTExponent)
+	}
+	settings.Babel.WeightBandwidthExponent = 5
+	if err := settings.Validate(); err == nil {
+		t.Fatal("alpha above 4 must be rejected")
+	}
+	settings.Babel.WeightBandwidthExponent = 1.5
+	settings.Babel.WeightRTTExponent = 2
+	if err := settings.Validate(); err != nil {
+		t.Fatalf("valid exponents must pass: %v", err)
+	}
+}

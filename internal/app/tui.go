@@ -56,6 +56,12 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 			}
 			continue
 		}
+		if choice == "settings" {
+			if err := app.editBabelSettings(); err != nil && !errors.Is(err, ErrAborted) {
+				output.Warn(err.Error())
+			}
+			continue
+		}
 		kind := model.Kind(choice)
 		if item, unavailable := app.unavailable(kind); unavailable {
 			output.Warn(shortUnavailableWarning(kind, item))
@@ -94,6 +100,7 @@ func (a *tuiApp) mainMenuOptions() []ui.Option {
 		{Label: "Create IKEv2 XFRM", Value: string(model.KindXFRMIKEv2)},
 		{Label: "Create static XFRM", Value: string(model.KindXFRMStatic)},
 		{Label: "Create SRv6", Value: string(model.KindSRv6)},
+		{Label: "Babel settings", Value: "settings"},
 		{Label: "Exit", Value: "exit"},
 	}
 	for i := range options {

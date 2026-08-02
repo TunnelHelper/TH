@@ -36,6 +36,7 @@ const (
 	promptSelect promptKind = iota
 	promptInput
 	promptDecision
+	promptSlider
 )
 
 const promptMaxVisibleOptions = 10
@@ -56,6 +57,12 @@ type promptModel struct {
 	width        int
 	done         bool
 	aborted      bool
+
+	sliderValue  float64
+	sliderMin    float64
+	sliderMax    float64
+	sliderStep   float64
+	sliderRender func(float64) string
 }
 
 func newSelectPrompt(output *UI, kind promptKind, title, description string, options []Option, value string) promptModel {
@@ -69,6 +76,14 @@ func newSelectPrompt(output *UI, kind promptKind, title, description string, opt
 	return promptModel{
 		ui: output, kind: kind, title: title, description: description,
 		options: append([]Option(nil), options...), selected: selected, width: 80,
+	}
+}
+
+func newSliderPrompt(output *UI, title, description string, min, max, step float64, value float64, render func(float64) string) promptModel {
+	return promptModel{
+		ui: output, kind: promptSlider, title: title, description: description,
+		sliderValue: value, sliderMin: min, sliderMax: max, sliderStep: step,
+		sliderRender: render, value: strconv.FormatFloat(value, 'g', -1, 64), width: 80,
 	}
 }
 
@@ -188,6 +203,30 @@ func (m promptModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, command
 	}
 
+	if m.kind == promptSlider {
+		switch key.String() {
+		case "left", "down", "h", "j":
+			m.sliderValue -= m.sliderStep
+		case "right", "up", "l", "k":
+			m.sliderValue += m.sliderStep
+		case "home":
+			m.sliderValue = m.sliderMin
+		case "end":
+			m.sliderValue = m.sliderMax
+		case "enter", " ":
+			m.value = strconv.FormatFloat(m.sliderValue, 'g', -1, 64)
+			m.done = true
+			return m, tea.Quit
+		}
+		if m.sliderValue < m.sliderMin {
+			m.sliderValue = m.sliderMin
+		}
+		if m.sliderValue > m.sliderMax {
+			m.sliderValue = m.sliderMax
+		}
+		return m, nil
+	}
+
 	if len(m.options) == 0 {
 		return m, nil
 	}
@@ -227,6 +266,10 @@ func (m promptModel) View() string {
 			buttons[index] = Button{Label: option.Label, Destructive: option.Destructive}
 		}
 		lines = append(lines, RenderButtons(buttons, m.selected, width))
+	case promptSlider:
+		if m.sliderRender != nil {
+			lines = append(lines, m.sliderRender(m.sliderValue))
+		}
 	default:
 		start, end := promptVisibleRange(len(m.options), m.selected)
 		if start > 0 {
@@ -258,6 +301,8 @@ func (m promptModel) View() string {
 		hint := "arrows/tab  Select    enter  Apply    esc  Cancel"
 		if m.kind == promptInput {
 			hint = "enter  Apply    esc  Cancel"
+		} else if m.kind == promptSlider {
+			hint = "← →  Adjust    enter  Apply    esc  Cancel"
 		}
 		lines = append(lines, m.ui.dim.Render(fitPrompt(hint, width)))
 	}
@@ -340,6 +385,45 @@ func (p *Prompter) Select(title string, options []Option, value *string) error {
 		return errors.New("invalid selection")
 	}
 	*value = options[i-1].Value
+	return nil
+}
+
+// Slider asks for a bounded floating-point value adjusted with the left and
+// right arrow keys. render is used to draw the current position.
+func (p *Prompter) Slider(title string, min, max, step float64, value *float64, render func(float64) string) error {
+	if value == nil || min > max || step <= 0 {
+		return errors.New("invalid slider configuration")
+	}
+	if p.ui.TTY {
+		fieldTitle, description := p.consumePending(title)
+		result, err := p.run(newSliderPrompt(p.ui, fieldTitle, description, min, max, step, *value, render))
+		if err != nil {
+			return err
+		}
+		parsed, err := strconv.ParseFloat(result.value, 64)
+		if err != nil {
+			return err
+		}
+		*value = parsed
+		return nil
+	}
+
+	p.printPending()
+	fmt.Fprintln(p.out, title)
+	fmt.Fprintf(p.out, "  value (%.1f - %.1f, default %.1f)> ", min, max, *value)
+	line, err := p.ui.ReadLine()
+	if err != nil {
+		return err
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(line, 64)
+	if err != nil || parsed < min || parsed > max {
+		return errors.New("invalid value")
+	}
+	*value = parsed
 	return nil
 }
 

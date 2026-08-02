@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,11 +38,16 @@ type Interface struct {
 	// It can be overridden per neighbour through Neighbour.SetCostOverride.
 	nominalCost proto.Metric
 
+	// bandwidthMbps is the declared usable bandwidth of this interface,
+	// the per-hop contribution to the advertised end-to-end bottleneck.
+	bandwidthMbps int
+
 	Neighbours NeighbourTable
 
-	helloMulticastSeqNo proto.SequenceNumber
-	helloMulticastTimer *time.Ticker
-	periodicUpdateTimer *time.Ticker
+	helloMulticastSeqNo  proto.SequenceNumber
+	helloMulticastTimer  *time.Ticker
+	periodicUpdateTimer  *time.Ticker
+	lastMulticastHelloTx proto.Timestamp
 
 	queue   *queue.Queue
 	speaker *Speaker
@@ -63,8 +71,9 @@ func (s *Speaker) newInterface(index int) (*Interface, error) {
 
 		speaker: s,
 
-		multicast:           s.config.Multicast,
+		multicast:           s.config.MulticastInterfaces[intf.Name],
 		nominalCost:         s.config.NominalLinkCost,
+		bandwidthMbps:       s.config.InterfaceBandwidth[intf.Name],
 		helloMulticastTimer: time.NewTicker(s.config.MulticastHelloInterval),
 		periodicUpdateTimer: time.NewTicker(s.config.UpdateInterval),
 
@@ -81,21 +90,25 @@ func (s *Speaker) newInterface(index int) (*Interface, error) {
 		}
 
 		i.queue = queue.NewQueue(intf.MTU, &netx.PacketConnWriter{
-			PacketConn: i.speaker.conn,
-			Dest:       multicastAddr,
-			Src:        i.sourceAddress(),
-			IfIndex:    intf.Index,
+			Conn6:   i.speaker.conn6,
+			Conn4:   i.speaker.conn4,
+			Dest:    multicastAddr,
+			Src:     i.sourceAddress(),
+			Src4:    i.sourceAddress4(),
+			IfIndex: intf.Index,
 		})
 
-		if err := i.speaker.conn.JoinGroup(i.Interface, multicastAddr); err != nil {
+		if err := i.speaker.conn6.JoinGroup(i.Interface, multicastAddr); err != nil {
 			return nil, fmt.Errorf("failed to join multicast group: %w", err)
 		}
 	} else {
 		i.queue = queue.NewQueue(intf.MTU, &netx.PacketConnWriter{
-			PacketConn: i.speaker.conn,
-			Dest:       nil,
-			Src:        i.sourceAddress(),
-			IfIndex:    intf.Index,
+			Conn6:   i.speaker.conn6,
+			Conn4:   i.speaker.conn4,
+			Dest:    nil,
+			Src:     i.sourceAddress(),
+			Src4:    i.sourceAddress4(),
+			IfIndex: intf.Index,
 		})
 	}
 
@@ -178,7 +191,7 @@ func (i *Interface) runTimers() {
 	}
 }
 
-func (i *Interface) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address) error {
+func (i *Interface) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address, rxTime proto.Timestamp) error {
 	// Neighbour identity is per-interface; strip the link zone so a packet
 	// received on this interface always matches its configured address.
 	srcAddr = srcAddr.WithZone("")
@@ -214,7 +227,7 @@ func (i *Interface) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address) 
 		i.Neighbours.Insert(n)
 	}
 
-	return n.onPacket(pkt, srcAddr, dstAddr)
+	return n.onPacket(pkt, srcAddr, dstAddr, rxTime)
 }
 
 func (i *Interface) sendMulticastHello() error {
@@ -222,12 +235,16 @@ func (i *Interface) sendMulticastHello() error {
 
 	i.helloMulticastSeqNo++
 
-	i.sendValue([]proto.Value{
-		&proto.Hello{
-			Seqno:    i.helloMulticastSeqNo,
-			Interval: i.speaker.config.MulticastHelloInterval,
-		},
-	}, i.speaker.config.MulticastHelloInterval/2)
+	hello := &proto.Hello{
+		Seqno:    i.helloMulticastSeqNo,
+		Interval: i.speaker.config.MulticastHelloInterval,
+	}
+	if i.speaker.config.DelayMetric {
+		i.lastMulticastHelloTx = timestampNow()
+		hello.Timestamp = &proto.TimestampHello{Transmit: i.lastMulticastHelloTx}
+	}
+
+	i.sendValue([]proto.Value{hello}, i.speaker.config.MulticastHelloInterval/2)
 
 	return nil
 }
@@ -235,7 +252,7 @@ func (i *Interface) sendMulticastHello() error {
 // sendUpdate implements the periodic full route dump (RFC 8966 Section 3.7.1).
 func (i *Interface) sendUpdate() error {
 	updates, retractions := i.speaker.advertisedRoutes(i)
-	values := i.speaker.encodeRoutes(i, updates)
+	values := i.speaker.encodeRoutes(i, updates, i.outgoingRTTMicros())
 	for _, r := range retractions {
 		values = append(values, i.speaker.encodeRetraction(r.Source.RouterID, r.SeqNo, r.Source.Prefix)...)
 	}
@@ -249,7 +266,7 @@ func (i *Interface) sendUpdate() error {
 // sendTriggered sends an urgent update for the given routes (RFC 8966
 // Section 3.7.2). Retractions are never subject to split horizon.
 func (i *Interface) sendTriggered(routes []*Route, retractions []*Route, urgent bool) {
-	values := i.speaker.encodeRoutes(i, routes)
+	values := i.speaker.encodeRoutes(i, routes, i.outgoingRTTMicros())
 	for _, r := range retractions {
 		values = append(values, i.speaker.encodeRetraction(r.Source.RouterID, r.SeqNo, r.Source.Prefix)...)
 	}
@@ -287,6 +304,7 @@ func (i *Interface) sendValue(vs []proto.Value, maxDelay time.Duration) {
 
 // findLinkLocalAddress returns the interface's IPv6 link-local address.
 func (i *Interface) findLinkLocalAddress() (net.IP, error) {
+	tentative := tentativeLinkLocals(i.Index)
 	addrs, err := i.Addrs()
 	if err != nil {
 		return nil, err
@@ -305,10 +323,51 @@ func (i *Interface) findLinkLocalAddress() (net.IP, error) {
 		if !ipAddr.IsLinkLocalUnicast() {
 			continue // skip non link-local
 		}
+		if _, blocked := tentative[ipAddr.String()]; blocked {
+			continue // skip addresses still undergoing duplicate-address detection
+		}
 		return ipAddr, nil
 	}
 
 	return nil, errors.New("failed to find IPv6 link-local address")
+}
+
+// tentativeLinkLocals returns the link-local addresses of an interface that
+// are still tentative (duplicate-address detection not finished) by parsing
+// /proc/net/if_inet6. Tentative addresses cannot be used as packet sources.
+func tentativeLinkLocals(ifIndex int) map[string]struct{} {
+	data, err := os.ReadFile("/proc/net/if_inet6")
+	if err != nil {
+		return nil
+	}
+	tentative := make(map[string]struct{})
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		index, err := strconv.Atoi(fields[1])
+		if err != nil || index != ifIndex {
+			continue
+		}
+		flags, err := strconv.ParseUint(fields[5], 16, 32)
+		if err != nil || flags&0x40 == 0 { // IFA_F_TENTATIVE
+			continue
+		}
+		if len(fields[0]) != 32 {
+			continue
+		}
+		address := make([]byte, 16)
+		for i := 0; i < 16; i++ {
+			value, err := strconv.ParseUint(fields[0][i*2:i*2+2], 16, 8)
+			if err != nil {
+				continue
+			}
+			address[i] = byte(value)
+		}
+		tentative[net.IP(address).String()] = struct{}{}
+	}
+	return tentative
 }
 
 // sourceAddress returns the interface's configured IPv6 link-local address
@@ -318,4 +377,44 @@ func (i *Interface) sourceAddress() net.IP {
 		return ip
 	}
 	return nil
+}
+
+// sourceAddress4 returns the interface's first non-loopback IPv4 address,
+// pinned as the source of outgoing IPv4 Babel packets.
+func (i *Interface) sourceAddress4() net.IP {
+	addrs, err := i.Addrs()
+	if err != nil {
+		return nil
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip := ipNet.IP.To4()
+		if ip == nil || ip.IsLoopback() {
+			continue
+		}
+		return ip
+	}
+	return nil
+}
+
+// outgoingRTTMicros returns the smoothed RTT of the single neighbour on this
+// interface, or zero when there is no unique neighbour (multicast shared
+// links advertise without a per-receiver RTT contribution).
+func (i *Interface) outgoingRTTMicros() int64 {
+	var rtt int64
+	count := 0
+	_ = i.Neighbours.Foreach(func(n *Neighbour) error {
+		count++
+		if count == 1 && n.HasRTT() {
+			rtt = n.RTT().Microseconds()
+		}
+		return nil
+	})
+	if count != 1 {
+		return 0
+	}
+	return rtt
 }

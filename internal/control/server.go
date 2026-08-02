@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/backup"
+	"github.com/TunnelHelper/TH/internal/config"
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/TunnelHelper/TH/internal/version"
@@ -34,6 +35,8 @@ type Manager interface {
 	ApplyBundle(context.Context, model.Bundle, bool, bool) (core.BundleApplyResult, error)
 	BuildBackup() (backup.Archive, error)
 	RestoreBackup(context.Context, backup.Archive, bool, bool) (core.RestoreResult, error)
+	Settings() (config.BabelSettings, error)
+	UpdateSettings(context.Context, config.BabelSettings) error
 }
 
 type Server struct {
@@ -106,6 +109,8 @@ func NewServer(manager Manager) *Server {
 	server.mux.HandleFunc("POST /v1/apply", server.applyBundle)
 	server.mux.HandleFunc("POST /v1/admin/backup", server.backup)
 	server.mux.HandleFunc("POST /v1/admin/restore", server.restore)
+	server.mux.HandleFunc("GET /v1/settings", server.getSettings)
+	server.mux.HandleFunc("PUT /v1/settings", server.updateSettings)
 	server.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusNotFound, errorEnvelope{Error: apiError{Code: "not_found", Message: "API endpoint not found"}})
 	})
@@ -503,4 +508,26 @@ func (s *Server) reconcileAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tunnels": views})
+}
+
+func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
+	settings, err := s.manager.Settings()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
+}
+
+func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var settings config.BabelSettings
+	if err := decodeJSON(r, &settings); err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if err := s.manager.UpdateSettings(r.Context(), settings); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, settings)
 }

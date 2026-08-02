@@ -4,6 +4,7 @@
 package proto
 
 import (
+	"errors"
 	"net/netip"
 	"reflect"
 	"testing"
@@ -142,7 +143,6 @@ func TestParserAddressRoundTrip(t *testing.T) {
 		{"fd3d:bd4f:9738::1036:d55b:fb01:b6d1", 16, AddressEncodingIPv6},
 		{"::", 0, AddressEncodingWildcard},
 		{"fe80::1234:5678:90AB:CDEF", 8, AddressEncodingIPv6LinkLocal},
-		{"::ffff:1.2.3.4", 4, AddressEncodingIPv4inIPv6},
 	}
 	for _, tc := range cases {
 		p := NewParser()
@@ -164,9 +164,6 @@ func TestParserAddressRoundTrip(t *testing.T) {
 		if len(b) != 0 {
 			t.Errorf("%s: buffer must be fully consumed", tc.addr)
 		}
-		if ae == AddressEncodingIPv4inIPv6 && (!decoded.Is4In6() || !decoded.Is6()) {
-			t.Errorf("%s: decoded address must be 4-in-6", tc.addr)
-		}
 	}
 }
 
@@ -181,7 +178,6 @@ func TestParserPrefixRoundTrip(t *testing.T) {
 		{"fd3d:bd4f:9738::/48", 6, AddressEncodingIPv6, 48},
 		{"::/0", 0, AddressEncodingWildcard, 0},
 		{"fe80::1234:5678:90AB:CDEF/128", 8, AddressEncodingIPv6LinkLocal, 128},
-		{"::ffff:10.0.0.0/16", 2, AddressEncodingIPv4inIPv6, 16},
 	}
 	for _, tc := range cases {
 		p := NewParser()
@@ -203,11 +199,112 @@ func TestParserPrefixRoundTrip(t *testing.T) {
 		if len(b) != 0 {
 			t.Errorf("%s: buffer must be fully consumed", tc.addr)
 		}
-		if ae == AddressEncodingIPv4inIPv6 {
-			if !decoded.Addr().Is4In6() || !decoded.Addr().Is6() {
-				t.Errorf("%s: decoded prefix must be 4-in-6", tc.addr)
-			}
-		}
+	}
+}
+
+func TestParserV4ViaV6Update(t *testing.T) {
+	p := NewParser()
+	rid := RouterID{0x01, 0x23, 0x34, 0x45, 0x67, 0x89, 0x0a, 0xbc}
+	prefix := netip.MustParsePrefix("10.0.0.0/16")
+	nextHop := netip.MustParseAddr("fe80::1")
+
+	b := p.AppendValue(nil, &RouterIDValue{RouterID: rid})
+	b = p.AppendValue(b, &NextHop{NextHop: nextHop})
+	b = p.AppendValue(b, &Update{Prefix: prefix, Seqno: 1, Metric: 100, Interval: time.Second, V4ViaV6: true})
+
+	p.Reset()
+	_, values, err := p.Values(b, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update, ok := values[2].(*Update)
+	if !ok {
+		t.Fatalf("third value is %T, want *Update", values[2])
+	}
+	if !update.V4ViaV6 {
+		t.Fatal("AE=4 update must be marked v4-via-v6")
+	}
+	if update.Prefix != prefix {
+		t.Errorf("v4-via-v6 prefix = %s, want %s", update.Prefix, prefix)
+	}
+	if update.NextHop != nextHop {
+		t.Errorf("v4-via-v6 next hop = %s, want IPv6 next hop %s", update.NextHop, nextHop)
+	}
+}
+
+func TestParserPathMetricsRoundTrip(t *testing.T) {
+	p := NewParser()
+	rid := RouterID{0x01, 0x23, 0x34, 0x45, 0x67, 0x89, 0x0a, 0xbc}
+	prefix := netip.MustParsePrefix("10.0.0.0/16")
+
+	b := p.AppendValue(nil, &RouterIDValue{RouterID: rid})
+	b = p.AppendValue(b, &Update{
+		Prefix: prefix, Seqno: 1, Metric: 100, Interval: time.Second,
+		PathBottleneckMbps: 10,
+		PathRTTMicros:      5000,
+	})
+
+	p.Reset()
+	_, values, err := p.Values(b, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update, ok := values[1].(*Update)
+	if !ok {
+		t.Fatalf("second value is %T, want *Update", values[1])
+	}
+	if update.PathBottleneckMbps != 10 || update.PathRTTMicros != 5000 {
+		t.Fatalf("path metrics = (%d, %d), want (10, 5000)", update.PathBottleneckMbps, update.PathRTTMicros)
+	}
+}
+
+func TestParserPathMetricsUnsetBottleneck(t *testing.T) {
+	p := NewParser()
+	prefix := netip.MustParsePrefix("10.0.0.0/16")
+	b := p.AppendValue(nil, &Update{
+		Prefix: prefix, Seqno: 1, Metric: 100, Interval: time.Second,
+		PathBottleneckMbps: 0,
+		PathRTTMicros:      1000,
+	})
+	p.Reset()
+	_, values, err := p.Values(b, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := values[0].(*Update)
+	if update.PathBottleneckMbps != 0 || update.PathRTTMicros != 1000 {
+		t.Fatalf("unset bottleneck must decode as 0, got (%d, %d)", update.PathBottleneckMbps, update.PathRTTMicros)
+	}
+}
+
+func TestParserIgnoresUnknownSubTLV(t *testing.T) {
+	p := NewParser()
+	buildUpdate := func(subType uint8) []byte {
+		return p.appendValueHeader(nil, TypeUpdate, func(b []byte) []byte {
+			b = p.appendUint8(b, AddressEncodingIPv4)
+			b = p.appendUint8(b, 0)
+			b = p.appendUint8(b, 24)
+			b = p.appendUint8(b, 0)
+			b = p.appendInterval(b, time.Second)
+			b = p.appendUint16(b, 1)
+			b = p.appendUint16(b, 100)
+			b = append(b, 10, 0, 0) // 10.0.0.0/24 prefix
+			return append(b, subType, 1, 0xab)
+		})
+	}
+
+	// An unknown non-mandatory sub-TLV is silently ignored.
+	b := buildUpdate(5)
+	p.Reset()
+	if _, _, err := p.Values(b, false); err != nil {
+		t.Fatalf("unknown non-mandatory sub-TLV must be ignored: %v", err)
+	}
+
+	// A mandatory unknown sub-TLV (high bit set) must fail parsing.
+	b2 := buildUpdate(0x85)
+	p.Reset()
+	if _, _, err := p.Values(b2, false); !errors.Is(err, ErrUnsupportedButMandatoryValue) {
+		t.Fatalf("mandatory unknown sub-TLV must fail, got %v", err)
 	}
 }
 
@@ -216,7 +313,7 @@ func TestParserFlagUpdateRouterID(t *testing.T) {
 		"10.168.0.0/16",
 		"2a09:bac0:35::826:93f9/128",
 		"fe80::210:5aff:feaa:20a2/64",
-		"::ffff:1.2.3.4/128",
+		"1.2.3.4/32",
 	}
 	for _, prefix := range cases {
 		p := NewParser()
@@ -227,7 +324,7 @@ func TestParserFlagUpdateRouterID(t *testing.T) {
 		b = p.AppendValue(b, &Update{Prefix: netip.MustParsePrefix("10.169.0.0/16")})
 		b = p.AppendValue(b, &Update{Prefix: netip.MustParsePrefix("2a10:bac0:35::826:93f9/128")})
 		b = p.AppendValue(b, &Update{Prefix: netip.MustParsePrefix("fe80::310:5aff:feaa:20a2/64")})
-		b = p.AppendValue(b, &Update{Prefix: netip.MustParsePrefix("::ffff:1.2.3.5/128")})
+		b = p.AppendValue(b, &Update{Prefix: netip.MustParsePrefix("1.2.3.5/32")})
 
 		if p.CurrentRouterID != rid {
 			t.Errorf("%s: current router id = %x, want %x", prefix, p.CurrentRouterID, rid)
@@ -247,19 +344,16 @@ func TestParserFlagUpdatePrefix(t *testing.T) {
 	pfx4 := netip.MustParsePrefix("10.168.0.0/16")
 	pfx6 := netip.MustParsePrefix("fd5e:181e:5bbd::/48")
 	pfx6LL := netip.MustParsePrefix("fe80::1234:5678:90ab:cdef/128")
-	pfx4in6 := netip.MustParsePrefix("::ffff:1.2.3.4/128")
 	expected := map[AddressEncoding]Address{
 		AddressEncodingIPv4:          pfx4.Addr(),
 		AddressEncodingIPv6:          pfx6.Addr(),
 		AddressEncodingIPv6LinkLocal: pfx6LL.Addr(),
-		AddressEncodingIPv4inIPv6:    pfx4in6.Addr(),
 	}
 
 	p := NewParser()
 	b := p.AppendValue(nil, &Update{Flags: FlagUpdatePrefix, Prefix: pfx4})
 	b = p.AppendValue(b, &Update{Flags: FlagUpdatePrefix, Prefix: pfx6})
 	b = p.AppendValue(b, &Update{Flags: FlagUpdatePrefix, Prefix: pfx6LL})
-	b = p.AppendValue(b, &Update{Flags: FlagUpdatePrefix, Prefix: pfx4in6})
 	b = p.AppendValue(b, &Update{Prefix: netip.MustParsePrefix("10.169.0.0/16")})
 	b = p.AppendValue(b, &Update{Prefix: netip.MustParsePrefix("fe80::1337/128")})
 
@@ -316,6 +410,11 @@ func TestParserValuesRoundTrip(t *testing.T) {
 			_, decoded, typ, err := p.value(b)
 			if err != nil {
 				t.Fatal(err)
+			}
+			// An absent PathMetrics sub-TLV decodes as unknown (-1); the
+			// zero value used by the test inputs represents the same state.
+			if update, ok := decoded.(*Update); ok && update.PathRTTMicros == -1 {
+				update.PathRTTMicros = 0
 			}
 			if typ != tc.typ {
 				t.Errorf("type = %d, want %d", typ, tc.typ)

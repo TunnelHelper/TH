@@ -40,7 +40,7 @@ type Backend struct {
 	awg      *amneziaClient
 	awgErr   error
 	vici     *viciController
-	babel    *babelRegistry
+	babel    *babelEngine
 	eventCtx context.Context
 	eventEnd context.CancelFunc
 	events   chan core.BackendEvent
@@ -66,10 +66,15 @@ func New(settings config.Settings) (*Backend, error) {
 		awg:      awg,
 		awgErr:   awgErr,
 		vici:     newVICIController(settings.VICISocketPath, settings.RequestTimeout()),
-		babel:    newBabelRegistry(),
+		babel:    nil,
 		eventCtx: eventCtx,
 		eventEnd: eventEnd,
 		events:   make(chan core.BackendEvent, 64),
+	}
+	backend.babel, err = newBabelEngine(backend)
+	if err != nil {
+		handle.Close()
+		return nil, fmt.Errorf("start Babel engine: %w", err)
 	}
 	backend.startEventWatchers()
 	return backend, nil
@@ -77,6 +82,14 @@ func New(settings config.Settings) (*Backend, error) {
 
 func (b *Backend) Apply(ctx context.Context, record model.Tunnel) (core.Observation, error) {
 	if err := ctx.Err(); err != nil {
+		return core.Observation{}, err
+	}
+	if record.Spec.Babel != nil && record.Spec.Babel.Enabled {
+		b.babel.upsertTunnel(record)
+	} else {
+		b.babel.removeTunnel(record.ID)
+	}
+	if err := b.babel.reconcile(); err != nil {
 		return core.Observation{}, err
 	}
 	switch record.Kind {
@@ -94,8 +107,6 @@ func (b *Backend) Apply(ctx context.Context, record model.Tunnel) (core.Observat
 		return b.applyIKEv2(ctx, record)
 	case model.KindSRv6:
 		return b.applySRv6(ctx, record)
-	case model.KindBabel:
-		return b.applyBabel(ctx, record)
 	default:
 		return core.Observation{}, fmt.Errorf("unsupported tunnel kind %q", record.Kind)
 	}
@@ -103,6 +114,10 @@ func (b *Backend) Apply(ctx context.Context, record model.Tunnel) (core.Observat
 
 func (b *Backend) Remove(ctx context.Context, record model.Tunnel) (core.Observation, error) {
 	if err := ctx.Err(); err != nil {
+		return core.Observation{}, err
+	}
+	b.babel.removeTunnel(record.ID)
+	if err := b.babel.reconcile(); err != nil {
 		return core.Observation{}, err
 	}
 	var err error
@@ -123,8 +138,6 @@ func (b *Backend) Remove(ctx context.Context, record model.Tunnel) (core.Observa
 		err = b.removeIKEv2(ctx, record)
 	case model.KindSRv6:
 		err = b.removeSRv6(record)
-	case model.KindBabel:
-		_, err = b.removeBabel(record)
 	default:
 		err = fmt.Errorf("unsupported tunnel kind %q", record.Kind)
 	}
@@ -146,9 +159,10 @@ func (b *Backend) Observe(ctx context.Context, record model.Tunnel) (core.Observ
 		return b.observeStaticXFRM(record)
 	case model.KindXFRMIKEv2:
 		return b.observeIKEv2(ctx, record)
-	case model.KindBabel:
-		return b.observeBabel(record)
 	default:
+		if record.Spec.Babel != nil && record.Spec.Babel.Enabled {
+			return b.babel.observe(record), nil
+		}
 		return b.observeLink(record)
 	}
 }
@@ -176,12 +190,17 @@ func (b *Backend) Events() <-chan core.BackendEvent {
 	return b.events
 }
 
+// ApplyBabelSettings applies a new Babel settings snapshot at runtime.
+func (b *Backend) ApplyBabelSettings(settings config.BabelSettings) error {
+	return b.babel.refreshSettings(settings)
+}
+
 func (b *Backend) Close() error {
 	var closeErr error
 	b.close.Do(func() {
 		b.eventEnd()
 		b.eventWG.Wait()
-		b.closeBabelInstances()
+		b.babel.close()
 		close(b.events)
 		if b.wg != nil {
 			closeErr = b.wg.Close()

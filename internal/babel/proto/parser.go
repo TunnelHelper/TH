@@ -214,6 +214,9 @@ func (p *Parser) ValueLength(v Value) (l int) {
 		if v.SourcePrefix != nil {
 			l += ValueHeaderLength + 1 + p.prefixLength(*v.SourcePrefix, false)
 		}
+		if v.PathBottleneckMbps != 0 || v.PathRTTMicros != 0 {
+			l += ValueHeaderLength + 8
+		}
 	case *RouteRequest:
 		l += 2 + p.prefixLength(v.Prefix, false)
 		if v.SourcePrefix != nil {
@@ -391,11 +394,15 @@ func (p *Parser) forEachSubValue(b []byte, cb func(t ValueType, b []byte) ([]byt
 	return p.forEachValue(b, func(t ValueType, b []byte) ([]byte, error) {
 		var err error
 		if b, err = cb(t, b); err != nil {
-			if errors.Is(err, ErrUnsupportedValue) && t.IsMandatory() {
-				return nil, ErrUnsupportedButMandatoryValue
-			} else {
-				return nil, err
+			if errors.Is(err, ErrUnsupportedValue) {
+				if t.IsMandatory() {
+					return nil, ErrUnsupportedButMandatoryValue
+				}
+				// RFC 8966 Section 4.4: unknown non-mandatory sub-TLVs
+				// are silently ignored.
+				return nil, nil
 			}
+			return nil, err
 		}
 
 		return b, nil
@@ -936,9 +943,16 @@ func (p *Parser) update(b []byte) ([]byte, *Update, error) {
 	if b, v.Metric, err = p.uint16(b); err != nil {
 		return nil, nil, err
 	}
-	if b, v.Prefix, err = p.prefix(b, ae, plen, omitted); err != nil {
+	decodeAE := ae
+	v.V4ViaV6 = ae == AddressEncodingIPv4inIPv6
+	if v.V4ViaV6 {
+		// RFC 9229 Section 4.1: an AE 4 prefix is decoded like AE 1.
+		decodeAE = AddressEncodingIPv4
+	}
+	if b, v.Prefix, err = p.prefix(b, decodeAE, plen, omitted); err != nil {
 		return nil, nil, err
 	}
+	v.PathRTTMicros = -1 // absent PathMetrics sub-TLV means unknown
 
 	// Decode sub-TLVs
 	if b, err = p.forEachSubValue(b, func(t ValueType, b []byte) ([]byte, error) {
@@ -950,6 +964,18 @@ func (p *Parser) update(b []byte) ([]byte, *Update, error) {
 			} else {
 				v.SourcePrefix = &pfx
 			}
+			return b, nil
+		case SubTypePathMetrics:
+			var bottleneck uint32
+			var rtt uint32
+			if b, bottleneck, err = p.uint32(b); err != nil {
+				return nil, err
+			}
+			if b, rtt, err = p.uint32(b); err != nil {
+				return nil, err
+			}
+			v.PathBottleneckMbps = decodeBottleneck(bottleneck)
+			v.PathRTTMicros = int64(rtt)
 			return b, nil
 
 		default:
@@ -987,6 +1013,11 @@ func (p *Parser) appendUpdate(b []byte, v *Update) []byte {
 	b = p.appendUint16(b, v.Seqno)
 	b = p.appendUint16(b, v.Metric)
 	b, ae, plen, omitted := p.appendPrefix(b, v.Prefix, true)
+	if v.V4ViaV6 {
+		// RFC 9229: the prefix payload is encoded exactly like AE 1
+		// (IPv4), only the AE field differs.
+		ae = AddressEncodingIPv4inIPv6
+	}
 
 	b[o+0] = ae
 	b[o+2] = plen
@@ -1002,6 +1033,9 @@ func (p *Parser) appendUpdate(b []byte, v *Update) []byte {
 
 	if v.SourcePrefix != nil {
 		b = p.appendSourcePrefix(b, *v.SourcePrefix)
+	}
+	if v.PathBottleneckMbps != 0 || v.PathRTTMicros != 0 {
+		b = p.appendPathMetrics(b, v.PathBottleneckMbps, v.PathRTTMicros)
 	}
 
 	return b
@@ -1159,5 +1193,33 @@ func (p *Parser) appendSourcePrefix(b []byte, pfx Prefix) []byte {
 		b[o] = plen
 
 		return b
+	})
+}
+
+// pathMetricsUnset is the wire encoding for an unset bottleneck bandwidth
+// (treated as unlimited).
+const pathMetricsUnset = 0xffffffff
+
+func encodeBottleneck(mbps int) uint32 {
+	if mbps <= 0 {
+		return pathMetricsUnset
+	}
+	return uint32(mbps)
+}
+
+func decodeBottleneck(encoded uint32) int {
+	if encoded == pathMetricsUnset {
+		return 0
+	}
+	return int(encoded)
+}
+
+// appendPathMetrics encodes the TH PathMetrics sub-TLV: a 32-bit bottleneck
+// bandwidth (Mbps, 0xffffffff = unlimited) followed by the wrapped 32-bit
+// accumulated path RTT in microseconds.
+func (p *Parser) appendPathMetrics(b []byte, bottleneckMbps int, rttMicros int64) []byte {
+	return p.appendValueHeader(b, SubTypePathMetrics, func(b []byte) []byte {
+		b = p.appendUint32(b, encodeBottleneck(bottleneckMbps))
+		return p.appendUint32(b, uint32(rttMicros))
 	})
 }

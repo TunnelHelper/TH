@@ -96,16 +96,40 @@ Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
       acquisition, feasibility, retractions, hold time, and expiry sweep.
 - [x] Implement route selection with RFC 8966 Appendix A.3 hysteresis.
 - [x] Implement route requests and seqno requests with forwarding.
-- [x] Bootstrap non-multicast links with static neighbours and unicast Hellos.
-- [x] Add pluggable cost/metric providers (RFC 8966 Sections 3.4.3/3.5.2)
-      including a bandwidth-to-cost mapping helper.
-- [x] Export feasible multipath candidates with metrics for weighted ECMP.
-- [x] Add the `babel` tunnel kind: model, validation, defaults, and the
-      Linux backend that installs owned routes with kernel weights.
+- [x] Move participation to per-tunnel `spec.babel {enabled,
+      bandwidth_mbps}` and remove the standalone `babel` tunnel kind.
+- [x] Add daemon settings (`thd.json`) for the Babel engine: router id,
+      route table, delay metric, multipath limits, and prefix advertisement
+      with include/exclude filters over source interfaces (default `lo`).
+- [x] Add a daemon-wide Babel engine that aggregates enabled tunnels,
+      derives WireGuard neighbours from peer public keys (stable LLA) and
+      selects multicast vs unicast mode per interface.
+- [x] Implement RFC 9616 delay-based cost (RTT timestamps in Hello/IHU,
+      bounded linear cost mapping, hysteresis); throughput measurement is
+      intentionally out of scope for now.
+- [x] Implement RFC 9229 v4-via-v6 (AE 4) encoding for IPv4 prefixes over
+      IPv6 link-local links.
+- [x] Derive ECMP split weights from `bandwidth_mbps`
+      (256 * bw_i / bw_best) and install weighted kernel next hops.
+- [x] Switch weights to the raw-signal formula `w ∝ bandwidth^α / rtt^β`
+      (smoothed RTT from RFC 9616, α/β in daemon settings, default 1,1),
+      gated by a 10% change threshold and a weight-update cooldown.
+- [x] Add the bandwidth/latency balance knob to the TUI settings view
+      (left/right slider, default centre 1,1).
+- [x] Implement docs/BABEL_ECMP.md: end-to-end bottleneck bandwidth and
+      path RTT propagation (PathMetrics sub-TLV, per-hop min/accumulation),
+      weight formula `bottleneck^α / path_rtt^β` with local fallbacks,
+      the bias knob (α=1+bias, β=1-bias), the K bottleneck penalty,
+      external PTP interfaces in daemon settings, dual-stack udp4+udp6
+      sockets, and weight-change fingerprint gating.
+- [x] Add settings endpoints (`GET/PUT /v1/settings`) and a TUI settings
+      view for the Babel globals.
+- [x] Integration-test two WireGuard nodes with only IPv6 link-local
+      addresses: v4/v6 prefixes converge over both tunnels.
+- [ ] Surface the per-tunnel Babel toggle and bandwidth in the tunnel
+      editors (JSON API already supports `spec.babel`).
 - [x] Migrate all ginkgo/gomega tests to the standard library and drop the
       test-only dependencies.
-- [ ] Wire the bandwidth-measurement job (passive counters + short active
-      probes) into the pluggable cost provider.
 
 ## 4. TUI and Client Workflows
 

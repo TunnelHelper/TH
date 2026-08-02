@@ -22,6 +22,22 @@ type Update struct {
 	RouterID RouterID // Taken from a previous RouterID TLV
 	NextHop  Address  // Taken from a previous NextHop TLV
 
+	// V4ViaV6 marks an IPv4 prefix announced with the AE=4 (v4-via-v6)
+	// encoding from RFC 9229: the IPv4 prefix is carried with an IPv6
+	// next hop, allowing IPv4 routes over interfaces without an IPv4
+	// address. It is derived from the AE field, not encoded separately.
+	V4ViaV6 bool
+
+	// PathBottleneckMbps is the end-to-end bottleneck bandwidth (Mbps) of
+	// the path being announced. Zero means unset/unknown (treated as
+	// unlimited). It is carried in a PathMetrics sub-TLV.
+	PathBottleneckMbps int
+
+	// PathRTTMicros is the accumulated end-to-end smoothed RTT (microseconds)
+	// of the path being announced. Negative means unset/unknown. It is
+	// carried in a PathMetrics sub-TLV and wrapped on the wire.
+	PathRTTMicros int64
+
 	// Sub-TLVs
 	SourcePrefix *Prefix
 }

@@ -4,43 +4,136 @@ package linux
 
 import (
 	"errors"
+	"net"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/TunnelHelper/TH/internal/babel"
-	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/vishvananda/netlink"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-func TestBabelMultipathWeight(t *testing.T) {
+func TestBabelWeightFromScores(t *testing.T) {
 	cases := []struct {
-		primary, candidate uint16
-		want               int
+		best, candidate float64
+		want            int
 	}{
-		{512, 512, 256}, // equal cost -> equal weight
-		{512, 2816, 46}, // 1 Gbps vs 100 Mbps
-		{512, 65534, 2}, // extremely slow link keeps a minimal weight
-		{0, 512, 256},   // degenerate primary -> equal
-		{512, 100, 256}, // candidate cannot be cheaper than primary
+		{1000, 1000, 256}, // equal scores -> equal weight
+		{1000, 100, 26},   // 10:1 -> weight 26
+		{1000, 1, 1},      // extremely bad path keeps a minimal weight
+		{0, 1000, 256},    // missing best signal -> default weight
+		{1000, 0, 256},    // missing candidate signal -> default weight
 	}
 	for _, tc := range cases {
-		if got := babelMultipathWeight(tc.primary, tc.candidate); got != tc.want {
-			t.Errorf("babelMultipathWeight(%d, %d) = %d, want %d", tc.primary, tc.candidate, got, tc.want)
+		if got := babelWeightFromScores(tc.best, tc.candidate); got != tc.want {
+			t.Errorf("babelWeightFromScores(%g, %g) = %d, want %d", tc.best, tc.candidate, got, tc.want)
 		}
 	}
 }
 
-func TestBabelRoutesToNetlink(t *testing.T) {
-	record := model.Tunnel{
-		ID:   "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-		Kind: model.KindBabel,
-		Spec: model.Spec{Babel: &model.BabelSpec{}},
+func TestBabelWeightFromScoresBandwidthLatencyExample(t *testing.T) {
+	// 1 Mbps / 1 ms vs 1000 Mbps / 1000 ms: bandwidth/RTT scores are equal,
+	// so the weights must be equal under the default exponents (1, 1).
+	scoreFast := 1.0 / 0.001 // 1000
+	scoreWide := 1000.0 / 1.0
+	if scoreFast != scoreWide {
+		t.Fatalf("scores must be equal for the asymmetric example: %g vs %g", scoreFast, scoreWide)
 	}
+	if got := babelWeightFromScores(scoreWide, scoreFast); got != 256 {
+		t.Fatalf("equal scores must yield equal weights, got %d", got)
+	}
+}
+
+func TestBabelPathScoreEndToEnd(t *testing.T) {
+	// End-to-end values win: bottleneck 10, path RTT 1000 us.
+	score := babelPathScore(10, 1000, 0, false, 1, 1)
+	if score != 10.0/1000.0 {
+		t.Fatalf("end-to-end score = %g, want %g", score, 10.0/1000.0)
+	}
+
+	// Missing path RTT falls back to the local first-hop RTT.
+	fallback := babelPathScore(1000, -1, 500*time.Microsecond, true, 1, 1)
+	if fallback != 1000.0/500.0 {
+		t.Fatalf("fallback score = %g, want %g", fallback, 1000.0/500.0)
+	}
+
+	// Unknown RTT entirely: bandwidth term alone.
+	noRTT := babelPathScore(1000, -1, 0, false, 2, 1)
+	if noRTT != 1000*1000 {
+		t.Fatalf("bandwidth-only score = %g, want %g", noRTT, float64(1000*1000))
+	}
+}
+
+func TestWeightsWithinTolerance(t *testing.T) {
+	if !weightsWithinTolerance("255,25", "240,27") {
+		t.Fatal("small weight changes must be within tolerance")
+	}
+	if weightsWithinTolerance("255,25", "200,25") {
+		t.Fatal("a 22% weight change must exceed tolerance")
+	}
+	if weightsWithinTolerance("255,25", "255") {
+		t.Fatal("fingerprints with different sizes must differ")
+	}
+}
+
+func TestBabelWeightEqualTolerance(t *testing.T) {
+	cases := []struct {
+		current, desired int
+		equal            bool
+	}{
+		{255, 255, true},
+		{255, 240, true},  // 6% difference within tolerance
+		{255, 200, false}, // 22% difference must differ
+		{3, 4, true},      // single-unit difference always tolerated
+		{0, 1, true},
+	}
+	for _, tc := range cases {
+		if got := babelWeightEqual(tc.current, tc.desired); got != tc.equal {
+			t.Errorf("babelWeightEqual(%d, %d) = %v, want %v", tc.current, tc.desired, got, tc.equal)
+		}
+	}
+}
+
+func TestBabelWeightOnlyChange(t *testing.T) {
+	realm := 0x40000001
+	key := netip.MustParsePrefix("10.7.0.0/24")
+	base := netlink.Route{
+		Dst: prefixToIPNet(key), Table: 254, Protocol: managedRouteProtocol, Realm: realm,
+		Priority: 1, Scope: netlink.SCOPE_UNIVERSE,
+		MultiPath: []*netlink.NexthopInfo{
+			{LinkIndex: 1, Hops: 255, Gw: net.ParseIP("fe80::1")},
+			{LinkIndex: 2, Hops: 25, Gw: net.ParseIP("fe80::2")},
+		},
+	}
+	weightOnly := base
+	weightOnly.MultiPath[1].Hops = 50
+	if !babelWeightOnlyChange([]netlink.Route{base}, weightOnly) {
+		t.Fatal("weight-only change must be detected")
+	}
+
+	structural := base
+	structural.MultiPath = []*netlink.NexthopInfo{
+		{LinkIndex: 1, Hops: 255, Gw: net.ParseIP("fe80::1")},
+		{LinkIndex: 2, Hops: 25, Gw: net.ParseIP("fe80::3")},
+	}
+	if babelWeightOnlyChange([]netlink.Route{base}, structural) {
+		t.Fatal("structural change must not be treated as weight-only")
+	}
+}
+
+func TestBabelRoutesToNetlink(t *testing.T) {
 	resolve := func(name string) (int, error) {
 		if name == "wg0" {
 			return 42, nil
 		}
 		return 0, nil
+	}
+	score := func(route babel.SelectedRoute) float64 {
+		if route.Interface == "wg0" {
+			return 1000.0
+		}
+		return 0
 	}
 	selected := []babel.SelectedRoute{
 		{Prefix: netip.MustParsePrefix("10.1.0.0/24"), NextHop: netip.MustParseAddr("fe80::1"), Interface: "wg0", Metric: 512},
@@ -49,7 +142,8 @@ func TestBabelRoutesToNetlink(t *testing.T) {
 		{Prefix: netip.MustParsePrefix("10.3.0.0/24"), NextHop: netip.Addr{}, Interface: "", Metric: 0, Local: true},
 	}
 
-	routes, err := babelRoutesToNetlink(record, 254, selected, resolve)
+	realm := 0x40000001
+	routes, err := babelRoutesToNetlink(254, selected, resolve, score, realm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,19 +161,16 @@ func TestBabelRoutesToNetlink(t *testing.T) {
 	if len(multi.MultiPath) == 0 {
 		t.Fatal("multipath route not found")
 	}
-	if len(multi.MultiPath) != 2 {
-		t.Fatalf("equal-prefix routes must be grouped into multipath, got %d nexthops", len(multi.MultiPath))
-	}
 	if multi.MultiPath[0].LinkIndex != 42 || multi.MultiPath[1].LinkIndex != 42 {
 		t.Error("nexthop link index must come from the resolver")
 	}
 	if multi.MultiPath[0].Hops != 255 { // weight 256
 		t.Errorf("primary hop weight = %d, want 256", multi.MultiPath[0].Hops+1)
 	}
-	if multi.MultiPath[1].Hops != 45 { // weight 46
-		t.Errorf("candidate hop weight = %d, want 46", multi.MultiPath[1].Hops+1)
+	if multi.MultiPath[1].Hops != 255 { // equal bandwidth -> equal weight
+		t.Errorf("candidate hop weight = %d, want 256", multi.MultiPath[1].Hops+1)
 	}
-	if multi.Protocol != managedRouteProtocol || multi.Realm != model.ManagedRouteRealm(record) {
+	if multi.Protocol != managedRouteProtocol || multi.Realm != realm {
 		t.Error("routes must carry TH ownership tags")
 	}
 }
@@ -105,25 +196,34 @@ func TestParseBabelRouterID(t *testing.T) {
 	}
 }
 
+func TestNormalizeBabelAddress(t *testing.T) {
+	v4 := netip.MustParseAddr("192.168.1.1")
+	normalised := normalizeBabelAddress(v4)
+	if !normalised.Is4In6() {
+		t.Errorf("IPv4 neighbour must be normalised to 4-in-6, got %s", normalised)
+	}
+	v6 := netip.MustParseAddr("fe80::1")
+	if got := normalizeBabelAddress(v6); got != v6 {
+		t.Errorf("IPv6 neighbour must stay unchanged, got %s", got)
+	}
+}
+
 func TestBabelRouteDiffOwnership(t *testing.T) {
 	realm := 0x40000001
 	key := netip.MustParsePrefix("10.5.0.0/24")
 	owned := netlink.Route{Dst: prefixToIPNet(key), Table: 254, Protocol: managedRouteProtocol, Realm: realm, Priority: 1, Scope: netlink.SCOPE_UNIVERSE}
 	foreign := netlink.Route{Dst: prefixToIPNet(key), Table: 254, Protocol: 4, Realm: 0, Priority: 0}
 
-	// A foreign route at a wanted key must never be replaced.
 	replace, remove, err := babelRouteDiff([]netlink.Route{foreign}, []netlink.Route{owned}, realm)
 	if !errors.Is(err, ErrOwnershipConflict) {
 		t.Fatalf("expected ownership conflict, got %v (replace=%d remove=%d)", err, len(replace), len(remove))
 	}
 
-	// An identical owned route needs no replacement.
 	replace, remove, err = babelRouteDiff([]netlink.Route{owned}, []netlink.Route{owned}, realm)
 	if err != nil || len(replace) != 0 || len(remove) != 0 {
 		t.Fatalf("unchanged owned route must be a no-op: replace=%d remove=%d err=%v", len(replace), len(remove), err)
 	}
 
-	// A changed owned route is replaced.
 	changed := owned
 	changed.Priority = 2
 	replace, _, err = babelRouteDiff([]netlink.Route{owned}, []netlink.Route{changed}, realm)
@@ -131,7 +231,6 @@ func TestBabelRouteDiffOwnership(t *testing.T) {
 		t.Fatalf("changed owned route must be replaced: replace=%d err=%v", len(replace), err)
 	}
 
-	// Stale owned routes are removed; foreign stale routes are preserved.
 	stale := owned
 	stale.Dst = prefixToIPNet(netip.MustParsePrefix("10.6.0.0/24"))
 	foreignStale := foreign
@@ -142,14 +241,46 @@ func TestBabelRouteDiffOwnership(t *testing.T) {
 	}
 }
 
-func TestNormalizeBabelAddress(t *testing.T) {
-	v4 := netip.MustParseAddr("192.168.1.1")
-	normalised := normalizeBabelAddress(v4)
-	if !normalised.Is4In6() {
-		t.Errorf("IPv4 neighbour must be normalised to 4-in-6, got %s", normalised)
+func TestWgLinkLocalIsDeterministic(t *testing.T) {
+	key, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
 	}
-	v6 := netip.MustParseAddr("fe80::1")
-	if got := normalizeBabelAddress(v6); got != v6 {
-		t.Errorf("IPv6 neighbour must stay unchanged, got %s", got)
+	pub := key.PublicKey().String()
+	first, ok := wgLinkLocal(pub)
+	if !ok {
+		t.Fatal("valid public key must produce a link-local address")
+	}
+	second, _ := wgLinkLocal(pub)
+	if first != second {
+		t.Fatalf("link-local address must be deterministic: %s != %s", first, second)
+	}
+	if !first.IsLinkLocalUnicast() {
+		t.Fatalf("derived address %s must be link-local unicast", first)
+	}
+	if _, ok := wgLinkLocal("not-a-key"); ok {
+		t.Fatal("invalid public key must not produce an address")
+	}
+}
+
+func TestFilterAdvertisedPrefix(t *testing.T) {
+	include := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	exclude := []netip.Prefix{netip.MustParsePrefix("10.64.0.0/10")}
+	cases := []struct {
+		prefix string
+		want   bool
+	}{
+		{"10.1.2.0/24", true},
+		{"10.64.0.0/10", false},
+		{"172.16.0.0/12", false},
+		{"fe80::1/128", false},
+		{"127.0.0.0/8", false},
+		{"::1/128", false},
+		{"2001:db8::/32", false},
+	}
+	for _, tc := range cases {
+		if got := filterAdvertisedPrefix(netip.MustParsePrefix(tc.prefix), include, exclude); got != tc.want {
+			t.Errorf("filter(%s) = %v, want %v", tc.prefix, got, tc.want)
+		}
 	}
 }

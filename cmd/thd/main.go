@@ -112,7 +112,7 @@ func run(args []string) error {
 		return err
 	}
 	reconciler := core.NewReconciler(records, backend, settings.ReconcileInterval())
-	manager := core.NewManager(records, reconciler)
+	manager := core.NewManagerWithSettings(records, reconciler, *configPath, backend.ApplyBabelSettings)
 	server := control.NewServer(manager)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

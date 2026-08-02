@@ -5,6 +5,7 @@ package babel
 
 import (
 	"encoding/hex"
+	"fmt"
 	"net/netip"
 	"time"
 
@@ -53,6 +54,14 @@ type Route struct {
 	// table as a hold-time retraction and is never selected again until a
 	// fresh finite update arrives.
 	Expired bool
+
+	// PathBottleneckMbps is the end-to-end bottleneck bandwidth (Mbps) of
+	// the path this route was learned through. Zero means unknown/unlimited.
+	PathBottleneckMbps int
+
+	// PathRTTMicros is the accumulated end-to-end smoothed RTT (microseconds).
+	// Negative means unknown.
+	PathRTTMicros int64
 }
 
 // SelectedRoute is an exported view of a route chosen by the selection
@@ -65,6 +74,14 @@ type SelectedRoute struct {
 	Interface string
 	Metric    proto.Metric
 	Local     bool
+
+	// BottleneckMbps is the end-to-end bottleneck bandwidth of the path
+	// (zero = unknown/unlimited), used by the data plane for weighted ECMP.
+	BottleneckMbps int
+
+	// PathRTTMicros is the end-to-end accumulated smoothed RTT, used by the
+	// data plane for weighted ECMP. Negative means unknown.
+	PathRTTMicros int64
 }
 
 func (r *Route) key() (netip.Prefix, netip.Addr) {
@@ -102,5 +119,5 @@ func (r *Route) updateSmoothedMetric(alpha float64) {
 
 // fingerprint returns a stable string identity for change detection.
 func (r *Route) fingerprint() string {
-	return r.Source.Prefix.String() + "/" + hex.EncodeToString(r.Source.RouterID[:]) + "/" + r.NextHop.String()
+	return fmt.Sprintf("%s/%s/%s/%d/%d", r.Source.Prefix, hex.EncodeToString(r.Source.RouterID[:]), r.NextHop, r.PathBottleneckMbps, r.PathRTTMicros)
 }

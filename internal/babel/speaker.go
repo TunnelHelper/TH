@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/babel/proto"
+	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
 
@@ -45,14 +46,22 @@ type SpeakerConfig struct {
 	// configured static neighbours.
 	StrictNeighbours bool
 
-	// Multicast enables multicast Hellos and updates. Disable it on links
-	// that cannot carry multicast (WireGuard, unicast VXLAN).
-	Multicast bool
+	// MulticastInterfaces lists the interfaces that can carry multicast
+	// Hellos and updates (single-peer WireGuard with multicast-covered
+	// AllowedIPs, GRE, multicast-capable VXLAN). Interfaces not listed run
+	// in unicast mode with static neighbours and unicast Hellos.
+	MulticastInterfaces map[string]bool
 
 	// Cost plugs custom cost and metric computation in (RFC 8966
 	// Sections 3.4.3 and 3.5.2). When nil, the default wired behaviour
 	// (2-out-of-3 sensing, additive metrics) is used.
 	Cost *CostProvider
+
+	// InterfaceBandwidth maps interface names to their declared usable
+	// bandwidth in Mbps. Zero means unset (unlimited). It is the per-hop
+	// contribution of the end-to-end bottleneck bandwidth announced in
+	// Babel updates.
+	InterfaceBandwidth map[string]int
 
 	Logger *slog.Logger
 }
@@ -81,6 +90,21 @@ func (c *SpeakerConfig) SetDefaults() error {
 	}
 	if c.MaxPaths < 1 {
 		c.MaxPaths = DefaultMaxPaths
+	}
+	if c.DelayMin <= 0 {
+		c.DelayMin = DefaultDelayMin
+	}
+	if c.DelayMax <= c.DelayMin {
+		c.DelayMax = DefaultDelayMax
+	}
+	if c.DelayMaxPenalty == 0 {
+		c.DelayMaxPenalty = DefaultDelayMaxPenalty
+	}
+	if c.DelaySmoothingAlpha <= 0 || c.DelaySmoothingAlpha > 1 {
+		c.DelaySmoothingAlpha = DefaultDelayAlpha
+	}
+	if c.BottleneckPenalty < 0 {
+		c.BottleneckPenalty = 0
 	}
 	if c.RouteExpiryTime == 0 {
 		c.RouteExpiryTime = DefaultRouteExpiryTime
@@ -119,7 +143,8 @@ type Speaker struct {
 	Sources    SourceTable
 	Routes     RouteTable
 
-	conn *ipv6.PacketConn
+	conn6 *ipv6.PacketConn
+	conn4 *ipv4.PacketConn
 
 	config       SpeakerConfig
 	costProvider *CostProvider
@@ -169,13 +194,18 @@ func NewSpeaker(cfg *SpeakerConfig) (*Speaker, error) {
 	}
 
 	var err error
-	if s.conn, err = s.createConn(); err != nil {
-		return nil, fmt.Errorf("failed to create conn: %w", err)
+	if s.conn6, err = s.createConn6(); err != nil {
+		return nil, fmt.Errorf("failed to create IPv6 conn: %w", err)
+	}
+	if s.conn4, err = s.createConn4(); err != nil {
+		s.conn6.Close()
+		return nil, fmt.Errorf("failed to create IPv4 conn: %w", err)
 	}
 
 	intfs, err := net.Interfaces()
 	if err != nil {
-		s.conn.Close()
+		s.conn6.Close()
+		s.conn4.Close()
 		return nil, fmt.Errorf("failed to get interfaces: %w", err)
 	}
 
@@ -192,7 +222,8 @@ func NewSpeaker(cfg *SpeakerConfig) (*Speaker, error) {
 			for _, createdInterface := range created {
 				_ = createdInterface.Close()
 			}
-			s.conn.Close()
+			s.conn6.Close()
+			s.conn4.Close()
 			return nil, fmt.Errorf("failed to create interface: %w", err)
 		}
 
@@ -205,10 +236,11 @@ func NewSpeaker(cfg *SpeakerConfig) (*Speaker, error) {
 	}
 
 	s.sweepTicker = time.NewTicker(time.Second)
-	s.workerWG.Add(3)
+	s.workerWG.Add(4)
 	go s.runSweep()
 	go s.runNotifier()
-	go s.runReadLoop()
+	go s.runReadLoop6()
+	go s.runReadLoop4()
 
 	return s, nil
 }
@@ -223,7 +255,10 @@ func (s *Speaker) Close() error {
 			closeErr = errors.Join(closeErr, i.Close())
 			return nil
 		})
-		if err := s.conn.Close(); err != nil {
+		if err := s.conn6.Close(); err != nil {
+			closeErr = errors.Join(closeErr, err)
+		}
+		if err := s.conn4.Close(); err != nil {
 			closeErr = errors.Join(closeErr, err)
 		}
 		s.workerWG.Wait()
@@ -266,6 +301,7 @@ func (s *Speaker) Advertise(pfx netip.Prefix, metric proto.Metric) error {
 			SeqNo:            seqno,
 			Feasible:         true,
 			Local:            true,
+			PathRTTMicros:    0,
 		}
 		s.Routes.Insert(r)
 		s.logger.Info("Added local route", slog.String("prefix", pfx.String()), slog.Int("metric", int(metric)))
@@ -339,6 +375,21 @@ func (s *Speaker) SetNeighbourCost(ifName string, addr netip.Addr, cost proto.Me
 	if n, ok := i.Neighbours.Lookup(addr); ok {
 		n.SetCostOverride(cost)
 	}
+}
+
+// NeighbourRTT returns the smoothed RTT measured for a neighbour. It is the
+// raw signal the data plane uses for weighted-ECMP decisions, independent
+// of the bounded protocol cost.
+func (s *Speaker) NeighbourRTT(ifName string, addr netip.Addr) (time.Duration, bool) {
+	i, ok := s.Interfaces.LookupByName(ifName)
+	if !ok {
+		return 0, false
+	}
+	n, ok := i.Neighbours.Lookup(addr)
+	if !ok {
+		return 0, false
+	}
+	return n.RTT(), n.HasRTT()
 }
 
 func (s *Speaker) runSweep() {
@@ -455,31 +506,51 @@ func (s *Speaker) advertisedRoutes(iface *Interface) (updates, retractions []*Ro
 
 // encodeRoutes builds the RouterId/NextHop/Update TLV sequence for the
 // given routes, updating source-table feasibility distances first.
-func (s *Speaker) encodeRoutes(iface *Interface, routes []*Route) []proto.Value {
+func (s *Speaker) encodeRoutes(iface *Interface, routes []*Route, rttMicros int64) []proto.Value {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	values := make([]proto.Value, 0, len(routes)*3)
 	var linkLocal netip.Addr
+	var interfaceV4 netip.Addr
+	if ip, err := iface.findLinkLocalAddress(); err == nil {
+		if addr, ok := netip.AddrFromSlice(ip); ok {
+			linkLocal = addr
+		}
+	}
+	if ip := iface.sourceAddress4(); ip != nil {
+		if addr, ok := netip.AddrFromSlice(ip); ok {
+			interfaceV4 = addr
+		}
+	}
 	for _, r := range routes {
+		isV4 := r.Source.Prefix.Addr().Is4()
+		// The advertised next hop is this node's own address on the
+		// outgoing interface: the receiver must send towards us.
+		var nextHop netip.Addr
+		if isV4 && interfaceV4.IsValid() {
+			nextHop = interfaceV4
+		} else if linkLocal.IsValid() {
+			nextHop = linkLocal
+		}
+		// v4-via-v6 is only used when the outgoing interface has no IPv4
+		// address (RFC 9229 Section 2.1).
+		v4ViaV6 := isV4 && !interfaceV4.IsValid()
+
 		if r.Local {
-			if !linkLocal.IsValid() {
-				if ip, err := iface.findLinkLocalAddress(); err == nil {
-					if addr, ok := netip.AddrFromSlice(ip); ok {
-						linkLocal = addr
-					}
-				}
-			}
 			values = append(values, &proto.RouterIDValue{RouterID: s.config.RouterID})
-			if linkLocal.IsValid() {
-				values = append(values, &proto.NextHop{NextHop: linkLocal})
+			if nextHop.IsValid() {
+				values = append(values, &proto.NextHop{NextHop: nextHop})
 			}
 			s.sourceFeasibilityLocked(r.Source.Prefix, s.config.RouterID, r.SeqNo, int(r.AdvertisedMetric))
 			values = append(values, &proto.Update{
-				Prefix:   r.Source.Prefix,
-				Seqno:    r.SeqNo,
-				Metric:   r.AdvertisedMetric,
-				Interval: s.config.UpdateInterval,
+				Prefix:             r.Source.Prefix,
+				Seqno:              r.SeqNo,
+				Metric:             r.AdvertisedMetric,
+				Interval:           s.config.UpdateInterval,
+				V4ViaV6:            v4ViaV6,
+				PathBottleneckMbps: iface.bandwidthMbps,
+				PathRTTMicros:      rttMicros,
 			})
 			continue
 		}
@@ -487,13 +558,31 @@ func (s *Speaker) encodeRoutes(iface *Interface, routes []*Route) []proto.Value 
 			continue
 		}
 		values = append(values, &proto.RouterIDValue{RouterID: r.Source.RouterID})
-		values = append(values, &proto.NextHop{NextHop: r.NextHop})
+		if nextHop.IsValid() {
+			values = append(values, &proto.NextHop{NextHop: nextHop})
+		}
 		s.sourceFeasibilityLocked(r.Source.Prefix, r.Source.RouterID, r.SeqNo, int(r.Metric))
+		bottleneckOut := 0
+		switch {
+		case r.PathBottleneckMbps > 0 && iface.bandwidthMbps > 0:
+			bottleneckOut = min(r.PathBottleneckMbps, iface.bandwidthMbps)
+		case r.PathBottleneckMbps > 0:
+			bottleneckOut = r.PathBottleneckMbps
+		case iface.bandwidthMbps > 0:
+			bottleneckOut = iface.bandwidthMbps
+		}
+		rttOut := rttMicros
+		if r.PathRTTMicros > 0 {
+			rttOut += r.PathRTTMicros
+		}
 		values = append(values, &proto.Update{
-			Prefix:   r.Source.Prefix,
-			Seqno:    r.SeqNo,
-			Metric:   r.Metric,
-			Interval: s.config.UpdateInterval,
+			Prefix:             r.Source.Prefix,
+			Seqno:              r.SeqNo,
+			Metric:             r.Metric,
+			Interval:           s.config.UpdateInterval,
+			V4ViaV6:            v4ViaV6,
+			PathBottleneckMbps: bottleneckOut,
+			PathRTTMicros:      rttOut,
 		})
 	}
 	return values
@@ -554,6 +643,9 @@ func (s *Speaker) LocalSeqNo() proto.SequenceNumber {
 // onUpdateReceived implements RFC 8966 Section 3.5.3 (route acquisition).
 func (s *Speaker) onUpdateReceived(n *Neighbour, upd *proto.Update) {
 	pfx := upd.Prefix.Masked()
+	if pfx.Addr().Is4In6() {
+		pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits())
+	}
 	rid := upd.RouterID
 	if rid == proto.RouterIDUnspecified {
 		s.logger.Debug("Ignoring update without router-id", slog.String("prefix", pfx.String()))
@@ -591,12 +683,14 @@ func (s *Speaker) onUpdateReceived(n *Neighbour, upd *proto.Update) {
 					SeqNo:    upd.Seqno,
 					Metric:   int(upd.Metric),
 				},
-				Neighbour:        n,
-				AdvertisedMetric: upd.Metric,
-				SeqNo:            upd.Seqno,
-				NextHop:          nextHop,
-				Feasible:         true,
-				Expiry:           time.Now().Add(s.config.RouteExpiryTime),
+				Neighbour:          n,
+				AdvertisedMetric:   upd.Metric,
+				SeqNo:              upd.Seqno,
+				NextHop:            nextHop,
+				Feasible:           true,
+				Expiry:             time.Now().Add(s.config.RouteExpiryTime),
+				PathBottleneckMbps: upd.PathBottleneckMbps,
+				PathRTTMicros:      upd.PathRTTMicros,
 			}
 			s.Routes.Insert(r)
 			s.logger.Info("Learnt route",
@@ -614,6 +708,8 @@ func (s *Speaker) onUpdateReceived(n *Neighbour, upd *proto.Update) {
 			r.AdvertisedMetric = upd.Metric
 			r.Feasible = feasible
 			r.Expired = false
+			r.PathBottleneckMbps = upd.PathBottleneckMbps
+			r.PathRTTMicros = upd.PathRTTMicros
 			if upd.NextHop.IsValid() {
 				r.NextHop = upd.NextHop
 			}
@@ -723,6 +819,16 @@ func (s *Speaker) runSelectionLocked() selectionResult {
 			}
 			cost := r.Neighbour.Cost()
 			r.Metric = s.costProvider.Metric(cost, r.AdvertisedMetric)
+			if s.config.BottleneckPenalty > 0 && r.PathBottleneckMbps > 0 && r.Metric != proto.Retraction {
+				penalty := uint16(s.config.BottleneckPenalty / float64(r.PathBottleneckMbps))
+				if penalty > 0 {
+					if int(r.Metric)+int(penalty) > int(proto.Retraction)-1 {
+						r.Metric = proto.Retraction - 1
+					} else {
+						r.Metric += penalty
+					}
+				}
+			}
 			r.updateSmoothedMetric(s.config.SmoothingAlpha)
 			if r.Feasible && r.Metric != proto.Retraction {
 				candidates = append(candidates, r)
@@ -861,12 +967,14 @@ func (s *Speaker) exportForPrefixLocked(pfx netip.Prefix, selected *Route) []Sel
 			ifName = r.Neighbour.intf.Name
 		}
 		out = append(out, SelectedRoute{
-			Prefix:    r.Source.Prefix,
-			RouterID:  r.Source.RouterID,
-			NextHop:   r.NextHop,
-			Interface: ifName,
-			Metric:    r.Metric,
-			Local:     r.Local,
+			Prefix:         r.Source.Prefix,
+			RouterID:       r.Source.RouterID,
+			NextHop:        r.NextHop,
+			Interface:      ifName,
+			Metric:         r.Metric,
+			Local:          r.Local,
+			BottleneckMbps: r.PathBottleneckMbps,
+			PathRTTMicros:  r.PathRTTMicros,
 		})
 	}
 	return out
@@ -881,14 +989,14 @@ func (s *Speaker) exportFingerprintLocked(pfx netip.Prefix, selected *Route) str
 	return strings.Join(parts, ",")
 }
 
-func (s *Speaker) runReadLoop() {
+func (s *Speaker) runReadLoop6() {
 	defer s.workerWG.Done()
 	s.logger.Debug("Start receiving packets")
 
 	buf := make([]byte, 1500)
 
 	for {
-		n, cm, sAddr, err := s.conn.ReadFrom(buf)
+		n, cm, sAddr, err := s.conn6.ReadFrom(buf)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
@@ -898,6 +1006,7 @@ func (s *Speaker) runReadLoop() {
 		}
 
 		srcAddr := proto.AddressFrom(sAddr).WithZone("")
+		rxTime := timestampNow()
 		dstAddr, ok := netip.AddrFromSlice(cm.Dst)
 		if !ok {
 			s.logger.Error("Invalid destination address")
@@ -929,14 +1038,68 @@ func (s *Speaker) runReadLoop() {
 			continue
 		}
 
-		if err := s.onPacket(pkt, cm.IfIndex, srcAddr, dstAddr); err != nil {
+		if err := s.onPacket(pkt, cm.IfIndex, srcAddr, dstAddr, rxTime); err != nil {
 			s.logger.Error("Failed to handle packet", slog.Any("error", err))
 			continue
 		}
 	}
 }
 
-func (s *Speaker) createConn() (*ipv6.PacketConn, error) {
+func (s *Speaker) runReadLoop4() {
+	defer s.workerWG.Done()
+	s.logger.Debug("Start receiving IPv4 packets")
+
+	buf := make([]byte, 1500)
+
+	for {
+		n, cm, sAddr, err := s.conn4.ReadFrom(buf)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			s.logger.Error("Failed to read from IPv4 socket", slog.Any("error", err))
+			continue
+		}
+
+		srcAddr := proto.AddressFrom(sAddr).WithZone("")
+		if srcAddr.Is4() {
+			// Neighbour keys are normalised to the 4-in-6 form.
+			srcAddr = netip.AddrFrom16(srcAddr.As16())
+		}
+		dstAddr, ok := netip.AddrFromSlice(cm.Dst)
+		if !ok {
+			s.logger.Error("Invalid IPv4 destination address")
+			continue
+		}
+
+		if udpAddr, ok := sAddr.(*net.UDPAddr); !ok {
+			s.logger.Debug("Ignoring non UDP source address", slog.Any("saddr", sAddr))
+			continue
+		} else if udpAddr.Port != Port {
+			s.logger.Debug("Ignoring packet from non-babel source port", slog.Any("saddr", udpAddr))
+			continue
+		}
+
+		if !proto.IsBabelPacket(buf[:n]) {
+			s.logger.Debug("Ignoring non-babel packet")
+			continue
+		}
+
+		p := proto.NewParser()
+		_, pkt, err := p.Packet(buf[:n])
+		if err != nil {
+			s.logger.Error("Failed to decode packet", slog.Any("error", err))
+			continue
+		}
+
+		if err := s.onPacket(pkt, cm.IfIndex, srcAddr, dstAddr, timestampNow()); err != nil {
+			s.logger.Error("Failed to handle packet", slog.Any("error", err))
+			continue
+		}
+	}
+}
+
+func (s *Speaker) createConn6() (*ipv6.PacketConn, error) {
 	udpConn, err := net.ListenUDP("udp6", &net.UDPAddr{
 		Port: Port,
 	})
@@ -965,11 +1128,37 @@ func (s *Speaker) createConn() (*ipv6.PacketConn, error) {
 	return pktConn, nil
 }
 
-func (s *Speaker) onPacket(pkt *proto.Packet, ifIndex int, srcAddr, dstAddr proto.Address) error {
+func (s *Speaker) createConn4() (*ipv4.PacketConn, error) {
+	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{
+		Port: Port,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create IPv4 socket: %w", err)
+	}
+
+	pktConn := ipv4.NewPacketConn(udpConn)
+
+	if err := pktConn.SetControlMessage(ipv4.FlagDst|ipv4.FlagInterface|ipv4.FlagSrc, true); err != nil {
+		return nil, fmt.Errorf("failed to set IPv4 control messages: %w", err)
+	}
+	if err := pktConn.SetTTL(1); err != nil {
+		return nil, fmt.Errorf("failed to set IPv4 TTL: %w", err)
+	}
+	if err := pktConn.SetMulticastTTL(1); err != nil {
+		return nil, fmt.Errorf("failed to set multicast TTL: %w", err)
+	}
+	if err := pktConn.SetMulticastLoopback(false); err != nil {
+		return nil, fmt.Errorf("failed to disable multicast loopback: %w", err)
+	}
+
+	return pktConn, nil
+}
+
+func (s *Speaker) onPacket(pkt *proto.Packet, ifIndex int, srcAddr, dstAddr proto.Address, rxTime proto.Timestamp) error {
 	i, ok := s.Interfaces.Lookup(ifIndex)
 	if !ok {
 		s.logger.Debug("Ignoring packet from unknown interface", slog.Int("ifindex", ifIndex))
 		return nil
 	}
-	return i.onPacket(pkt, srcAddr, dstAddr)
+	return i.onPacket(pkt, srcAddr, dstAddr, rxTime)
 }

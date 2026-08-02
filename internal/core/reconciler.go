@@ -222,7 +222,7 @@ func backendEventMatches(event BackendEvent, record model.Tunnel) bool {
 				return true
 			}
 		}
-		if record.Kind == model.KindBabel && event.RouteTable == model.BabelRouteTable(record) {
+		if record.Spec.Babel != nil && record.Spec.Babel.Enabled && event.Type == BackendEventRoute {
 			return true
 		}
 	}

@@ -217,6 +217,46 @@ func TestEventStreamSendsReplayAndLiveEvents(t *testing.T) {
 	}
 }
 
+func TestSettingsAPI(t *testing.T) {
+	manager := &stubManager{}
+	server := httptest.NewServer(NewServer(manager).Handler())
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/v1/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /v1/settings = %d, want 200", response.StatusCode)
+	}
+	response.Body.Close()
+
+	body := `{"router_id":"0011223344556677","route_table":100,"multipath_slack":256}`
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/v1/settings", bytes.NewBufferString(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("PUT /v1/settings = %d, want 200", response.StatusCode)
+	}
+	var updated config.BabelSettings
+	if err := json.NewDecoder(response.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if updated.RouterID != "0011223344556677" || updated.MultipathSlack != 256 {
+		t.Fatalf("updated settings = %+v", updated)
+	}
+	if manager.babelSettings.RouterID != "0011223344556677" {
+		t.Fatal("manager must receive the updated settings")
+	}
+}
+
 func TestUnixServerAndTypedClient(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("Unix socket ownership test requires root, as does thd")
@@ -345,15 +385,17 @@ func assertAPIError(t *testing.T, response *http.Response, status int, code stri
 }
 
 type stubManager struct {
-	view            model.TunnelView
-	views           []model.TunnelView
-	health          map[model.Kind]core.BackendHealth
-	events          *core.EventHub
-	getErr          error
-	updateErr       error
-	observeCalls    int
-	observeAllCalls int
-	reconcileCalls  int
+	view              model.TunnelView
+	views             []model.TunnelView
+	health            map[model.Kind]core.BackendHealth
+	events            *core.EventHub
+	babelSettings     config.BabelSettings
+	getErr            error
+	updateErr         error
+	updateSettingsErr error
+	observeCalls      int
+	observeAllCalls   int
+	reconcileCalls    int
 }
 
 func (m *stubManager) List() ([]model.TunnelView, error) {
@@ -419,4 +461,16 @@ func (m *stubManager) BuildBackup() (backup.Archive, error) {
 }
 func (m *stubManager) RestoreBackup(context.Context, backup.Archive, bool, bool) (core.RestoreResult, error) {
 	return core.RestoreResult{}, nil
+}
+
+func (m *stubManager) Settings() (config.BabelSettings, error) {
+	return m.babelSettings, nil
+}
+
+func (m *stubManager) UpdateSettings(_ context.Context, settings config.BabelSettings) error {
+	if m.updateSettingsErr != nil {
+		return m.updateSettingsErr
+	}
+	m.babelSettings = settings
+	return nil
 }

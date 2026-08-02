@@ -430,3 +430,104 @@ func TestSeqnoRequestConcurrent(t *testing.T) {
 	<-done
 	n.queue.Close()
 }
+
+func TestDelayCostMapping(t *testing.T) {
+	if got := DelayCost(5*time.Millisecond, 96, 10*time.Millisecond, 120*time.Millisecond, 150); got != 96 {
+		t.Errorf("below rtt-min must keep nominal cost, got %d", got)
+	}
+	if got := DelayCost(65*time.Millisecond, 96, 10*time.Millisecond, 120*time.Millisecond, 150); got != 96+75 {
+		t.Errorf("mid range must scale linearly, got %d", got)
+	}
+	if got := DelayCost(200*time.Millisecond, 96, 10*time.Millisecond, 120*time.Millisecond, 150); got != 96+150 {
+		t.Errorf("at or above rtt-max must cap at the penalty, got %d", got)
+	}
+}
+
+func TestComputeRTT(t *testing.T) {
+	s := newTestSpeaker(t)
+	s.config.DelayMetric = true
+	n := newFakeNeighbour(s, "fe80::1", 96)
+
+	// A sends Hello(t1); B receives at t1'; B sends Hello(t2') + IHU(t1, t1');
+	// A receives at t2. RTT = (t2 - t1) - (t2' - t1').
+	t1 := uint32(1_000_000)
+	t1p := uint32(1_001_000)
+	t2p := uint32(1_005_000)
+	t2 := uint32(1_006_000)
+	n.computeRTT(t2, &proto.TimestampHello{Transmit: t2p}, &proto.TimestampIHU{Origin: t1, Receive: t1p})
+
+	if !n.HasRTT() || n.RTT() != 2*time.Millisecond {
+		t.Fatalf("rtt = %v (has=%v), want 2ms", n.RTT(), n.HasRTT())
+	}
+	if got := n.Cost(); got != 96 {
+		t.Errorf("2ms RTT must keep nominal cost 96, got %d", got)
+	}
+
+	// A stale sample (origin more than 3 minutes old) must be discarded.
+	before := n.RTT()
+	n.computeRTT(t2+uint32(4*time.Minute/time.Microsecond), &proto.TimestampHello{Transmit: t2p}, &proto.TimestampIHU{Origin: t1, Receive: t1p})
+	if n.RTT() != before {
+		t.Errorf("stale RTT sample must be discarded, rtt changed to %v", n.RTT())
+	}
+}
+
+func TestPathMetricsPropagation(t *testing.T) {
+	s := newTestSpeaker(t)
+	pfx := netip.MustParsePrefix("10.0.0.0/24")
+	if err := s.Advertise(pfx, LocalRouteMetric); err != nil {
+		t.Fatal(err)
+	}
+	local, ok := s.Routes.LookupByNeighbour(pfx, nil)
+	if !ok {
+		t.Fatal("local route must exist")
+	}
+
+	ifaceAB := &Interface{
+		Interface:     &net.Interface{Name: "ab", Index: 1},
+		bandwidthMbps: 10,
+		speaker:       s,
+		logger:        s.logger,
+	}
+	// Hop A->B: source bottleneck is unlimited, the outgoing interface
+	// declares 10 Mbps and the link RTT is 500 us.
+	values := s.encodeRoutes(ifaceAB, []*Route{local}, 500)
+	var hopAB *proto.Update
+	for _, value := range values {
+		if update, ok := value.(*proto.Update); ok {
+			hopAB = update
+		}
+	}
+	if hopAB == nil || hopAB.PathBottleneckMbps != 10 || hopAB.PathRTTMicros != 500 {
+		t.Fatalf("hop A->B path metrics = (%d, %d), want (10, 500)", hopAB.PathBottleneckMbps, hopAB.PathRTTMicros)
+	}
+
+	// B learns the route and re-advertises on a 1000 Mbps interface with
+	// an additional 300 us of RTT: bottleneck stays 10, RTT accumulates.
+	learned := &Route{
+		Source:             &Source{Prefix: pfx, RouterID: proto.RouterID{5}},
+		Neighbour:          newFakeNeighbour(s, "fe80::b", 96),
+		AdvertisedMetric:   100,
+		Metric:             196,
+		SeqNo:              1,
+		NextHop:            netip.MustParseAddr("fe80::b"),
+		Feasible:           true,
+		PathBottleneckMbps: 10,
+		PathRTTMicros:      500,
+	}
+	ifaceBC := &Interface{
+		Interface:     &net.Interface{Name: "bc", Index: 2},
+		bandwidthMbps: 1000,
+		speaker:       s,
+		logger:        s.logger,
+	}
+	values = s.encodeRoutes(ifaceBC, []*Route{learned}, 300)
+	var hopBC *proto.Update
+	for _, value := range values {
+		if update, ok := value.(*proto.Update); ok {
+			hopBC = update
+		}
+	}
+	if hopBC == nil || hopBC.PathBottleneckMbps != 10 || hopBC.PathRTTMicros != 800 {
+		t.Fatalf("hop B->C path metrics = (%d, %d), want (10, 800)", hopBC.PathBottleneckMbps, hopBC.PathRTTMicros)
+	}
+}

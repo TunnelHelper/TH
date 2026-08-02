@@ -45,7 +45,8 @@ This document is the authoritative scope for the current architecture.
 - XFRM interface with IKEv2 managed by strongSwan VICI
 - Static-key XFRM
 - SRv6 route sets
-- Babel (RFC 8966) dynamic routing as an in-process backend
+- Babel (RFC 8966) dynamic routing as an in-process, per-tunnel control
+  plane
 
 ## Process Architecture
 
@@ -178,15 +179,20 @@ atomically in the daemon state directory, and apply exact routes with netlink
 
 ### Babel
 
-Run the Babel routing protocol (RFC 8966) inside the daemon on TH-managed
-tunnel interfaces. Implement route acquisition, periodic and triggered
-updates, feasibility checking, route selection with hysteresis (Appendix
-A.3), explicit requests, and route expiry. Bootstrap non-multicast links
-(WireGuard, unicast VXLAN) with configured static neighbours and unicast
-Hellos. Keep cost and metric computation pluggable so measured bandwidth
-can drive decisions, and export feasible multipath candidates so the daemon
-can install weighted ECMP routes. Install selected routes with TH ownership
-tags and reconcile them per record without touching unrelated routes.
+Run the Babel routing protocol (RFC 8966) inside the daemon as a single
+engine fed by every tunnel with `spec.babel.enabled` set. Link mode is
+per interface: single-peer WireGuard and point-to-point GRE/VXLAN use
+multicast auto-discovery; multi-peer WireGuard meshes use unicast Hellos
+with neighbours derived from the peers' public-key link-local addresses
+(stable LLA assignment keyed by the tunnel's own public key). Advertised
+prefixes are node-global: discovered from the configured source interfaces
+(default `lo`) and filtered by include/exclude lists in the daemon settings.
+Link cost uses the RFC 9616 delay-based metric (RTT measured in Hello/IHU
+timestamps, mapped with the bounded linear cost curve and hysteresis);
+IPv4 prefixes are announced with the RFC 9229 v4-via-v6 encoding so they
+flow over LLA-only links. ECMP split weights are derived from each tunnel's
+declared bandwidth. Install selected routes with TH ownership tags and
+reconcile them without touching unrelated routes.
 
 ## Packaging and Privilege
 
@@ -227,7 +233,8 @@ names. Ownership conflicts are reported by the daemon and never adopted.
 3. WireGuard and static-key XFRM.
 4. IKEv2 XFRM through VICI, including PSK and RPK.
 5. SRv6 and AmneziaWG.
-6. Babel dynamic routing with weighted multipath.
+6. Babel dynamic routing with per-tunnel participation, RTT costs and
+   bandwidth-weighted multipath.
 7. Packaging assets, hardening, and documentation.
 8. Remove all V1 execution/config-generation code and pass the completion
    audit below.

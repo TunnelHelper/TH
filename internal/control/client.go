@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/backup"
+	"github.com/TunnelHelper/TH/internal/config"
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
 )
@@ -275,6 +276,18 @@ func (c *Client) RestoreBackup(ctx context.Context, passphrase string, reader io
 		return core.RestoreResult{}, fmt.Errorf("decode daemon response: %w", err)
 	}
 	return result, nil
+}
+
+// Settings returns the daemon's Babel settings.
+func (c *Client) Settings(ctx context.Context) (config.BabelSettings, error) {
+	var settings config.BabelSettings
+	err := c.do(ctx, http.MethodGet, "/v1/settings", nil, 0, &settings)
+	return settings, err
+}
+
+// UpdateSettings persists and applies new Babel settings.
+func (c *Client) UpdateSettings(ctx context.Context, settings config.BabelSettings) error {
+	return c.do(ctx, http.MethodPut, "/v1/settings", settings, 0, &settings)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, generation uint64, target any) error {

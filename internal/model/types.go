@@ -33,7 +33,6 @@ const (
 	KindXFRMStatic Kind = "xfrm-static"
 	KindXFRMIKEv2  Kind = "xfrm-ikev2"
 	KindSRv6       Kind = "srv6"
-	KindBabel      Kind = "babel"
 )
 
 var Kinds = []Kind{
@@ -44,7 +43,6 @@ var Kinds = []Kind{
 	KindXFRMStatic,
 	KindXFRMIKEv2,
 	KindSRv6,
-	KindBabel,
 }
 
 type Tunnel struct {
@@ -68,7 +66,11 @@ type Spec struct {
 	XFRMStatic *XFRMStaticSpec `json:"xfrm_static,omitempty"`
 	XFRMIKEv2  *XFRMIKEv2Spec  `json:"xfrm_ikev2,omitempty"`
 	SRv6       *SRv6Spec       `json:"srv6,omitempty"`
-	Babel      *BabelSpec      `json:"babel,omitempty"`
+
+	// Babel optionally enables the in-process Babel routing protocol on
+	// this tunnel. Tunnels without this section (or with enabled=false)
+	// never participate in Babel.
+	Babel *BabelTunnelConfig `json:"babel,omitempty"`
 }
 
 type GRESpec struct {
@@ -200,54 +202,29 @@ type SRv6Source struct {
 	MTU       int               `json:"mtu"`
 }
 
-// BabelSpec configures the in-process Babel routing protocol (RFC 8966).
-// The daemon runs the protocol itself and installs the selected routes into
-// TH-owned route tables; no external routing daemon is involved.
-type BabelSpec struct {
-	// Interfaces lists the tunnel interfaces the protocol runs on. They
-	// must be links managed by TH.
-	Interfaces []string `json:"interfaces"`
+// BabelTunnelConfig is the per-tunnel Babel participation switch. The
+// protocol itself runs in a single daemon-wide engine that aggregates every
+// tunnel with Enabled set.
+type BabelTunnelConfig struct {
+	// Enabled controls whether this tunnel participates in Babel.
+	Enabled bool `json:"enabled"`
 
-	// StaticNeighbours maps an interface name to the unicast addresses of
-	// its Babel peers. Required for bootstrap on non-multicast links
-	// (WireGuard, unicast VXLAN); optional elsewhere.
-	StaticNeighbours map[string][]netip.Addr `json:"static_neighbours,omitempty"`
+	// BandwidthMbps is the operator-declared usable bandwidth of this
+	// tunnel. It drives the ECMP next-hop weights (256 * bw_i / bw_best).
+	// Zero means the tunnel has no bandwidth claim and gets a default
+	// weight.
+	BandwidthMbps int `json:"bandwidth_mbps,omitempty"`
 
-	// StrictNeighbours restricts non-multicast interfaces to packets from
-	// configured static neighbours.
-	StrictNeighbours bool `json:"strict_neighbours,omitempty"`
+	// Neighbours optionally overrides or extends the automatically derived
+	// Babel neighbours of this tunnel. Auto-derived neighbours are the
+	// tunnel peers (WireGuard public keys) and explicit entries here.
+	Neighbours []netip.Addr `json:"neighbours,omitempty"`
 
-	// UnicastHelloSeconds enables periodic unicast Hellos used to form and
-	// keep adjacencies on links without multicast. Zero means disabled.
-	UnicastHelloSeconds int `json:"unicast_hello_seconds,omitempty"`
-
-	// Multicast enables multicast Hellos and updates. Disable on links
-	// that cannot carry multicast.
-	Multicast bool `json:"multicast,omitempty"`
-
-	// RouteTable is the kernel table Babel routes are installed into. Zero
-	// means the main table.
-	RouteTable int `json:"route_table,omitempty"`
-
-	// AdvertisedPrefixes are prefixes originated by this node (for example
-	// tunnel subnets) and announced into the Babel domain.
-	AdvertisedPrefixes []netip.Prefix `json:"advertised_prefixes,omitempty"`
-
-	// MaxPaths limits the number of next hops installed for one prefix.
-	// Zero means the default (4).
-	MaxPaths int `json:"max_paths,omitempty"`
-
-	// MultipathSlack is the maximum extra metric for which an additional
-	// feasible route is still used as a multipath candidate. Zero means
-	// equal-cost multipath only.
-	MultipathSlack int `json:"multipath_slack,omitempty"`
-
-	// SplitHorizon controls the RFC 8966 Section 3.7.4 optimisation.
-	SplitHorizon *bool `json:"split_horizon,omitempty"`
-
-	// RouterID is the stable 8-octet router identifier as 16 lowercase hex
-	// characters. When empty, a random one is generated at record creation.
-	RouterID string `json:"router_id,omitempty"`
+	// Multicast overrides the auto-selected Babel link mode: single-peer
+	// WireGuard and point-to-point tunnels use multicast auto-discovery,
+	// multi-peer WireGuard meshes use unicast + static neighbours. nil
+	// selects automatically.
+	Multicast *bool `json:"multicast,omitempty"`
 }
 
 type Phase string
