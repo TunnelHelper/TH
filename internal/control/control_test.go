@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -278,6 +279,45 @@ func TestSettingsAPI(t *testing.T) {
 	}
 	if !manager.mptcpSettings.Enabled || manager.mptcpSettings.Scheduler != "roundrobin" {
 		t.Fatalf("manager MPTCP settings = %+v", manager.mptcpSettings)
+	}
+}
+
+func TestSettingsAPICanClearValues(t *testing.T) {
+	current := config.Defaults()
+	current.Babel.RouterID = "0011223344556677"
+	current.Babel.RouteTable = 100
+	current.Babel.Advertise.AdvertisedPrefixes = []netip.Prefix{netip.MustParsePrefix("2001:db8::/32")}
+	current.Babel.Advertise.Include = []netip.Prefix{netip.MustParsePrefix("2001:db8::/32")}
+	current.Mptcp.Enabled = true
+	current.Mptcp.Scheduler = "roundrobin"
+	manager := &stubManager{babelSettings: current.Babel, mptcpSettings: current.Mptcp}
+	server := httptest.NewServer(NewServer(manager).Handler())
+	defer server.Close()
+
+	desired := config.Defaults()
+	payload, err := json.Marshal(DaemonSettings{Babel: desired.Babel, Mptcp: desired.Mptcp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPut, server.URL+"/v1/settings", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("PUT /v1/settings = %d, want 200", response.StatusCode)
+	}
+	if manager.babelSettings.RouterID != "" || manager.babelSettings.RouteTable != 0 ||
+		len(manager.babelSettings.Advertise.AdvertisedPrefixes) != 0 || len(manager.babelSettings.Advertise.Include) != 0 {
+		t.Fatalf("Babel values were not cleared: %+v", manager.babelSettings)
+	}
+	if manager.mptcpSettings.Enabled || manager.mptcpSettings.Scheduler != "" {
+		t.Fatalf("MPTCP values were not cleared: %+v", manager.mptcpSettings)
 	}
 }
 

@@ -57,3 +57,43 @@ func TestQueueSendsValue(t *testing.T) {
 		t.Fatalf("unexpected packet bytes: %x", packet)
 	}
 }
+
+func TestQueueStampsHelloAtTransmitTime(t *testing.T) {
+	writer := &captureWriter{}
+	q := queue.NewQueue(1500, writer)
+	defer func() {
+		if err := q.Close(); err != nil {
+			t.Errorf("close: %v", err)
+		}
+	}()
+
+	hello := &proto.Hello{
+		Seqno: 1, Interval: time.Second,
+		Timestamp: &proto.TimestampHello{Transmit: 1},
+	}
+	q.SendValue(hello, 20*time.Millisecond)
+
+	deadline := time.After(2 * time.Second)
+	for writer.Len() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("queue never sent the timestamped Hello")
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	writer.mu.Lock()
+	packetBytes := append([]byte(nil), writer.buf.Bytes()...)
+	writer.mu.Unlock()
+	_, packet, err := proto.NewParser().Packet(packetBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := packet.Body[0].(*proto.Hello)
+	if !ok || got.Timestamp == nil {
+		t.Fatalf("packet does not contain a timestamped Hello: %+v", packet.Body)
+	}
+	if got.Timestamp.Transmit == 1 {
+		t.Fatal("Hello retained its enqueue timestamp")
+	}
+}

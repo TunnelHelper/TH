@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/bits"
 	"net"
 	"net/netip"
 	"os"
@@ -196,6 +197,10 @@ func (e *babelEngine) health() core.BabelHealth {
 	if speaker == nil {
 		return health
 	}
+	for prefix := range e.advertised {
+		health.OriginatedPrefixes = append(health.OriginatedPrefixes, prefix.String())
+	}
+	sort.Strings(health.OriginatedPrefixes)
 	now := time.Now()
 	_ = speaker.Interfaces.Foreach(func(_ int, iface *babel.Interface) error {
 		return iface.Neighbours.Foreach(func(n *babel.Neighbour) error {
@@ -217,11 +222,12 @@ func (e *babelEngine) health() core.BabelHealth {
 		}
 		return health.Neighbours[i].Address < health.Neighbours[j].Address
 	})
-	health.Routes = e.routeHealthLocked(speaker.SelectedRoutes(), table)
+	sources := e.localOriginAddresses()
+	health.Routes = e.routeHealthLocked(speaker.SelectedRoutes(), table, sources)
 	return health
 }
 
-func (e *babelEngine) routeHealthLocked(selected []babel.SelectedRoute, table int) []core.BabelRouteHealth {
+func (e *babelEngine) routeHealthLocked(selected []babel.SelectedRoute, table int, sources []netip.Addr) []core.BabelRouteHealth {
 	byPrefix := make(map[netip.Prefix][]babel.SelectedRoute)
 	for _, route := range selected {
 		if !route.Local {
@@ -235,6 +241,7 @@ func (e *babelEngine) routeHealthLocked(selected []babel.SelectedRoute, table in
 	sort.Slice(prefixes, func(i, j int) bool { return prefixes[i].String() < prefixes[j].String() })
 	out := make([]core.BabelRouteHealth, 0, len(selected))
 	for _, prefix := range prefixes {
+		preferredSource := selectBabelPreferredSource(prefix, sources)
 		candidates := byPrefix[prefix]
 		sort.SliceStable(candidates, func(i, j int) bool {
 			if candidates[i].Metric != candidates[j].Metric {
@@ -259,7 +266,8 @@ func (e *babelEngine) routeHealthLocked(selected []babel.SelectedRoute, table in
 			confidence := float64(candidate.PathMetricConfidence) / float64(math.MaxUint16)
 			item := core.BabelRouteHealth{
 				Prefix: prefix.String(), Interface: candidate.Interface, NextHop: candidate.NextHop.String(),
-				Metric: candidate.Metric, BottleneckMbps: candidate.BottleneckMbps,
+				PreferredSource: ipString(preferredSource),
+				Metric:          candidate.Metric, BottleneckMbps: candidate.BottleneckMbps,
 				RTTMicros: candidate.PathRTTMicros, JitterMicros: candidate.PathJitterMicros,
 				AgeMillis: candidate.PathMetricAgeMillis, Confidence: confidence,
 				Score: scores[i], DesiredWeight: babelWeightFromScores(best, scores[i]),
@@ -646,7 +654,9 @@ func (e *babelEngine) installRoutes(speaker *babel.Speaker) error {
 		return e.removeOwnedRoutes()
 	}
 	selected := speaker.SelectedRoutes()
-	desired, err := babelRoutesToNetlink(e.table, selected, e.backend.resolveBabelLink, e.pathScore)
+	sources := e.localOriginAddresses()
+	desired, err := babelRoutesToNetlink(e.table, selected, e.backend.resolveBabelLink, e.pathScore,
+		func(prefix netip.Prefix) net.IP { return selectBabelPreferredSource(prefix, sources) })
 	if err != nil {
 		return err
 	}
@@ -1019,6 +1029,7 @@ func babelWeightFromScores(scoreBest, candidate float64) int {
 }
 
 type babelLinkResolver func(name string) (int, error)
+type babelSourceSelector func(prefix netip.Prefix) net.IP
 
 func (b *Backend) resolveBabelLink(name string) (int, error) {
 	link, err := b.linkByName(name)
@@ -1028,7 +1039,7 @@ func (b *Backend) resolveBabelLink(name string) (int, error) {
 	return link.Attrs().Index, nil
 }
 
-func babelRoutesToNetlink(table int, selected []babel.SelectedRoute, resolve babelLinkResolver, score func(babel.SelectedRoute) float64) ([]netlink.Route, error) {
+func babelRoutesToNetlink(table int, selected []babel.SelectedRoute, resolve babelLinkResolver, score func(babel.SelectedRoute) float64, source babelSourceSelector) ([]netlink.Route, error) {
 	byPrefix := make(map[netip.Prefix][]babel.SelectedRoute)
 	for _, route := range selected {
 		if route.Local {
@@ -1052,6 +1063,9 @@ func babelRoutesToNetlink(table int, selected []babel.SelectedRoute, resolve bab
 			Protocol: managedRouteProtocol,
 			Scope:    netlink.SCOPE_UNIVERSE,
 			Priority: babelRoutePriority,
+		}
+		if source != nil {
+			base.Src = source(prefix)
 		}
 		if len(candidates) == 1 {
 			linkIndex, gw, err := babelNextHop(resolve, candidates[0])
@@ -1156,7 +1170,7 @@ func equalBabelManagedRoute(current, desired netlink.Route) bool {
 		current.Scope != desired.Scope || current.Protocol != desired.Protocol {
 		return false
 	}
-	if !ipEqual(current.Gw, desired.Gw) || current.LinkIndex != desired.LinkIndex {
+	if !ipEqual(current.Gw, desired.Gw) || !ipEqual(current.Src, desired.Src) || current.LinkIndex != desired.LinkIndex {
 		return false
 	}
 	if len(current.MultiPath) != len(desired.MultiPath) {
@@ -1246,7 +1260,7 @@ func babelWeightOnlyChange(current []netlink.Route, desired netlink.Route) bool 
 		if len(existing.MultiPath) != len(desired.MultiPath) {
 			return false
 		}
-		if !ipEqual(existing.Gw, desired.Gw) || existing.LinkIndex != desired.LinkIndex {
+		if !ipEqual(existing.Gw, desired.Gw) || !ipEqual(existing.Src, desired.Src) || existing.LinkIndex != desired.LinkIndex {
 			return false
 		}
 		for i := range existing.MultiPath {
@@ -1265,4 +1279,94 @@ func ipEqual(a, b net.IP) bool {
 		return a == nil && b == nil
 	}
 	return a.Equal(b)
+}
+
+// localOriginAddresses returns usable local addresses covered by a prefix
+// currently originated by this speaker. Explicit aggregate advertisements are
+// allowed, but they only influence source selection when a matching address
+// actually exists on the node.
+func (e *babelEngine) localOriginAddresses() []netip.Addr {
+	if len(e.advertised) == 0 {
+		return nil
+	}
+	links, err := e.backend.netlink.LinkList()
+	if err != nil {
+		slog.Warn("Cannot enumerate local addresses for Babel preferred source", "error", err)
+		return nil
+	}
+	seen := make(map[netip.Addr]struct{})
+	for _, link := range links {
+		addresses, err := e.backend.netlink.AddrList(link, netlink.FAMILY_ALL)
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			if address.IPNet == nil || address.Flags&(unix.IFA_F_TENTATIVE|unix.IFA_F_DADFAILED|unix.IFA_F_DEPRECATED) != 0 {
+				continue
+			}
+			candidate, ok := netip.AddrFromSlice(address.IPNet.IP)
+			if !ok {
+				continue
+			}
+			candidate = candidate.Unmap()
+			if !candidate.IsGlobalUnicast() || candidate.IsLoopback() {
+				continue
+			}
+			for prefix := range e.advertised {
+				if prefix.Contains(candidate) {
+					seen[candidate] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+	result := make([]netip.Addr, 0, len(seen))
+	for address := range seen {
+		result = append(result, address)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Compare(result[j]) < 0 })
+	return result
+}
+
+func selectBabelPreferredSource(destination netip.Prefix, candidates []netip.Addr) net.IP {
+	target := destination.Addr().Unmap()
+	bestBits := -1
+	var best netip.Addr
+	for _, candidate := range candidates {
+		candidate = candidate.Unmap()
+		if !candidate.IsValid() || !candidate.IsGlobalUnicast() || candidate.IsLoopback() || candidate.BitLen() != target.BitLen() {
+			continue
+		}
+		matched := commonAddressPrefixBits(candidate, target)
+		if matched > bestBits || matched == bestBits && (!best.IsValid() || candidate.Compare(best) < 0) {
+			best, bestBits = candidate, matched
+		}
+	}
+	if !best.IsValid() {
+		return nil
+	}
+	return net.IP(best.AsSlice())
+}
+
+func commonAddressPrefixBits(a, b netip.Addr) int {
+	if a.BitLen() != b.BitLen() {
+		return -1
+	}
+	left, right := a.AsSlice(), b.AsSlice()
+	matched := 0
+	for i := range left {
+		if left[i] == right[i] {
+			matched += 8
+			continue
+		}
+		return matched + bits.LeadingZeros8(left[i]^right[i])
+	}
+	return matched
+}
+
+func ipString(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }

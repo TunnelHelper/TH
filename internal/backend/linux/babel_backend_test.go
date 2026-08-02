@@ -259,6 +259,15 @@ func TestBabelWeightOnlyChange(t *testing.T) {
 	if babelWeightOnlyChange([]netlink.Route{base}, structural) {
 		t.Fatal("structural change must not be treated as weight-only")
 	}
+
+	sourceChange := base
+	sourceChange.Src = net.ParseIP("10.7.0.1")
+	if babelWeightOnlyChange([]netlink.Route{base}, sourceChange) {
+		t.Fatal("preferred-source change must not be treated as weight-only")
+	}
+	if equalBabelManagedRoute(base, sourceChange) {
+		t.Fatal("preferred-source change must replace the managed route")
+	}
 }
 
 func TestBabelRoutesToNetlink(t *testing.T) {
@@ -281,7 +290,7 @@ func TestBabelRoutesToNetlink(t *testing.T) {
 		{Prefix: netip.MustParsePrefix("10.3.0.0/24"), NextHop: netip.Addr{}, Interface: "", Metric: 0, Local: true},
 	}
 
-	routes, err := babelRoutesToNetlink(254, selected, resolve, score)
+	routes, err := babelRoutesToNetlink(254, selected, resolve, score, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,12 +342,41 @@ func TestRouteHealthReportsDesiredAndInstalledWeights(t *testing.T) {
 	}
 	key := routeKey(netlink.Route{Table: 254, Dst: prefixToIPNet(prefix)})
 	engine.weightStates[key] = &babelWeightState{installed: "256,100"}
-	health := engine.routeHealthLocked(selected, 254)
+	health := engine.routeHealthLocked(selected, 254, []netip.Addr{netip.MustParseAddr("10.9.0.1")})
 	if len(health) != 2 || health[0].InstalledWeight != 256 || health[1].InstalledWeight != 100 {
 		t.Fatalf("installed weights missing from health: %+v", health)
 	}
 	if health[0].DesiredWeight != 256 || health[1].DesiredWeight >= health[0].DesiredWeight {
 		t.Fatalf("desired weights do not reflect RTT score: %+v", health)
+	}
+	if health[0].PreferredSource != "10.9.0.1" || health[1].PreferredSource != "10.9.0.1" {
+		t.Fatalf("preferred source missing from health: %+v", health)
+	}
+}
+
+func TestBabelPreferredSourceUsesClosestOriginatedAddress(t *testing.T) {
+	destination := netip.MustParsePrefix("2a0f:1cc5:3ff:fff2::/64")
+	candidates := []netip.Addr{
+		netip.MustParseAddr("2a0f:1cc5:350::1990:18"),
+		netip.MustParseAddr("2a0f:1cc5:3ff:3925::1"),
+		netip.MustParseAddr("192.0.2.1"),
+	}
+	got := selectBabelPreferredSource(destination, candidates)
+	if !got.Equal(net.ParseIP("2a0f:1cc5:3ff:3925::1")) {
+		t.Fatalf("preferred source = %v, want 2a0f:1cc5:3ff:3925::1", got)
+	}
+
+	selected := []babel.SelectedRoute{{
+		Prefix: destination, NextHop: netip.MustParseAddr("fe80::1"), Interface: "wg0", Metric: 100,
+	}}
+	routes, err := babelRoutesToNetlink(254, selected, func(string) (int, error) { return 42, nil },
+		func(babel.SelectedRoute) float64 { return 1 },
+		func(prefix netip.Prefix) net.IP { return selectBabelPreferredSource(prefix, candidates) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 1 || !routes[0].Src.Equal(got) {
+		t.Fatalf("route preferred source was not installed: %+v", routes)
 	}
 }
 

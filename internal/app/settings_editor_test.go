@@ -516,14 +516,16 @@ func TestSettingsMainViewShowsBabelHeaderAndAutoRouterIDInField(t *testing.T) {
 func TestSettingsLiveMetricsViewShowsDelayAndWeights(t *testing.T) {
 	model := settingsEditorFixture()
 	model.babel = core.BabelHealth{
-		RouterID: "0011223344556677",
+		RouterID:           "0011223344556677",
+		OriginatedPrefixes: []string{"10.1.0.0/24"},
 		Neighbours: []core.BabelNeighbourHealth{{
 			Interface: "wg0", Address: "fe80::1", RTTMicros: 12_000, JitterMicros: 2_000,
 			MinRTTMicros: 10_000, AgeMillis: 500, Samples: 9, Confidence: 0.9, Fresh: true,
 		}},
 		Routes: []core.BabelRouteHealth{{
 			Prefix: "10.0.0.0/24", Interface: "wg0", NextHop: "fe80::1", Metric: 120,
-			BottleneckMbps: 100, RTTMicros: 12_000, JitterMicros: 2_000, AgeMillis: 500,
+			PreferredSource: "10.1.0.1",
+			BottleneckMbps:  100, RTTMicros: 12_000, JitterMicros: 2_000, AgeMillis: 500,
 			Score: 1.25, InstalledWeight: 200, DesiredWeight: 180,
 		}},
 	}
@@ -536,10 +538,36 @@ func TestSettingsLiveMetricsViewShowsDelayAndWeights(t *testing.T) {
 		t.Fatal("live metrics field did not open the metrics page")
 	}
 	view := model.metricsView(120)
-	for _, expected := range []string{"wg0", "fe80::1", "RTT 12ms", "jitter 2ms", "10.0.0.0/24", "weight 200 -> 180"} {
+	for _, expected := range []string{"10.1.0.0/24", "wg0", "fe80::1", "RTT 12ms", "jitter 2ms", "10.0.0.0/24", "src 10.1.0.1", "weight 200 -> 180"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("metrics view missing %q:\n%s", expected, view)
 		}
+	}
+}
+
+func TestSettingsAdvertisedPrefixListCanClearLastItem(t *testing.T) {
+	model := settingsEditorFixture()
+	model.draft.Babel.Advertise.AdvertisedPrefixes = []netip.Prefix{netip.MustParsePrefix("2001:db8::/32")}
+	model.original = cloneSettings(model.draft)
+	model.beginList("settings:babel.advertise_prefixes", "Advertised prefixes", "", "Prefix",
+		[]string{"2001:db8::/32"}, validatePrefixItem, nil)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	model = updated.(settingsModel)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
+	model = updated.(settingsModel)
+	if model.overlay != nil || len(model.draft.Babel.Advertise.AdvertisedPrefixes) != 0 {
+		t.Fatalf("last advertised prefix was not cleared: overlay=%+v prefixes=%v", model.overlay, model.draft.Babel.Advertise.AdvertisedPrefixes)
+	}
+}
+
+func TestStandaloneBabelMetricsReturnsToMainMenu(t *testing.T) {
+	model := settingsEditorFixture()
+	model.page = settingsMetrics
+	model.metricsOnly = true
+	_, command := model.updateMetrics(tea.KeyMsg{Type: tea.KeyEsc})
+	if command == nil {
+		t.Fatal("standalone Babel status did not quit on escape")
 	}
 }
 

@@ -72,6 +72,12 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 			}
 			continue
 		}
+		if choice == "babel-status" {
+			if err := runBabelStatus(app.client, app.timeout, output); err != nil && !errors.Is(err, ErrAborted) {
+				output.Warn(err.Error())
+			}
+			continue
+		}
 		if choice == "settings" {
 			if err := runSettingsEditor(app.client, app.timeout, output); err != nil && !errors.Is(err, ErrAborted) {
 				output.Warn(err.Error())
@@ -109,6 +115,7 @@ func (a *tuiApp) mainMenuOptions() []ui.Option {
 	options := []ui.Option{
 		{Label: "Manage tunnels", Value: "manage"},
 		{Label: "Live status", Value: "watch"},
+		{Label: "Babel status", Value: "babel-status"},
 		{Label: "Create WireGuard", Value: string(model.KindWireGuard)},
 		{Label: "Create AmneziaWG", Value: string(model.KindAmneziaWG)},
 		{Label: "Create VXLAN", Value: string(model.KindVXLAN)},

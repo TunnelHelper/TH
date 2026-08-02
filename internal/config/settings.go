@@ -63,14 +63,14 @@ type MptcpSettings struct {
 	// Enabled turns on endpoint registration for tunnels that follow the
 	// global switch. When false (the default) TH registers no endpoint and
 	// changes no MPTCP sysctl.
-	Enabled bool `json:"enabled,omitempty"`
+	Enabled bool `json:"enabled"`
 
 	// Scheduler optionally selects the node-global MPTCP packet scheduler
 	// written to net.mptcp.scheduler. Empty leaves the system setting
 	// untouched. A non-empty value must be one of the well-known kernel
 	// scheduler names; whether the running kernel actually provides it is
 	// checked during capability detection and only warns on mismatch.
-	Scheduler string `json:"scheduler,omitempty"`
+	Scheduler string `json:"scheduler"`
 }
 
 // KnownMPTCPSchedulers is the allowlist of scheduler names TH may write to
@@ -84,60 +84,60 @@ type BabelSettings struct {
 	// RouterID is the stable 8-octet router identifier as 16 lowercase hex
 	// characters. When empty, the daemon generates one and persists it in
 	// the state directory so it stays stable across restarts.
-	RouterID string `json:"router_id,omitempty"`
+	RouterID string `json:"router_id"`
 
 	// RouteTable is the kernel table Babel-installed routes are written
 	// to. Zero means the main table.
-	RouteTable int `json:"route_table,omitempty"`
+	RouteTable int `json:"route_table"`
 
 	// DelayMetric enables the RFC 9616 delay-based metric: link cost is
 	// derived from measured RTT instead of the fixed nominal cost.
-	DelayMetric *bool `json:"delay_metric,omitempty"`
+	DelayMetric *bool `json:"delay_metric"`
 
 	// UnicastHelloSeconds is the unicast Hello interval used on all
 	// non-multicast tunnel links. Zero means the default (4 seconds).
-	UnicastHelloSeconds int `json:"unicast_hello_seconds,omitempty"`
+	UnicastHelloSeconds int `json:"unicast_hello_seconds"`
 
 	// DelayProbeIntervalMillis controls active RFC 9616 timestamp exchanges
 	// independently from the Hello/IHU liveness cadence.
-	DelayProbeIntervalMillis int `json:"delay_probe_interval_milliseconds,omitempty"`
+	DelayProbeIntervalMillis int `json:"delay_probe_interval_milliseconds"`
 
 	// DelaySampleMaxAgeMillis is the freshness deadline of an RTT estimate.
-	DelaySampleMaxAgeMillis int `json:"delay_sample_max_age_milliseconds,omitempty"`
+	DelaySampleMaxAgeMillis int `json:"delay_sample_max_age_milliseconds"`
 
 	// DelaySmoothingTimeConstantMillis controls the time-aware EWMA mean and
 	// variance response independently from the probe interval.
-	DelaySmoothingTimeConstantMillis int `json:"delay_smoothing_time_constant_milliseconds,omitempty"`
+	DelaySmoothingTimeConstantMillis int `json:"delay_smoothing_time_constant_milliseconds"`
 
 	// MultipathMaxPaths caps the number of next hops installed for one
 	// prefix. Zero means the default (4).
-	MultipathMaxPaths int `json:"multipath_max_paths,omitempty"`
+	MultipathMaxPaths int `json:"multipath_max_paths"`
 
 	// MultipathSlack is the maximum extra cost for which an additional
 	// feasible route is still used as a multipath candidate. Zero means
 	// equal-cost multipath only.
-	MultipathSlack int `json:"multipath_slack,omitempty"`
+	MultipathSlack int `json:"multipath_slack"`
 
 	// WeightBandwidthExponent, WeightRTTExponent and WeightJitterExponent
 	// control the dimensionless ECMP score. Defaults of (1, 1, 1) balance
 	// capacity, latency and delay variation; larger values make the
 	// corresponding signal more influential.
-	WeightBandwidthExponent float64 `json:"weight_bandwidth_exponent,omitempty"`
-	WeightRTTExponent       float64 `json:"weight_rtt_exponent,omitempty"`
-	WeightJitterExponent    float64 `json:"weight_jitter_exponent,omitempty"`
+	WeightBandwidthExponent float64 `json:"weight_bandwidth_exponent"`
+	WeightRTTExponent       float64 `json:"weight_rtt_exponent"`
+	WeightJitterExponent    float64 `json:"weight_jitter_exponent"`
 
 	// WeightBottleneckPenalty (K) optionally adds K / local_link_bw once per
 	// hop so bandwidth participates in primary-path selection.
 	// Zero (the default) keeps selection purely delay-based.
-	WeightBottleneckPenalty float64 `json:"weight_bottleneck_penalty,omitempty"`
+	WeightBottleneckPenalty float64 `json:"weight_bottleneck_penalty"`
 
 	// Interfaces declares external point-to-point interfaces (created
 	// outside TH) that participate in Babel with BIRD-style explicit
 	// configuration.
-	Interfaces map[string]BabelExternalInterface `json:"interfaces,omitempty"`
+	Interfaces map[string]BabelExternalInterface `json:"interfaces"`
 
 	// Advertise controls which local prefixes are announced into Babel.
-	Advertise BabelAdvertiseSettings `json:"advertise,omitempty"`
+	Advertise BabelAdvertiseSettings `json:"advertise"`
 }
 
 // BabelAdvertiseSettings selects the prefixes the local node originates.
@@ -146,18 +146,19 @@ type BabelAdvertiseSettings struct {
 	// SourceInterfaces are the interfaces whose addresses are discovered
 	// for advertisement. Defaults to ["lo"]. Ignored when
 	// AdvertisedPrefixes is non-empty.
-	SourceInterfaces []string `json:"source_interfaces,omitempty"`
+	SourceInterfaces []string `json:"source_interfaces"`
 
-	// AdvertisedPrefixes, when non-empty, is an explicit allowlist that
-	// replaces interface discovery entirely.
-	AdvertisedPrefixes []netip.Prefix `json:"advertised_prefixes,omitempty"`
+	// AdvertisedPrefixes, when non-empty, is the explicit set of originated
+	// prefixes and replaces interface discovery entirely. It does not assign
+	// addresses to the local system.
+	AdvertisedPrefixes []netip.Prefix `json:"advertised_prefixes"`
 
 	// Include, when non-empty, is an allowlist: a discovered prefix is
 	// advertised only when it is contained in one of these prefixes.
-	Include []netip.Prefix `json:"include,omitempty"`
+	Include []netip.Prefix `json:"include"`
 
 	// Exclude always wins over Include and discovery.
-	Exclude []netip.Prefix `json:"exclude,omitempty"`
+	Exclude []netip.Prefix `json:"exclude"`
 }
 
 // BabelExternalInterface is an interface created outside TH that
@@ -166,15 +167,15 @@ type BabelAdvertiseSettings struct {
 type BabelExternalInterface struct {
 	// BandwidthMbps is the declared usable bandwidth of this link. Zero
 	// means unset (unlimited).
-	BandwidthMbps int `json:"bandwidth_mbps,omitempty"`
+	BandwidthMbps int `json:"bandwidth_mbps"`
 
 	// Multicast enables multicast Babel hellos/updates on this interface.
 	// Disable it on links without multicast support and provide
 	// Neighbours instead.
-	Multicast bool `json:"multicast,omitempty"`
+	Multicast bool `json:"multicast"`
 
 	// Neighbours are the unicast Babel neighbours on this interface.
-	Neighbours []netip.Addr `json:"neighbours,omitempty"`
+	Neighbours []netip.Addr `json:"neighbours"`
 }
 
 func Defaults() Settings {

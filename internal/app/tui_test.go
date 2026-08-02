@@ -49,17 +49,24 @@ func TestMainMenuDefaultsToManagementWorkflow(t *testing.T) {
 	if len(options) < 2 || options[0].Value != "manage" || options[1].Value != "watch" {
 		t.Fatalf("main menu order = %+v", options)
 	}
-	if len(options) < 4 || options[2].Value != string(model.KindWireGuard) || options[3].Value != string(model.KindAmneziaWG) {
+	if len(options) < 5 || options[2].Value != "babel-status" ||
+		options[3].Value != string(model.KindWireGuard) || options[4].Value != string(model.KindAmneziaWG) {
 		t.Fatalf("V1 creation order was not retained: %+v", options)
 	}
-	foundSettings := false
+	foundSettings, foundBabelStatus := false, false
 	for _, option := range options {
 		if option.Value == "settings" && option.Label == "Settings" {
 			foundSettings = true
 		}
+		if option.Value == "babel-status" && option.Label == "Babel status" {
+			foundBabelStatus = true
+		}
 	}
 	if !foundSettings {
 		t.Fatalf("main menu must expose a single Settings entry: %+v", options)
+	}
+	if !foundBabelStatus {
+		t.Fatalf("main menu must expose Babel status: %+v", options)
 	}
 }
 

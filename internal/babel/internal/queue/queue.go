@@ -105,6 +105,12 @@ func (q *Queue) send() error {
 			break
 		}
 
+		// RFC 9616 timestamps are transmit timestamps, not enqueue timestamps.
+		// Values can wait in this queue for protocol jitter, which must not be
+		// counted as network RTT.
+		if hello, ok := v.(*proto.Hello); ok && hello.Timestamp != nil {
+			hello.Timestamp.Transmit = proto.Timestamp(time.Now().UnixMicro())
+		}
 		b = p.AppendValue(b, v)
 	}
 

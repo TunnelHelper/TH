@@ -66,6 +66,7 @@ type settingsModel struct {
 	ifaceName      string
 	ifaceDraft     config.BabelExternalInterface
 	metricsOffset  int
+	metricsOnly    bool
 
 	width     int
 	height    int
@@ -80,12 +81,22 @@ type settingsModel struct {
 }
 
 func runSettingsEditor(client *control.Client, timeout time.Duration, output *ui.UI) error {
+	return runSettingsEditorPage(client, timeout, output, settingsMain, false)
+}
+
+func runBabelStatus(client *control.Client, timeout time.Duration, output *ui.UI) error {
+	return runSettingsEditorPage(client, timeout, output, settingsMetrics, true)
+}
+
+func runSettingsEditorPage(client *control.Client, timeout time.Duration, output *ui.UI, page settingsPage, metricsOnly bool) error {
 	if !output.TTY {
-		return errors.New("settings editing requires a terminal")
+		return errors.New("settings and Babel status require a terminal")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	model := newSettingsModel(ctx, client, timeout)
+	model.page = page
+	model.metricsOnly = metricsOnly
 	program := tea.NewProgram(model, tea.WithInput(output.Input), tea.WithOutput(output.Out))
 	_, err := program.Run()
 	return err
@@ -231,6 +242,9 @@ func (m settingsModel) updateMetrics(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	page := m.metricsViewportRows()
 	switch key.String() {
 	case "q", "esc":
+		if m.metricsOnly {
+			return m, tea.Quit
+		}
 		m.page = settingsMain
 	case "up", "k":
 		m.metricsOffset = max(0, m.metricsOffset-1)
@@ -689,7 +703,7 @@ func settingsFields(settings config.Settings, effectiveRouterID string) []worksp
 		withFieldDescription(workspaceTextField("babel.advertise_sources", "Advertise sources", strings.Join(babel.Advertise.SourceInterfaces, ","), validateInterfaceListInput),
 			"Interfaces whose addresses are advertised; default is lo."),
 		withFieldDescription(workspaceTextField("babel.advertise_prefixes", "Advertised prefixes", formatPrefixList(babel.Advertise.AdvertisedPrefixes), validatePrefixListInput),
-			"Explicit allowlist replacing interface discovery; empty = discover."),
+			"Explicit originated prefixes; replaces discovery and does not assign addresses."),
 		withFieldDescription(workspaceTextField("babel.include", "Include filter", formatPrefixList(babel.Advertise.Include), validatePrefixListInput),
 			"Only prefixes contained in these are advertised; empty = allow all."),
 		withFieldDescription(workspaceTextField("babel.exclude", "Exclude filter", formatPrefixList(babel.Advertise.Exclude), validatePrefixListInput),
@@ -886,7 +900,15 @@ func (m settingsModel) interfaceEditorView(width int) string {
 }
 
 func (m settingsModel) metricsBodyLines(width int) []string {
-	lines := []string{workspaceAccentStyle.Render(fit("Delay estimators", width))}
+	lines := []string{workspaceAccentStyle.Render(fit("Originated prefixes", width))}
+	if len(m.babel.OriginatedPrefixes) == 0 {
+		lines = append(lines, workspaceDimStyle.Render("No local Babel prefixes"))
+	} else {
+		for _, prefix := range m.babel.OriginatedPrefixes {
+			lines = append(lines, fit(prefix, width))
+		}
+	}
+	lines = append(lines, "", workspaceAccentStyle.Render(fit("Delay estimators", width)))
 	if m.healthErr != nil {
 		lines = append(lines, workspaceErrorStyle.Render(fit(m.healthErr.Error(), width)))
 	} else if len(m.babel.Neighbours) == 0 {
@@ -915,8 +937,12 @@ func (m settingsModel) metricsBodyLines(width int) []string {
 			if route.InstalledWeight > 0 {
 				weight = fmt.Sprintf("%d -> %d", route.InstalledWeight, route.DesiredWeight)
 			}
+			source := ""
+			if route.PreferredSource != "" {
+				source = "  src " + route.PreferredSource
+			}
 			lines = append(lines,
-				fit(fmt.Sprintf("%s  via %s  %s", route.Prefix, route.NextHop, route.Interface), width),
+				fit(fmt.Sprintf("%s  via %s  %s%s", route.Prefix, route.NextHop, route.Interface, source), width),
 				workspaceDimStyle.Render(fit(fmt.Sprintf("  metric %d  bw %dMbps  RTT %s  jitter %s  age %dms  score %.4g  weight %s",
 					route.Metric, route.BottleneckMbps, formatBabelMicros(route.RTTMicros),
 					formatBabelMicros(route.JitterMicros), route.AgeMillis, route.Score, weight), width)),
@@ -930,8 +956,12 @@ func (m settingsModel) metricsFooterLines(width int) []string {
 	lines := []string{""}
 	lines = append(lines, m.feedbackLines(width)...)
 	lines = append(lines, "")
+	back := "esc  Back"
+	if m.metricsOnly {
+		back = "esc  Main menu"
+	}
 	lines = append(lines, workspaceHintLines(width,
-		"up/down  Scroll", "pgup/pgdown  Page", "home/end  Jump", "r  Refresh", "esc  Back")...)
+		"up/down  Scroll", "pgup/pgdown  Page", "home/end  Jump", "r  Refresh", back)...)
 	return lines
 }
 

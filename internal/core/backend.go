@@ -37,9 +37,10 @@ type MptcpHealth struct {
 // identifier the running speaker actually uses: the configured value, or
 // the persisted auto-generated one when the configuration leaves it empty.
 type BabelHealth struct {
-	RouterID   string                 `json:"router_id,omitempty"`
-	Neighbours []BabelNeighbourHealth `json:"neighbours,omitempty"`
-	Routes     []BabelRouteHealth     `json:"routes,omitempty"`
+	RouterID           string                 `json:"router_id,omitempty"`
+	OriginatedPrefixes []string               `json:"originated_prefixes,omitempty"`
+	Neighbours         []BabelNeighbourHealth `json:"neighbours,omitempty"`
+	Routes             []BabelRouteHealth     `json:"routes,omitempty"`
 }
 
 type BabelNeighbourHealth struct {
@@ -59,6 +60,7 @@ type BabelRouteHealth struct {
 	Prefix          string  `json:"prefix"`
 	Interface       string  `json:"interface"`
 	NextHop         string  `json:"next_hop"`
+	PreferredSource string  `json:"preferred_source,omitempty"`
 	Metric          uint16  `json:"metric"`
 	BottleneckMbps  int     `json:"bottleneck_mbps"`
 	RTTMicros       int64   `json:"rtt_micros"`
