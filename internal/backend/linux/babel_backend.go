@@ -42,6 +42,7 @@ type babelTunnel struct {
 	kind          model.Kind
 	interfaceName string
 	bandwidthMbps int
+	balance       *float64
 	neighbours    []netip.Addr
 	multicast     bool
 }
@@ -49,6 +50,9 @@ type babelTunnel struct {
 func (t babelTunnel) fingerprint() string {
 	parts := make([]string, 0, len(t.neighbours)+3)
 	parts = append(parts, t.recordID, t.interfaceName, strconv.Itoa(t.bandwidthMbps), strconv.FormatBool(t.multicast))
+	if t.balance != nil {
+		parts = append(parts, strconv.FormatFloat(*t.balance, 'g', -1, 64))
+	}
 	for _, addr := range t.neighbours {
 		parts = append(parts, addr.String())
 	}
@@ -63,7 +67,6 @@ type babelEngine struct {
 	backend  *Backend
 	settings config.BabelSettings
 	table    int
-	realm    int
 
 	mu               sync.Mutex
 	speaker          *babel.Speaker
@@ -90,7 +93,6 @@ func newBabelEngine(backend *Backend) (*babelEngine, error) {
 		backend:     backend,
 		settings:    settings,
 		table:       table,
-		realm:       model.BabelManagedRealm(),
 		tunnels:     make(map[string]babelTunnel),
 		routerID:    routerID,
 		advertised:  make(map[netip.Prefix]struct{}),
@@ -144,6 +146,7 @@ func (e *babelEngine) upsertTunnel(record model.Tunnel) {
 	}
 	if record.Spec.Babel != nil {
 		t.bandwidthMbps = record.Spec.Babel.BandwidthMbps
+		t.balance = record.Spec.Babel.Balance
 		t.neighbours = deriveBabelNeighbours(record)
 	}
 	e.mu.Lock()
@@ -467,7 +470,7 @@ func (e *babelEngine) installRoutes(speaker *babel.Speaker) error {
 		return e.removeOwnedRoutes()
 	}
 	selected := speaker.SelectedRoutes()
-	desired, err := babelRoutesToNetlink(e.table, selected, e.backend.resolveBabelLink, e.pathScore, e.realm)
+	desired, err := babelRoutesToNetlink(e.table, selected, e.backend.resolveBabelLink, e.pathScore)
 	if err != nil {
 		return err
 	}
@@ -475,8 +478,9 @@ func (e *babelEngine) installRoutes(speaker *babel.Speaker) error {
 	if err != nil {
 		return fmt.Errorf("list Babel route table %d: %w", e.table, err)
 	}
-	replace, remove, err := babelRouteDiff(current, desired, e.realm)
+	replace, remove, err := babelRouteDiff(current, desired, e.table)
 	if err != nil {
+		slog.Error("Babel route diff failed", "error", err)
 		return err
 	}
 	weightApplied := false
@@ -498,6 +502,7 @@ func (e *babelEngine) installRoutes(speaker *babel.Speaker) error {
 			delete(e.lastWeights, key)
 		}
 		if err := e.backend.netlink.RouteReplace(&route); err != nil {
+			slog.Error("Babel route replace failed", "route", routeKey(route), "error", err)
 			return fmt.Errorf("ensure Babel route %s: %w", routeKey(route), err)
 		}
 	}
@@ -508,6 +513,7 @@ func (e *babelEngine) installRoutes(speaker *babel.Speaker) error {
 		route := remove[i]
 		delete(e.lastWeights, routeKey(route))
 		if err := e.backend.netlink.RouteDel(&route); err != nil && !errors.Is(err, unix.ESRCH) {
+			slog.Error("Babel route delete failed", "route", routeKey(route), "error", err)
 			return fmt.Errorf("remove stale Babel route: %w", err)
 		}
 	}
@@ -535,7 +541,7 @@ func (e *babelEngine) bandwidthOf(interfaceName string) int {
 // local first-hop declared bandwidth and measured neighbour RTT are used.
 func (e *babelEngine) pathScore(route babel.SelectedRoute) float64 {
 	e.mu.Lock()
-	alpha, beta := e.settings.WeightBandwidthExponent, e.settings.WeightRTTExponent
+	alpha, beta := e.exponentsFor(route.Interface)
 	speaker := e.speaker
 	e.mu.Unlock()
 
@@ -552,6 +558,30 @@ func (e *babelEngine) pathScore(route babel.SelectedRoute) float64 {
 		localRTT, hasRTT = speaker.NeighbourRTT(route.Interface, route.NextHop)
 	}
 	return babelPathScore(bw, route.PathRTTMicros, localRTT, hasRTT, alpha, beta)
+}
+
+// exponentsFor returns the weight exponents of a tunnel. An explicit
+// per-tunnel balance wins; tunnels without one use the daemon-global
+// defaults (the balance mapping alpha = 1 + bias, beta = 1 - bias clamped
+// to [0, 4]).
+func (e *babelEngine) exponentsFor(interfaceName string) (float64, float64) {
+	for _, tunnel := range e.tunnels {
+		if tunnel.interfaceName == interfaceName && tunnel.balance != nil {
+			bias := *tunnel.balance
+			return clampWeightExponent(1 + bias), clampWeightExponent(1 - bias)
+		}
+	}
+	return e.settings.WeightBandwidthExponent, e.settings.WeightRTTExponent
+}
+
+func clampWeightExponent(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 4 {
+		return 4
+	}
+	return value
 }
 
 // babelPathScore computes bottleneck^alpha / rtt^beta from end-to-end path
@@ -581,7 +611,7 @@ func (e *babelEngine) removeOwnedRoutesFrom(table int) error {
 	}
 	for i := range current {
 		route := current[i]
-		if route.Protocol != managedRouteProtocol || route.Realm != e.realm {
+		if !babelRouteOwned(route, table) {
 			continue
 		}
 		if err := e.backend.netlink.RouteDel(&route); err != nil && !errors.Is(err, unix.ESRCH) {
@@ -771,7 +801,7 @@ func (b *Backend) resolveBabelLink(name string) (int, error) {
 	return link.Attrs().Index, nil
 }
 
-func babelRoutesToNetlink(table int, selected []babel.SelectedRoute, resolve babelLinkResolver, score func(babel.SelectedRoute) float64, realm int) ([]netlink.Route, error) {
+func babelRoutesToNetlink(table int, selected []babel.SelectedRoute, resolve babelLinkResolver, score func(babel.SelectedRoute) float64) ([]netlink.Route, error) {
 	byPrefix := make(map[netip.Prefix][]babel.SelectedRoute)
 	for _, route := range selected {
 		if route.Local {
@@ -793,7 +823,6 @@ func babelRoutesToNetlink(table int, selected []babel.SelectedRoute, resolve bab
 			Dst:      prefixToIPNet(prefix),
 			Table:    table,
 			Protocol: managedRouteProtocol,
-			Realm:    realm,
 			Scope:    netlink.SCOPE_UNIVERSE,
 			Priority: babelRoutePriority,
 		}
@@ -841,11 +870,21 @@ func babelNextHop(resolve babelLinkResolver, route babel.SelectedRoute) (int, ne
 	return linkIndex, net.IP(route.NextHop.Unmap().AsSlice()), nil
 }
 
+// babelRouteOwned reports whether a route in the Babel table belongs to
+// this engine. The kernel does not persist realms for IPv6 routes and
+// rejects them outright on IPv4 multipath routes, so realm is not a
+// reliable Babel ownership tag. Babel routes are therefore identified by
+// the TH protocol plus the Babel route priority (other TH backends use
+// priority 0 or 1024).
+func babelRouteOwned(route netlink.Route, table int) bool {
+	return route.Protocol == managedRouteProtocol && route.Priority == babelRoutePriority && route.Table == table
+}
+
 // babelRouteDiff compares the routes currently present in a table against
 // the desired Babel routes. It returns the routes to replace, the owned
 // routes to remove, or an ownership error when a desired prefix is already
 // claimed by a route TH does not own.
-func babelRouteDiff(current, desired []netlink.Route, realm int) (replace, remove []netlink.Route, err error) {
+func babelRouteDiff(current, desired []netlink.Route, table int) (replace, remove []netlink.Route, err error) {
 	wanted := make(map[string]netlink.Route, len(desired))
 	for _, route := range desired {
 		wanted[routeKey(route)] = route
@@ -859,7 +898,7 @@ func babelRouteDiff(current, desired []netlink.Route, realm int) (replace, remov
 	for key, route := range wanted {
 		matched := false
 		for _, existing := range currentByKey[key] {
-			if existing.Protocol != managedRouteProtocol || existing.Realm != realm {
+			if !babelRouteOwned(existing, table) {
 				return nil, nil, fmt.Errorf("route %s in table %d is not owned by TH: %w",
 					key, route.Table, ErrOwnershipConflict)
 			}
@@ -877,7 +916,7 @@ func babelRouteDiff(current, desired []netlink.Route, realm int) (replace, remov
 			continue
 		}
 		for _, route := range routes {
-			if route.Protocol == managedRouteProtocol && route.Realm == realm {
+			if babelRouteOwned(route, table) {
 				remove = append(remove, route)
 			}
 		}
@@ -887,8 +926,7 @@ func babelRouteDiff(current, desired []netlink.Route, realm int) (replace, remov
 
 func equalBabelManagedRoute(current, desired netlink.Route) bool {
 	if current.Table != desired.Table || current.Priority != desired.Priority ||
-		current.Scope != desired.Scope || current.Protocol != desired.Protocol ||
-		current.Realm != desired.Realm {
+		current.Scope != desired.Scope || current.Protocol != desired.Protocol {
 		return false
 	}
 	if !ipEqual(current.Gw, desired.Gw) || current.LinkIndex != desired.LinkIndex {
@@ -964,7 +1002,7 @@ func babelWeightOnlyChange(current []netlink.Route, desired netlink.Route) bool 
 		if routeKey(existing) != routeKey(desired) {
 			continue
 		}
-		if existing.Protocol != desired.Protocol || existing.Realm != desired.Realm ||
+		if existing.Protocol != desired.Protocol ||
 			existing.Priority != desired.Priority || existing.Scope != desired.Scope {
 			return false
 		}

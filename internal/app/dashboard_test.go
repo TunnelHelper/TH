@@ -137,14 +137,20 @@ func TestDashboardPeerDetailsStayWithinTerminalHeight(t *testing.T) {
 	}
 }
 
-func TestDashboardDoesNotExpandToTallTerminal(t *testing.T) {
+func TestDashboardExpandsToTerminalHeight(t *testing.T) {
 	views := make([]model.TunnelView, 30)
 	for index := range views {
 		views[index] = model.TunnelView{Tunnel: model.Tunnel{Name: "tunnel", Kind: model.KindGRE}}
 	}
-	dashboard := (dashboardModel{views: views, width: 100, height: 80}).View()
-	if lines := strings.Count(dashboard, "\n") + 1; lines > dashboardMaxInlineHeight {
-		t.Fatalf("dashboard uses %d lines, compact limit is %d:\n%s", lines, dashboardMaxInlineHeight, dashboard)
+	for _, height := range []int{20, 80} {
+		dashboard := (dashboardModel{views: views, width: 100, height: height}).View()
+		lines := strings.Count(dashboard, "\n") + 1
+		if lines > height {
+			t.Fatalf("dashboard uses %d lines in a %d-line terminal:\n%s", lines, height, dashboard)
+		}
+		if lines < min(height, 10) {
+			t.Fatalf("dashboard must use the terminal height %d, used %d:\n%s", height, lines, dashboard)
+		}
 	}
 }
 

@@ -45,7 +45,7 @@ func settingsFieldIndex(fields []workspaceField, id string) int {
 func TestSettingsFieldsCoverEverySetting(t *testing.T) {
 	fields := settingsFields(settingsEditorFixture().draft)
 	for _, id := range []string{
-		"babel.router_id", "babel.delay_metric", "babel.balance", "babel.route_table",
+		"babel.router_id", "babel.delay_metric", "babel.route_table",
 		"babel.unicast_hello_seconds", "babel.max_paths", "babel.slack", "babel.k_penalty",
 		"babel.advertise_sources", "babel.advertise_prefixes", "babel.include", "babel.exclude",
 		"babel.external_interfaces", "mptcp.enabled", "mptcp.scheduler",
@@ -102,16 +102,6 @@ func TestSettingsInputs(t *testing.T) {
 	}
 	if model.draft.Babel.RouterID != "aabbccddeeff0011" {
 		t.Fatalf("router id = %q", model.draft.Babel.RouterID)
-	}
-
-	if err := model.applySettingsInput("settings:babel.balance", []string{"1.5"}); err != nil {
-		t.Fatal(err)
-	}
-	if model.draft.Babel.WeightBandwidthExponent != 2.5 || model.draft.Babel.WeightRTTExponent != 0 {
-		t.Fatalf("balance exponents = (%v, %v), want (2.5, 0)", model.draft.Babel.WeightBandwidthExponent, model.draft.Babel.WeightRTTExponent)
-	}
-	if err := model.applySettingsInput("settings:babel.balance", []string{"9"}); err == nil {
-		t.Fatal("balance outside [-2, 2] must be rejected")
 	}
 
 	if err := model.applySettingsInput("settings:babel.advertise_prefixes", []string{"10.0.0.0/8, 2001:db8::/32"}); err != nil {
@@ -296,6 +286,43 @@ func TestSettingsViewsRespectTerminalWidth(t *testing.T) {
 			if got := ansi.StringWidth(line); got > 120 {
 				t.Fatalf("line exceeds width 120 by %d cells:\n%s", got-120, line)
 			}
+		}
+	}
+}
+
+func TestSettingsEditorChangesScroll(t *testing.T) {
+	model := settingsEditorFixture()
+	model.original = config.Defaults()
+	model.draft = config.Defaults()
+	model.draft.Babel.RouterID = "0011223344556677"
+	model.draft.Babel.MultipathSlack = 128
+	model.draft.Mptcp.Enabled = true
+	model.fieldSelected = len(settingsFields(model.draft)) - 1
+
+	updated, _ := model.updateMain(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	model = updated.(settingsModel)
+	if !model.changesFocus {
+		t.Fatal("down on the last setting must move focus to the pending changes")
+	}
+	updated, _ = model.updateMain(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	model = updated.(settingsModel)
+	if model.changeSelected != 1 {
+		t.Fatalf("down must scroll into the changes, selected = %d", model.changeSelected)
+	}
+	if !strings.Contains(model.mainView(120), "Pending changes") {
+		t.Fatalf("settings view must render the pending changes:\n%s", model.mainView(120))
+	}
+}
+
+func TestValidateBalanceInput(t *testing.T) {
+	for _, ok := range []string{"-2", "0", "1.5", "2"} {
+		if err := validateBalanceInput(ok); err != nil {
+			t.Errorf("%q must be accepted: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"-2.1", "2.5", "abc", ""} {
+		if err := validateBalanceInput(bad); err == nil {
+			t.Errorf("%q must be rejected", bad)
 		}
 	}
 }

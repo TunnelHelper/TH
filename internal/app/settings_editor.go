@@ -48,11 +48,13 @@ type settingsModel struct {
 	draft    config.Settings
 	mptcp    core.MptcpHealth
 
-	fieldSelected int
-	ifaceSelected int
-	ifaceAdding   bool
-	ifaceName     string
-	ifaceDraft    config.BabelExternalInterface
+	fieldSelected  int
+	changeSelected int
+	changesFocus   bool
+	ifaceSelected  int
+	ifaceAdding    bool
+	ifaceName      string
+	ifaceDraft     config.BabelExternalInterface
 
 	width   int
 	height  int
@@ -168,6 +170,26 @@ func (m settingsModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m settingsModel) updateMain(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	fields := settingsFields(m.draft)
+	changes := settingsChanges(m.original, m.draft)
+	if m.changesFocus && len(changes) > 0 {
+		switch key.String() {
+		case "up", "k":
+			if m.changeSelected > 0 {
+				m.changeSelected--
+			} else {
+				m.changesFocus = false
+			}
+			return m, nil
+		case "down", "j":
+			if m.changeSelected+1 < len(changes) {
+				m.changeSelected++
+			}
+			return m, nil
+		case "esc":
+			m.changesFocus = false
+			return m, nil
+		}
+	}
 	switch key.String() {
 	case "q", "esc":
 		if len(settingsChanges(m.original, m.draft)) > 0 {
@@ -182,6 +204,9 @@ func (m settingsModel) updateMain(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		if m.fieldSelected+1 < len(fields) {
 			m.fieldSelected++
+		} else if len(changes) > 0 {
+			m.changesFocus = true
+			m.changeSelected = min(m.changeSelected, len(changes)-1)
 		}
 	case "enter", " ":
 		if err := m.activateSettingsField(fields[m.fieldSelected]); err != nil {
@@ -334,12 +359,6 @@ func (m *settingsModel) applySettingsInput(action string, values []string) error
 	switch id {
 	case "babel.router_id":
 		babel.RouterID = value
-	case "babel.balance":
-		bias, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-		if err != nil || bias < -2 || bias > 2 {
-			return errors.New("balance must be between -2 (latency) and +2 (bandwidth)")
-		}
-		babel.WeightBandwidthExponent, babel.WeightRTTExponent = balanceExponents(true, bias, babel.WeightBandwidthExponent, babel.WeightRTTExponent)
 	case "babel.route_table":
 		babel.RouteTable = parseInt(value)
 	case "babel.unicast_hello_seconds":
@@ -414,9 +433,6 @@ func settingsFields(settings config.Settings) []workspaceField {
 	if !babel.DelayMetricEnabled() {
 		delay, delaySelected = "Off", 1
 	}
-	balance := balanceBias(babel.WeightBandwidthExponent, babel.WeightRTTExponent)
-	balanceValue := fmt.Sprintf("bias %+.1f  α=%.2f β=%.2f", balance, babel.WeightBandwidthExponent, babel.WeightRTTExponent)
-
 	scheduler := settings.Mptcp.Scheduler
 	schedulerSelected := 0
 	schedulerButtons := []workspaceButton{{Label: "Leave system default", Value: ""}}
@@ -432,34 +448,53 @@ func settingsFields(settings config.Settings) []workspaceField {
 		scheduler = "Leave system default"
 	}
 
-	return []workspaceField{
-		workspaceTextField("babel.router_id", "Router ID (16 hex, empty = generated)", babel.RouterID, validateBabelRouterIDInput),
-		workspaceChoiceField("babel.delay_metric", "Delay-based cost (RFC 9616)", delay, []workspaceButton{
+	fields := []workspaceField{
+		withFieldDescription(workspaceTextField("babel.router_id", "Router ID", babel.RouterID, validateBabelRouterIDInput),
+			"16 lowercase hex characters; empty generates a stable ID at startup."),
+		withFieldDescription(workspaceChoiceField("babel.delay_metric", "Delay cost", delay, []workspaceButton{
 			{Label: "On", Value: "On"}, {Label: "Off", Value: "Off"},
-		}, delaySelected),
-		workspaceTextField("babel.balance", "ECMP balance (latency ↔ bandwidth)", balanceValue, validateBalanceInput),
-		workspaceTextField("babel.route_table", "Route table (0 = main)", strconv.Itoa(babel.RouteTable), validateInt(0, math.MaxInt32)),
-		workspaceTextField("babel.unicast_hello_seconds", "Unicast Hello seconds (0 = default 4)", strconv.Itoa(babel.UnicastHelloSeconds), validateInt(0, 3600)),
-		workspaceTextField("babel.max_paths", "Max ECMP paths (0 = default 4)", strconv.Itoa(babel.MultipathMaxPaths), validateInt(0, 8)),
-		workspaceTextField("babel.slack", "Multipath cost slack", strconv.Itoa(babel.MultipathSlack), validateInt(0, 65534)),
-		workspaceTextField("babel.k_penalty", "Bottleneck penalty K", strconv.FormatFloat(babel.WeightBottleneckPenalty, 'g', -1, 64), validateNonNegativeFloatInput),
-		workspaceTextField("babel.advertise_sources", "Advertise source interfaces", strings.Join(babel.Advertise.SourceInterfaces, ","), validateInterfaceListInput),
-		workspaceTextField("babel.advertise_prefixes", "Explicit advertised prefixes", formatPrefixList(babel.Advertise.AdvertisedPrefixes), validatePrefixListInput),
-		workspaceTextField("babel.include", "Advertise include filter", formatPrefixList(babel.Advertise.Include), validatePrefixListInput),
-		workspaceTextField("babel.exclude", "Advertise exclude filter", formatPrefixList(babel.Advertise.Exclude), validatePrefixListInput),
+		}, delaySelected), "RFC 9616 delay-based cost: route cost derived from measured RTT."),
+		withFieldDescription(workspaceTextField("babel.route_table", "Route table", strconv.Itoa(babel.RouteTable), validateInt(0, math.MaxInt32)),
+			"Kernel table for Babel routes; 0 = main table."),
+		withFieldDescription(workspaceTextField("babel.unicast_hello_seconds", "Hello interval", strconv.Itoa(babel.UnicastHelloSeconds), validateInt(0, 3600)),
+			"Unicast Hello interval in seconds; 0 = default 4."),
+		withFieldDescription(workspaceTextField("babel.max_paths", "Max paths", strconv.Itoa(babel.MultipathMaxPaths), validateInt(0, 8)),
+			"Maximum number of Babel next hops per prefix; 0 = default 4."),
+		withFieldDescription(workspaceTextField("babel.slack", "Path slack", strconv.Itoa(babel.MultipathSlack), validateInt(0, 65534)),
+			"Extra cost window for additional multipath candidates; 0 = equal cost only."),
+		withFieldDescription(workspaceTextField("babel.k_penalty", "Bottleneck K", strconv.FormatFloat(babel.WeightBottleneckPenalty, 'g', -1, 64), validateNonNegativeFloatInput),
+			"K / bottleneck_bw added to the route metric; 0 = delay-only primary path."),
+		withFieldDescription(workspaceTextField("babel.advertise_sources", "Advertise sources", strings.Join(babel.Advertise.SourceInterfaces, ","), validateInterfaceListInput),
+			"Interfaces whose addresses are advertised; default is lo."),
+		withFieldDescription(workspaceTextField("babel.advertise_prefixes", "Advertised prefixes", formatPrefixList(babel.Advertise.AdvertisedPrefixes), validatePrefixListInput),
+			"Explicit allowlist replacing interface discovery; empty = discover."),
+		withFieldDescription(workspaceTextField("babel.include", "Include filter", formatPrefixList(babel.Advertise.Include), validatePrefixListInput),
+			"Only prefixes contained in these are advertised; empty = allow all."),
+		withFieldDescription(workspaceTextField("babel.exclude", "Exclude filter", formatPrefixList(babel.Advertise.Exclude), validatePrefixListInput),
+			"Prefixes never advertised; exclude wins over include."),
 		workspaceField{ID: "babel.external_interfaces", Label: "External Babel interfaces", Value: externalInterfacesSummary(babel.Interfaces), Kind: workspaceFieldNavigate},
-		workspaceToggleField("mptcp.enabled", "MPTCP endpoint management", settings.Mptcp.Enabled),
-		workspaceChoiceField("mptcp.scheduler", "MPTCP scheduler (node-global)", scheduler, schedulerButtons, schedulerSelected),
+		withFieldDescription(workspaceToggleField("mptcp.enabled", "MPTCP endpoints", settings.Mptcp.Enabled),
+			"Register tunnel addresses as MPTCP endpoints; default off."),
+		withFieldDescription(workspaceChoiceField("mptcp.scheduler", "MPTCP scheduler", scheduler, schedulerButtons, schedulerSelected),
+			"Node-global scheduler affecting all MPTCP traffic; empty leaves the system default."),
 	}
+	return fields
+}
+
+func withFieldDescription(field workspaceField, description string) workspaceField {
+	field.Description = description
+	return field
 }
 
 func externalInterfaceFields(name string, external config.BabelExternalInterface) []workspaceField {
 	fields := []workspaceField{
-		workspaceTextField("iface.bandwidth", "Bandwidth (Mbps, 0 = unlimited)", strconv.Itoa(external.BandwidthMbps), validateInt(0, 400000)),
+		withFieldDescription(workspaceTextField("iface.bandwidth", "Bandwidth", strconv.Itoa(external.BandwidthMbps), validateInt(0, 400000)),
+			"Usable bandwidth in Mbps; 0 = unlimited."),
 		workspaceToggleField("iface.multicast", "Multicast", external.Multicast),
 	}
 	if !external.Multicast {
-		fields = append(fields, workspaceTextField("iface.neighbours", "Unicast neighbours (comma separated)", formatNeighbourList(external.Neighbours), validateNeighbourListInput))
+		fields = append(fields, withFieldDescription(workspaceTextField("iface.neighbours", "Neighbours", formatNeighbourList(external.Neighbours), validateNeighbourListInput),
+			"Unicast Babel neighbour addresses, comma separated."))
 	}
 	_ = name
 	return fields
@@ -487,13 +522,19 @@ func validateBalanceInput(value string) error {
 }
 
 func settingsChanges(before, after config.Settings) []workspaceChange {
+	// Explicit (non-omitempty) encoding so that toggling MPTCP off renders
+	// "enabled -> disabled" instead of dropping the field from the diff.
+	type editableMptcp struct {
+		Enabled   bool   `json:"enabled"`
+		Scheduler string `json:"scheduler,omitempty"`
+	}
 	type editableSettings struct {
 		Babel config.BabelSettings `json:"babel,omitempty"`
-		Mptcp config.MptcpSettings `json:"mptcp,omitempty"`
+		Mptcp editableMptcp        `json:"mptcp,omitempty"`
 	}
 	return workspaceStructuredChanges(
-		editableSettings{Babel: before.Babel, Mptcp: before.Mptcp},
-		editableSettings{Babel: after.Babel, Mptcp: after.Mptcp},
+		editableSettings{Babel: before.Babel, Mptcp: editableMptcp{Enabled: before.Mptcp.Enabled, Scheduler: before.Mptcp.Scheduler}},
+		editableSettings{Babel: after.Babel, Mptcp: editableMptcp{Enabled: after.Mptcp.Enabled, Scheduler: after.Mptcp.Scheduler}},
 	)
 }
 
@@ -512,12 +553,25 @@ func (m settingsModel) mainView(width int) string {
 	if len(changes) > 0 {
 		status = workspaceWarnStyle.Bold(true).Render(fmt.Sprintf("Unsaved  %d change(s)", len(changes)))
 	}
+	feedback := m.feedbackLines(width)
+	hints := workspaceHintLines(width, "enter  Edit field", "s  Save settings", "esc  Back")
+	fixed := 5 + 1 + 1 + len(feedback) + 1 + len(hints) + 1 + 2 // header, sections, mptcp hint
+	if m.busy != "" {
+		fixed += 2
+	}
+	changesRows := min(max(len(changes), 1), 8)
+	changeBlock := 1 + changesRows
+	if len(changes) > changesRows {
+		changeBlock++
+	}
+	fieldBudget := max(3, m.inlineHeight()-fixed-changeBlock)
+	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, 1+changesRows)
 	lines := []string{
 		workspaceDimStyle.Render(fit("TH / Settings", width)), "",
 		workspaceAccentStyle.Render(fit("Daemon settings", width)), status, "",
 	}
 	section := ""
-	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, max(3, m.inlineHeight()-16))
+	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, fieldBudget)
 	for index := start; index < end; index++ {
 		field := fields[index]
 		next := "babel"
@@ -528,21 +582,21 @@ func (m settingsModel) mainView(width int) string {
 			section = next
 			if section == "mptcp" {
 				lines = append(lines, "", workspaceAccentStyle.Render("MPTCP"))
-				lines = append(lines, workspaceDimStyle.Render(fit("Kernel: "+m.mptcpStatusLabel(), width)))
-				lines = append(lines, workspaceDimStyle.Render(fit(fmt.Sprintf("TH-managed endpoints: %d", m.mptcp.Endpoints), width)))
+				lines = append(lines, workspaceDimStyle.Render(truncateDisplay("Kernel: "+m.mptcpStatusLabel(), width)))
+				lines = append(lines, workspaceDimStyle.Render(truncateDisplay(fmt.Sprintf("TH-managed endpoints: %d", m.mptcp.Endpoints), width)))
 			}
 		}
 		lines = append(lines, renderWorkspaceField(field, index == m.fieldSelected, width))
 	}
-	lines = append(lines, "", workspaceDimStyle.Render(fit("MPTCP aggregation depends on subflow count; TH manages endpoints only.", width)))
+	lines = append(lines, "", workspaceDimStyle.Render(truncateDisplay("MPTCP aggregation depends on subflow count; TH manages endpoints only.", width)))
 	lines = append(lines, "")
-	lines = append(lines, workspaceDiffLines(changes, width, 3)...)
-	lines = append(lines, m.feedbackLines(width)...)
+	lines = append(lines, changeLines...)
+	lines = append(lines, feedback...)
 	if m.busy != "" {
 		lines = append(lines, "", workspaceWarnStyle.Render(m.busy+"..."))
 	}
 	lines = append(lines, "")
-	lines = append(lines, workspaceHintLines(width, "enter  Edit field", "s  Save settings", "esc  Back")...)
+	lines = append(lines, hints...)
 	return strings.Join(lines, "\n")
 }
 
@@ -563,7 +617,7 @@ func (m settingsModel) interfacesView(width int) string {
 				marker = "> "
 			}
 			detail := externalInterfacesSummary(map[string]config.BabelExternalInterface{name: m.draft.Babel.Interfaces[name]})
-			lines = append(lines, fit(marker+name+"  "+detail, width))
+			lines = append(lines, wrapDisplayText(marker+name+"  "+detail, width)...)
 		}
 		lines = append(lines, "")
 	}

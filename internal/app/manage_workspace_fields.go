@@ -9,6 +9,7 @@ import (
 
 	"github.com/TunnelHelper/TH/internal/model"
 	tea "github.com/charmbracelet/bubbletea"
+	ansi "github.com/charmbracelet/x/ansi"
 )
 
 type workspaceFieldKind uint8
@@ -36,10 +37,30 @@ type workspaceField struct {
 
 func (m manageWorkspaceModel) updateTunnelEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	fields := workspaceTunnelFields(m.draft)
+	changes := workspaceTunnelChanges(m.original, m.draft)
 	if len(fields) == 0 {
 		return m, nil
 	}
 	m.fieldSelected = min(m.fieldSelected, len(fields)-1)
+	if m.changesFocus && len(changes) > 0 {
+		switch key.String() {
+		case "up", "k":
+			if m.changeSelected > 0 {
+				m.changeSelected--
+			} else {
+				m.changesFocus = false
+			}
+			return m, nil
+		case "down", "j":
+			if m.changeSelected+1 < len(changes) {
+				m.changeSelected++
+			}
+			return m, nil
+		case "esc":
+			m.changesFocus = false
+			return m, nil
+		}
+	}
 	switch key.String() {
 	case "up", "k":
 		if m.fieldSelected > 0 {
@@ -48,6 +69,9 @@ func (m manageWorkspaceModel) updateTunnelEditor(key tea.KeyMsg) (tea.Model, tea
 	case "down", "j":
 		if m.fieldSelected+1 < len(fields) {
 			m.fieldSelected++
+		} else if len(changes) > 0 {
+			m.changesFocus = true
+			m.changeSelected = min(m.changeSelected, len(changes)-1)
 		}
 	case "enter", " ":
 		if err := m.activateTunnelField(fields[m.fieldSelected]); err != nil {
@@ -78,21 +102,34 @@ func (m manageWorkspaceModel) tunnelEditorView(width int) string {
 	if len(changes) > 0 {
 		status = workspaceWarnStyle.Bold(true).Render(fmt.Sprintf("Unsaved  %d change(s)", len(changes)))
 	}
+	feedback := m.feedbackLines(width)
+	hints := workspaceHintLines(width, "enter  Edit field", "s  Save changes", "esc  Discard/back")
+	fixed := 5 + 1 + 1 + len(feedback) + 1 + len(hints) + 1
+	if m.busy != "" {
+		fixed += 2
+	}
+	changesRows := min(max(len(changes), 1), 8)
+	changeBlock := 1 + changesRows
+	if len(changes) > changesRows {
+		changeBlock++
+	}
+	fieldBudget := max(3, m.inlineHeight()-fixed-changeBlock)
+	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, 1+changesRows)
 	header := []string{m.breadcrumb(width), "", workspaceAccentStyle.Render(fit("Edit "+m.draft.Name, width)), status, ""}
 	fieldLines := []string{workspaceAccentStyle.Render("Configuration")}
-	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, max(3, m.inlineHeight()-12))
+	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, fieldBudget)
 	for index := start; index < end; index++ {
 		fieldLines = append(fieldLines, renderWorkspaceField(fields[index], index == m.fieldSelected, width))
 	}
 	header = append(header, fieldLines...)
 	header = append(header, "")
-	header = append(header, workspaceDiffLines(changes, width, 3)...)
-	header = append(header, m.feedbackLines(width)...)
+	header = append(header, changeLines...)
+	header = append(header, feedback...)
 	if m.busy != "" {
 		header = append(header, "", workspaceWarnStyle.Render(m.busy+"..."))
 	}
 	header = append(header, "")
-	header = append(header, workspaceHintLines(width, "enter  Edit field", "s  Save changes", "esc  Discard/back")...)
+	header = append(header, hints...)
 	return strings.Join(header, "\n")
 }
 
@@ -102,12 +139,83 @@ func renderWorkspaceField(field workspaceField, selected bool, width int) string
 		marker = "> "
 	}
 	labelWidth := min(25, max(14, width/3))
-	line := fmt.Sprintf("%s%-*s %s", marker, labelWidth, fit(field.Label, labelWidth), field.Value)
-	line = fit(line, max(1, width))
-	if selected {
-		return workspaceFocusStyle.Render(line)
+	label := truncateDisplay(field.Label, labelWidth)
+	valueWidth := max(1, width-ansi.StringWidth(marker)-labelWidth-1)
+	valueLines := wrapDisplayText(field.Value, valueWidth)
+	lines := make([]string, 0, len(valueLines))
+	for index, value := range valueLines {
+		if index == 0 {
+			lines = append(lines, fmt.Sprintf("%s%-*s %s", marker, labelWidth, label, value))
+		} else {
+			lines = append(lines, fmt.Sprintf("%s%-*s %s", marker, labelWidth, "", value))
+		}
 	}
-	return line
+	joined := strings.Join(lines, "\n")
+	if selected {
+		return workspaceFocusStyle.Render(joined)
+	}
+	return joined
+}
+
+// truncateDisplay cuts a string to width display cells without adding an
+// ellipsis, so field labels never show "…" in the table.
+func truncateDisplay(value string, width int) string {
+	if width <= 0 || ansi.StringWidth(value) <= width {
+		return value
+	}
+	var builder strings.Builder
+	current := 0
+	for _, r := range value {
+		runeWidth := ansi.StringWidth(string(r))
+		if current+runeWidth > width {
+			break
+		}
+		builder.WriteRune(r)
+		current += runeWidth
+	}
+	return builder.String()
+}
+
+// wrapDisplayText wraps value into lines that each fit within width display
+// cells, breaking long tokens at the boundary without an ellipsis.
+func wrapDisplayText(value string, width int) []string {
+	if width <= 0 {
+		return []string{value}
+	}
+	if ansi.StringWidth(value) <= width {
+		return []string{value}
+	}
+	words := strings.Fields(value)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var lines []string
+	current := ""
+	for _, word := range words {
+		candidate := word
+		if current != "" {
+			candidate = current + " " + word
+		}
+		if ansi.StringWidth(candidate) <= width {
+			current = candidate
+			continue
+		}
+		if current != "" {
+			lines = append(lines, current)
+			current = ""
+		}
+		remaining := word
+		for ansi.StringWidth(remaining) > width {
+			chunk := truncateDisplay(remaining, width)
+			lines = append(lines, chunk)
+			remaining = strings.TrimPrefix(remaining, chunk)
+		}
+		current = remaining
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
 }
 
 func workspaceTunnelFields(tunnel model.Tunnel) []workspaceField {
@@ -202,11 +310,37 @@ func workspaceTunnelFields(tunnel model.Tunnel) []workspaceField {
 		babel := workspaceBabelConfig(&tunnel)
 		fields = append(fields,
 			workspaceToggleField("babel.enabled", "Babel routing", babel.Enabled),
-			workspaceTextField("babel.bandwidth", "Babel bandwidth (Mbps)", strconv.Itoa(babel.BandwidthMbps), validateNonNegativeIntInput),
+			babelBalanceField(babel),
+			withFieldDescription(workspaceTextField("babel.bandwidth", "Babel bandwidth", strconv.Itoa(babel.BandwidthMbps), validateNonNegativeIntInput),
+				"Declared usable bandwidth in Mbps; drives ECMP weights."),
 		)
 		fields = append(fields, mptcpEndpointChoiceField(&tunnel))
 	}
 	return fields
+}
+
+// babelBalanceField renders the per-tunnel ECMP balance as an editable
+// bias input whose display also shows the weight exponents it maps to.
+func babelBalanceField(babel *model.BabelTunnelConfig) workspaceField {
+	editValue := "0"
+	if babel != nil && babel.Balance != nil {
+		editValue = strconv.FormatFloat(*babel.Balance, 'g', -1, 64)
+	}
+	return withFieldDescription(workspaceField{
+		ID: "babel.balance", Label: "ECMP balance",
+		Value: babelBalanceValue(babel), EditValue: editValue,
+		Kind: workspaceFieldInput, Validator: validateBalanceInput,
+	}, "Bias between latency and bandwidth: -2 = latency, +2 = bandwidth.")
+}
+
+// babelBalanceValue renders the per-tunnel ECMP balance field: the bias and
+// the weight exponents it maps to.
+func babelBalanceValue(babel *model.BabelTunnelConfig) string {
+	if babel == nil || babel.Balance == nil {
+		return "default"
+	}
+	bias := *babel.Balance
+	return fmt.Sprintf("bias %+.1f  α=%.2f β=%.2f", bias, clampExponent(1+bias), clampExponent(1-bias))
 }
 
 // workspaceBabelConfig returns the per-tunnel Babel configuration, creating
@@ -381,6 +515,12 @@ func (m *manageWorkspaceModel) applyTunnelInput(id, value string) error {
 		workspaceWireGuardSpec(&m.draft).FirewallMark = parseInt(value)
 	case "babel.bandwidth":
 		workspaceBabelConfig(&m.draft).BandwidthMbps = parseInt(value)
+	case "babel.balance":
+		bias, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil || bias < -2 || bias > 2 {
+			return errors.New("balance must be between -2 (latency) and +2 (bandwidth)")
+		}
+		workspaceBabelConfig(&m.draft).Balance = &bias
 	case "awg.obfuscation":
 		applyAmneziaParameterString(m.draft.Spec.AmneziaWG, value)
 	case "xfrm.remote", "xfrm.local":

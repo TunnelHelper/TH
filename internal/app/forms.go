@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -122,7 +123,26 @@ func collectBabelTunnelConfig(prompts *prompts, record *model.Tunnel) error {
 		return parseErr
 	}
 	record.Spec.Babel.BandwidthMbps = bandwidthMbps
+
+	balance := 0.0
+	if err := prompts.slider("ECMP balance (right = bandwidth, left = latency)", -2, 2, 1, &balance, renderBiasBar); err != nil {
+		return err
+	}
+	if balance != 0 {
+		record.Spec.Babel.Balance = &balance
+	}
 	return nil
+}
+
+// renderBiasBar draws the per-tunnel ECMP balance selection bar and the
+// weight exponents it maps to (alpha = 1 + bias, beta = 1 - bias).
+func renderBiasBar(bias float64) string {
+	const positions = 21
+	index := int(math.Round((bias + 2) / 4 * float64(positions-1)))
+	bar := strings.Repeat("─", index) + "●" + strings.Repeat("─", positions-1-index)
+	alpha := clampExponent(1 + bias)
+	beta := clampExponent(1 - bias)
+	return fmt.Sprintf("Latency ◄ %s ► Bandwidth    α=%.1f β=%.1f", bar, alpha, beta)
 }
 
 // collectMptcpTunnelConfig asks whether this tunnel's addresses should be

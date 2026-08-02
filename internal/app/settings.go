@@ -12,41 +12,6 @@ import (
 	"github.com/TunnelHelper/TH/internal/config"
 )
 
-// balanceBias converts the stored weight exponents to the balance
-// position. It is the inverse of the write-back mapping (alpha = 1 + bias,
-// beta = 1 - bias), so the editor round-trips for pairs with
-// alpha + beta = 2 and otherwise preserves the bandwidth/latency
-// direction.
-func balanceBias(alpha, beta float64) float64 {
-	bias := (alpha - beta) / 2
-	if bias < -2 {
-		return -2
-	}
-	if bias > 2 {
-		return 2
-	}
-	return bias
-}
-
-// exponentsRepresentable reports whether the stored weight exponents can
-// be expressed exactly by the balance mapping (alpha = 1 + bias,
-// beta = 1 - bias), i.e. whether alpha + beta = 2 within floating-point
-// tolerance.
-func exponentsRepresentable(alpha, beta float64) bool {
-	return math.Abs(alpha+beta-2) < 1e-9
-}
-
-// balanceExponents applies the balance result to the stored exponents.
-// When the value was not moved, the stored exponents are preserved
-// verbatim so an unrepresentable pair is never silently rewritten by an
-// unrelated save.
-func balanceExponents(moved bool, bias, storedAlpha, storedBeta float64) (float64, float64) {
-	if !moved {
-		return storedAlpha, storedBeta
-	}
-	return clampExponent(1 + bias), clampExponent(1 - bias)
-}
-
 func clampExponent(value float64) float64 {
 	if value < 0 {
 		return 0

@@ -243,13 +243,18 @@ func (b *Backend) ApplySettings(settings config.Settings) error {
 
 // ReconcileGlobal reconciles daemon-global state from the authoritative
 // tunnel list. It is invoked at daemon startup and on every periodic
-// reconcile pass so the MPTCP endpoint set matches the tunnel records even
-// when no per-tunnel event fired.
+// reconcile pass so both the Babel engine (including external interfaces
+// with no tunnels at all) and the MPTCP endpoint set converge even when no
+// per-tunnel event fired.
 func (b *Backend) ReconcileGlobal(ctx context.Context, records []model.Tunnel) error {
-	if b.mptcp == nil {
-		return nil
+	var err error
+	if babelErr := b.babel.reconcile(); babelErr != nil {
+		err = errors.Join(err, babelErr)
 	}
-	return b.mptcp.reconcileAll(ctx, records)
+	if b.mptcp == nil {
+		return err
+	}
+	return errors.Join(err, b.mptcp.reconcileAll(ctx, records))
 }
 
 // MptcpHealth returns the daemon-wide MPTCP capability and endpoint

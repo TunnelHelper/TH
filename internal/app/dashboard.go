@@ -298,7 +298,7 @@ func (m dashboardModel) inlineHeight() int {
 	if m.height <= 0 {
 		return dashboardMaxInlineHeight
 	}
-	return min(m.height, dashboardMaxInlineHeight)
+	return m.height
 }
 
 func (m dashboardModel) tableHeader(width int) string {

@@ -340,6 +340,9 @@ func validateTunnelBabel(t *Tunnel) error {
 	if t.Kind == KindSRv6 {
 		return errors.New("srv6 records cannot participate in Babel")
 	}
+	if spec.Balance != nil && (*spec.Balance < -2 || *spec.Balance > 2) {
+		return errors.New("balance must be between -2 (latency) and +2 (bandwidth)")
+	}
 	if spec.BandwidthMbps < 0 || spec.BandwidthMbps > MaxBabelBandwidthMbps {
 		return fmt.Errorf("bandwidth_mbps must be between 0 and %d", MaxBabelBandwidthMbps)
 	}

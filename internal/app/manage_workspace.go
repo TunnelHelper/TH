@@ -78,6 +78,8 @@ type manageWorkspaceModel struct {
 	draft    model.Tunnel
 
 	fieldSelected  int
+	changeSelected int
+	changesFocus   bool
 	peerSelected   int
 	peerIndex      int
 	peerAdding     bool
@@ -740,7 +742,7 @@ func (m manageWorkspaceModel) inlineHeight() int {
 	if m.height <= 0 {
 		return workspaceMaxInlineHeight
 	}
-	return min(m.height, workspaceMaxInlineHeight)
+	return m.height
 }
 
 func (m manageWorkspaceModel) inlineWidth() int {

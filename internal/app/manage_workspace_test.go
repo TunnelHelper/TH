@@ -14,6 +14,7 @@ import (
 
 	"github.com/TunnelHelper/TH/internal/control"
 	"github.com/TunnelHelper/TH/internal/model"
+	tea "github.com/charmbracelet/bubbletea"
 	ansi "github.com/charmbracelet/x/ansi"
 )
 
@@ -46,7 +47,7 @@ func TestWorkspaceBabelFields(t *testing.T) {
 	for _, kind := range []model.Kind{model.KindGRE, model.KindVXLAN, model.KindWireGuard, model.KindAmneziaWG, model.KindXFRMStatic, model.KindXFRMIKEv2} {
 		t.Run(string(kind), func(t *testing.T) {
 			fields := workspaceTunnelFields(workspaceTestTunnel(kind))
-			if workspaceFieldIndex(fields, "babel.enabled") == 0 || workspaceFieldIndex(fields, "babel.bandwidth") == 0 {
+			if workspaceFieldIndex(fields, "babel.enabled") == 0 || workspaceFieldIndex(fields, "babel.balance") == 0 || workspaceFieldIndex(fields, "babel.bandwidth") == 0 {
 				t.Fatalf("babel fields are missing for %s: %+v", kind, fields)
 			}
 		})
@@ -62,6 +63,15 @@ func TestWorkspaceBabelFields(t *testing.T) {
 	}
 	if editor.draft.Spec.Babel == nil || editor.draft.Spec.Babel.BandwidthMbps != 500 {
 		t.Fatalf("bandwidth was not applied: %+v", editor.draft.Spec.Babel)
+	}
+	if err := editor.applyTunnelInput("babel.balance", "1.5"); err != nil {
+		t.Fatal(err)
+	}
+	if editor.draft.Spec.Babel.Balance == nil || *editor.draft.Spec.Babel.Balance != 1.5 {
+		t.Fatalf("balance was not applied: %+v", editor.draft.Spec.Babel.Balance)
+	}
+	if err := editor.applyTunnelInput("babel.balance", "9"); err == nil {
+		t.Fatal("balance outside [-2, 2] must be rejected")
 	}
 	if err := editor.toggleWorkspaceField("babel.enabled"); err != nil {
 		t.Fatal(err)
@@ -116,6 +126,57 @@ func TestWorkspaceMptcpEndpointChoice(t *testing.T) {
 	}
 }
 
+func TestWorkspaceEditorChangesScroll(t *testing.T) {
+	before := workspaceTestTunnel(model.KindWireGuard)
+	after, err := model.Clone(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after.Name = before.Name + "-renamed"
+	after.Spec.WireGuard.ListenPort = 51821
+	after.Spec.WireGuard.MTU = 1400
+	after.Spec.WireGuard.FirewallMark = 7
+	after.Spec.WireGuard.RouteTable = 200
+	after.Spec.WireGuard.Addresses = []netip.Prefix{netip.MustParsePrefix("10.0.0.1/24")}
+	after.Spec.Babel = &model.BabelTunnelConfig{Enabled: true, BandwidthMbps: 100}
+	balance := 1.5
+	after.Spec.Babel.Balance = &balance
+	changes := workspaceTunnelChanges(before, after)
+	if len(changes) < 9 {
+		t.Fatalf("fixture must produce several changes, got %+v", changes)
+	}
+
+	editor := manageWorkspaceModel{
+		page: workspaceEdit, original: before, draft: after,
+		fieldSelected: len(workspaceTunnelFields(after)) - 1,
+		width:         120, height: 40,
+	}
+	updated, _ := editor.updateTunnelEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	editor = updated.(manageWorkspaceModel)
+	if !editor.changesFocus {
+		t.Fatal("down on the last field must move focus to the pending changes")
+	}
+
+	updated, _ = editor.updateTunnelEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	editor = updated.(manageWorkspaceModel)
+	if editor.changeSelected != 1 {
+		t.Fatalf("down must scroll into the changes, selected = %d", editor.changeSelected)
+	}
+	view := editor.tunnelEditorView(120)
+	if !strings.Contains(view, "Pending changes") || !strings.Contains(view, "↑/↓ to scroll") {
+		t.Fatalf("changes view must indicate scrolling:\n%s", view)
+	}
+
+	// Up at the top of the changes returns to the fields.
+	updated, _ = editor.updateTunnelEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	editor = updated.(manageWorkspaceModel)
+	updated, _ = editor.updateTunnelEditor(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	editor = updated.(manageWorkspaceModel)
+	if editor.changesFocus || editor.changeSelected != 0 {
+		t.Fatalf("up at the top of changes must return to fields: focus=%t selected=%d", editor.changesFocus, editor.changeSelected)
+	}
+}
+
 func TestWorkspaceEditPreparesLegacyNameMigration(t *testing.T) {
 	legacy := workspaceTestTunnel(model.KindXFRMIKEv2)
 	legacy.Name = "rfc-tyo"
@@ -153,8 +214,8 @@ func TestWorkspaceViewShowsBreadcrumbDirtyStateAndDiff(t *testing.T) {
 	if strings.Contains(view, "│") {
 		t.Fatalf("wide editor unexpectedly rendered a split-pane divider:\n%s", view)
 	}
-	if lines := strings.Count(view, "\n") + 1; lines > workspaceMaxInlineHeight {
-		t.Fatalf("workspace uses %d lines, compact limit is %d:\n%s", lines, workspaceMaxInlineHeight, view)
+	if lines := strings.Count(view, "\n") + 1; lines > m.height {
+		t.Fatalf("workspace uses %d lines, terminal height is %d:\n%s", lines, m.height, view)
 	}
 }
 

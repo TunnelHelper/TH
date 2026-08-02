@@ -215,6 +215,12 @@ type BabelTunnelConfig struct {
 	// Enabled controls whether this tunnel participates in Babel.
 	Enabled bool `json:"enabled"`
 
+	// Balance is the per-tunnel ECMP bandwidth/latency bias in [-2, 2],
+	// mapped to weight exponents alpha = 1 + balance and beta = 1 - balance
+	// (both clamped to [0, 4]). Positive favours bandwidth, negative
+	// favours low latency. nil uses the daemon-global exponent defaults.
+	Balance *float64 `json:"balance,omitempty"`
+
 	// BandwidthMbps is the operator-declared usable bandwidth of this
 	// tunnel. It drives the ECMP next-hop weights (256 * bw_i / bw_best).
 	// Zero means the tunnel has no bandwidth claim and gets a default

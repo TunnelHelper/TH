@@ -59,6 +59,26 @@ func TestValidateBabelTunnelBandwidthRange(t *testing.T) {
 	}
 }
 
+func TestValidateBabelTunnelBalanceRange(t *testing.T) {
+	record := newBabelTunnel()
+	for _, balance := range []float64{-2, 0, 2} {
+		record.Spec.Babel.Balance = &balance
+		if err := Validate(record); err != nil {
+			t.Errorf("balance %v must validate: %v", balance, err)
+		}
+	}
+	for _, balance := range []float64{-2.1, 2.5} {
+		record.Spec.Babel.Balance = &balance
+		if err := Validate(record); err == nil {
+			t.Errorf("balance %v must be rejected", balance)
+		}
+	}
+	record.Spec.Babel.Balance = nil
+	if err := Validate(record); err != nil {
+		t.Fatalf("nil balance must validate: %v", err)
+	}
+}
+
 func TestValidateBabelTunnelRejectsSRv6(t *testing.T) {
 	record := newBabelTunnel()
 	record.Kind = KindSRv6

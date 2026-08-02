@@ -47,7 +47,7 @@ func TestWireGuardShowsLocalKeyBeforePeerPrompt(t *testing.T) {
 }
 
 func TestCreateFormCollectsBabelToggle(t *testing.T) {
-	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n1\n250\n1\n")
+	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n1\n250\n\n1\n")
 	record, err := collectTunnel(prompts, model.KindWireGuard, nil, "ux-babel", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestCreateFormCollectsBabelToggle(t *testing.T) {
 }
 
 func TestCollectBabelUnicastFallback(t *testing.T) {
-	prompts, output := transcriptPrompts("1\n250\n")
+	prompts, output := transcriptPrompts("1\n250\n\n")
 	record := model.Tunnel{
 		Kind: model.KindWireGuard,
 		Spec: model.Spec{
@@ -127,6 +127,45 @@ func TestCollectMptcpOffAndFollowGlobal(t *testing.T) {
 	}
 	if record.Spec.Mptcp != nil {
 		t.Fatalf("Follow global must leave the MPTCP section empty, got %+v", record.Spec.Mptcp)
+	}
+}
+
+func TestCollectBabelBalanceSlider(t *testing.T) {
+	record := model.Tunnel{
+		Kind: model.KindGRE,
+		Spec: model.Spec{GRE: &model.GRESpec{}},
+	}
+	prompts, _ := transcriptPrompts("1\n100\n1\n") // Babel On, 100 Mbps, balance +1
+	if err := collectBabelTunnelConfig(prompts, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Spec.Babel == nil || record.Spec.Babel.Balance == nil || *record.Spec.Babel.Balance != 1 {
+		t.Fatalf("balance was not collected: %+v", record.Spec.Babel)
+	}
+
+	// Default balance (0) leaves the field unset so the tunnel follows the
+	// daemon-global defaults.
+	record = model.Tunnel{Kind: model.KindGRE, Spec: model.Spec{GRE: &model.GRESpec{}}}
+	prompts, _ = transcriptPrompts("1\n100\n\n") // empty slider input keeps default 0
+	if err := collectBabelTunnelConfig(prompts, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Spec.Babel.Balance != nil {
+		t.Fatalf("default balance must stay unset, got %+v", record.Spec.Babel.Balance)
+	}
+}
+
+func TestRenderBiasBar(t *testing.T) {
+	bandwidth := renderBiasBar(1)
+	if !strings.Contains(bandwidth, "α=2.0 β=0.0") {
+		t.Fatalf("positive bias must render bandwidth-dominant, got %q", bandwidth)
+	}
+	latency := renderBiasBar(-1)
+	if !strings.Contains(latency, "α=0.0 β=2.0") {
+		t.Fatalf("negative bias must render latency-dominant, got %q", latency)
+	}
+	if strings.ContainsAny(bandwidth, "延迟带宽") {
+		t.Fatalf("balance bar must render in English, got %q", bandwidth)
 	}
 }
 
