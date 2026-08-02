@@ -337,6 +337,12 @@ func TestApplyMPTCPScheduler(t *testing.T) {
 	if err := writeTestFile(availablePath, "default roundrobin blest"); err != nil {
 		t.Fatal(err)
 	}
+	// Pre-create the scheduler file so the sysctl-style write keeps the
+	// fixture's read permissions instead of creating a 000-mode file that
+	// a non-root test user cannot read back.
+	if err := writeTestFile(schedulerPath, "default"); err != nil {
+		t.Fatal(err)
+	}
 
 	if warning := applyMPTCPScheduler("", availablePath, schedulerPath); warning != "" {
 		t.Fatalf("empty scheduler must not write anything: %q", warning)
@@ -408,7 +414,7 @@ func TestMptcpGenlEncodeDecode(t *testing.T) {
 }
 
 func writeTestFile(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0)
+	return os.WriteFile(path, []byte(content), 0o600)
 }
 
 func readTestFile(path string) (string, error) {
