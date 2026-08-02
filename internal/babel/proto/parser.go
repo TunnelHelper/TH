@@ -516,6 +516,15 @@ func (p *Parser) address(b []byte, ae AddressEncoding, omitted uint8, plen int8)
 			rplen = uint8(plen)
 		}
 
+		// RFC 8966 Section 4.6.9: Plen is the prefix length in bits and
+		// cannot exceed the address length, and Omitted cannot exceed
+		// either the address length or the number of octets in the prefix
+		// itself. Rejecting these up front keeps the buffer operations
+		// below from indexing past the address buffer on malformed TLVs.
+		if rplen > alen*8 || omitted > alen || omitted > (rplen+7)/8 {
+			return nil, Address{}, ErrInvalidAddress
+		}
+
 		blen := rplen/8 - omitted
 		if rplen%8 != 0 { // Round upwards
 			blen++
@@ -561,6 +570,10 @@ func (p *Parser) address(b []byte, ae AddressEncoding, omitted uint8, plen int8)
 		}
 
 	case AddressEncodingIPv6LinkLocal:
+		if omitted != 0 {
+			// RFC 8966 Section 4.6.9: for AE 3, Omitted MUST be 0.
+			return nil, Address{}, ErrInvalidAddress
+		}
 		if len(b) < 8 {
 			return nil, Address{}, ErrTooShort
 		}

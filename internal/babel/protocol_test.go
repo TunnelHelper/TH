@@ -306,6 +306,41 @@ func TestOnUpdateUnfeasibleIgnored(t *testing.T) {
 	}
 }
 
+func TestOnUpdateUnfeasibleBackupRouteUpdated(t *testing.T) {
+	s := newTestSpeaker(t)
+	n1 := newFakeNeighbour(s, "fe80::1", 96)
+	n2 := newFakeNeighbour(s, "fe80::2", 96)
+	pfx := netip.MustParsePrefix("192.168.9.0/24")
+	rid := proto.RouterID{9}
+
+	// Primary route via n1 (metric 186) and backup via n2 (metric 196).
+	r1 := insertRoute(s, n1, pfx.String(), rid, 6, 90)
+	r2 := insertRoute(s, n2, pfx.String(), rid, 6, 100)
+	s.runSelectionLocked()
+	if !r1.Selected || r2.Selected {
+		t.Fatal("n1 route must be selected and n2 route must be the backup")
+	}
+
+	// The feasibility distance (6, 100) makes a same-seqno metric-100 update
+	// unfeasible. RFC 8966 Section 3.5.3 only permits ignoring an unfeasible
+	// same-router-id update when the entry is currently selected; a backup
+	// entry is updated and immediately unselected so that it cannot be
+	// installed while it is not known to be loop-free.
+	s.Sources.Insert(&Source{Prefix: pfx, RouterID: rid, SeqNo: 6, Metric: 100})
+	s.onUpdateReceived(n2, &proto.Update{Prefix: pfx, RouterID: rid, Seqno: 6, Metric: 100})
+
+	if r2.SeqNo != 6 || r2.AdvertisedMetric != 100 || r2.Feasible {
+		t.Errorf("backup route must be updated and marked unfeasible: seqno=%d metric=%d feasible=%v",
+			r2.SeqNo, r2.AdvertisedMetric, r2.Feasible)
+	}
+	if r2.Selected {
+		t.Error("unfeasible backup route must not be selected")
+	}
+	if !r1.Selected || !r1.Feasible {
+		t.Error("selected route must be unaffected by the backup update")
+	}
+}
+
 func TestAdvertiseWithdrawLocal(t *testing.T) {
 	s := newTestSpeaker(t)
 	pfx := netip.MustParsePrefix("10.1.0.0/16")

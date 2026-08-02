@@ -232,6 +232,66 @@ func TestParserV4ViaV6Update(t *testing.T) {
 	}
 }
 
+func TestParserAddressRejectsOutOfRangePlenOmitted(t *testing.T) {
+	p := NewParser()
+
+	// Plen larger than the 32-bit IPv4 address length must be rejected
+	// instead of indexing past the address buffer.
+	if _, _, err := p.prefix(make([]byte, 16), AddressEncodingIPv4, 33, 0); !errors.Is(err, ErrInvalidAddress) {
+		t.Fatalf("IPv4 plen=33: err = %v, want ErrInvalidAddress", err)
+	}
+
+	// Omitted larger than the 16-octet IPv6 address length must be rejected.
+	p.CurrentDefaultPrefix[AddressEncodingIPv6] = netip.MustParseAddr("fe80::1")
+	if _, _, err := p.prefix(make([]byte, 16), AddressEncodingIPv6, 128, 17); !errors.Is(err, ErrInvalidAddress) {
+		t.Fatalf("IPv6 omitted=17: err = %v, want ErrInvalidAddress", err)
+	}
+
+	// Omitted larger than the prefix itself (ceil(plen/8) octets) must be
+	// rejected; it would otherwise yield a negative Prefix field length.
+	if _, _, err := p.prefix(make([]byte, 16), AddressEncodingIPv6, 8, 3); !errors.Is(err, ErrInvalidAddress) {
+		t.Fatalf("IPv6 plen=8 omitted=3: err = %v, want ErrInvalidAddress", err)
+	}
+
+	// AE 3 (link-local IPv6) does not allow compression: Omitted MUST be 0.
+	if _, _, err := p.prefix(make([]byte, 8), AddressEncodingIPv6LinkLocal, 64, 1); !errors.Is(err, ErrInvalidAddress) {
+		t.Fatalf("AE 3 omitted=1: err = %v, want ErrInvalidAddress", err)
+	}
+
+	// Valid compressed prefixes still decode: omitted octets are taken from
+	// the previously established default prefix.
+	p.CurrentDefaultPrefix[AddressEncodingIPv6] = netip.MustParseAddr("2001:db8::1")
+	got, pfx, err := p.prefix([]byte{0, 0, 0, 0, 0, 0}, AddressEncodingIPv6, 80, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("valid compressed prefix must consume the buffer, got %d bytes left", len(got))
+	}
+	want := netip.MustParsePrefix("2001:db8::/80")
+	if pfx != want {
+		t.Errorf("compressed prefix = %s, want %s", pfx, want)
+	}
+}
+
+func TestParserPacketRejectsMalformedUpdatePlen(t *testing.T) {
+	// A crafted Update TLV with AE=1 (IPv4) and plen=33 used to panic with
+	// "index out of range" while masking bits beyond the prefix length.
+	// It must now be rejected as an invalid address.
+	pkt := []byte{
+		0x2a, 0x02, 0x00, 0x11, // magic, version, body length (17)
+		0x08, 0x0f, // Update TLV, body length 15
+		0x01, 0x00, 0x21, 0x00, // AE=1, flags=0, plen=33, omitted=0
+		0x00, 0x01, 0x00, 0x01, 0x00, 0x64, // interval, seqno, metric
+		0x00, 0x00, 0x00, 0x00, 0x00, // 5 prefix octets
+	}
+
+	p := NewParser()
+	if _, _, err := p.Packet(pkt); !errors.Is(err, ErrInvalidAddress) {
+		t.Fatalf("Packet: err = %v, want ErrInvalidAddress", err)
+	}
+}
+
 func TestParserPathMetricsRoundTrip(t *testing.T) {
 	p := NewParser()
 	rid := RouterID{0x01, 0x23, 0x34, 0x45, 0x67, 0x89, 0x0a, 0xbc}

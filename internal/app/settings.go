@@ -39,15 +39,10 @@ func (a *tuiApp) editBabelSettings() error {
 
 	// ECMP balance knob: bias in [-2, 2] maps to the weight exponents
 	// (alpha = 1 + bias, beta = 1 - bias, clamped to [0, 4]). Moving left
-	// favours bandwidth, moving right favours low latency; the centre is
+	// favours low latency, moving right favours bandwidth; the centre is
 	// the default (1, 1).
-	bias := (settings.WeightRTTExponent - settings.WeightBandwidthExponent) / 2
-	if bias < -2 {
-		bias = -2
-	} else if bias > 2 {
-		bias = 2
-	}
-	if err := a.prompts.slider("ECMP balance (left = bandwidth, right = latency)", -2, 2, 1, &bias, renderBalanceSlider); err != nil {
+	bias := balanceBias(settings.WeightBandwidthExponent, settings.WeightRTTExponent)
+	if err := a.prompts.slider("ECMP balance (right = bandwidth, left = latency)", -2, 2, 1, &bias, renderBalanceSlider); err != nil {
 		return err
 	}
 	settings.WeightBandwidthExponent = clampExponent(1 + bias)
@@ -118,6 +113,21 @@ func (a *tuiApp) editBabelSettings() error {
 	return nil
 }
 
+// balanceBias converts the stored weight exponents to the slider position.
+// It is the inverse of the write-back mapping (alpha = 1 + bias,
+// beta = 1 - bias), so the dialog round-trips for pairs with
+// alpha + beta = 2 and otherwise preserves the bandwidth/latency direction.
+func balanceBias(alpha, beta float64) float64 {
+	bias := (alpha - beta) / 2
+	if bias < -2 {
+		return -2
+	}
+	if bias > 2 {
+		return 2
+	}
+	return bias
+}
+
 // renderBalanceSlider draws the bandwidth/latency balance knob.
 func renderBalanceSlider(value float64) string {
 	const positions = 21
@@ -125,7 +135,7 @@ func renderBalanceSlider(value float64) string {
 	bar := strings.Repeat("─", index) + "●" + strings.Repeat("─", positions-1-index)
 	alpha := math.Max(0, 1+value)
 	beta := math.Max(0, 1-value)
-	return fmt.Sprintf("带宽 ◄ %s ► 延迟    α=%.1f β=%.1f", bar, alpha, beta)
+	return fmt.Sprintf("延迟 ◄ %s ► 带宽    α=%.1f β=%.1f", bar, alpha, beta)
 }
 
 func clampExponent(value float64) float64 {
