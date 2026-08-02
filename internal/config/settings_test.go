@@ -171,3 +171,79 @@ func TestMptcpSettingsRoundTripThroughLoad(t *testing.T) {
 		t.Fatalf("loaded MPTCP settings = %+v, want enabled roundrobin", loaded.Mptcp)
 	}
 }
+
+func writeValidSettingsFile(t *testing.T, path, stateDir, runtimeDir string, routerID string) {
+	t.Helper()
+	content := `{
+		"state_dir": "` + stateDir + `",
+		"runtime_dir": "` + runtimeDir + `",
+		"socket_path": "` + filepath.Join(runtimeDir, "control.sock") + `",
+		"socket_group": "th",
+		"babel": {"router_id": "` + routerID + `"},
+		"mptcp": {"enabled": true, "scheduler": "roundrobin"}
+	}`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadDaemonHonorsStateDirOverride(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	runtimeDir := filepath.Join(root, "run")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "thd.json")
+	writeValidSettingsFile(t, configPath, stateDir, runtimeDir, "0011223344556677")
+	writeValidSettingsFile(t, SettingsOverridePath(stateDir), stateDir, runtimeDir, "aabbccddeeff0011")
+
+	settings, err := LoadDaemon(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Babel.RouterID != "aabbccddeeff0011" {
+		t.Fatalf("override must win, router id = %q", settings.Babel.RouterID)
+	}
+	if !settings.Mptcp.Enabled {
+		t.Fatalf("override MPTCP settings were not honored: %+v", settings.Mptcp)
+	}
+}
+
+func TestLoadDaemonIgnoresMissingOrInvalidOverride(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	runtimeDir := filepath.Join(root, "run")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "thd.json")
+	writeValidSettingsFile(t, configPath, stateDir, runtimeDir, "0011223344556677")
+
+	// No override: the configured file wins.
+	settings, err := LoadDaemon(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Babel.RouterID != "0011223344556677" {
+		t.Fatalf("router id = %q, want the configured file", settings.Babel.RouterID)
+	}
+
+	// An invalid override falls back to the configured file.
+	if err := os.WriteFile(SettingsOverridePath(stateDir), []byte(`{"not": "valid json`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = LoadDaemon(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Babel.RouterID != "0011223344556677" {
+		t.Fatalf("invalid override must fall back, router id = %q", settings.Babel.RouterID)
+	}
+}

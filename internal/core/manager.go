@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TunnelHelper/TH/internal/config"
 	"github.com/TunnelHelper/TH/internal/model"
 	"github.com/TunnelHelper/TH/internal/store"
 )
@@ -24,6 +25,7 @@ type Manager struct {
 
 	settingsPath  string
 	applySettings settingsApplier
+	writeSettings func(string, config.Settings) error
 }
 
 func NewManager(records Store, reconciler *Reconciler) *Manager {

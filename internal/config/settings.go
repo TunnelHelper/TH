@@ -19,6 +19,19 @@ import (
 
 const DefaultConfigPath = "/etc/th/thd.json"
 
+// SettingsOverrideName is the file name inside the state directory that
+// shadows the configured daemon settings file when that path is not
+// writable (for example on a read-only root filesystem). The daemon writes
+// it only when persisting to the configured path fails and removes it
+// again once the configured path is writable.
+const SettingsOverrideName = "thd.json"
+
+// SettingsOverridePath returns the state-directory override path for the
+// daemon settings.
+func SettingsOverridePath(stateDir string) string {
+	return filepath.Join(stateDir, SettingsOverrideName)
+}
+
 type Settings struct {
 	StateDir                 string `json:"state_dir"`
 	RuntimeDir               string `json:"runtime_dir"`
@@ -221,6 +234,27 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	return settings, nil
+}
+
+// LoadDaemon loads daemon settings from path, honoring a state-directory
+// override written when the configured path could not be updated (read-only
+// root filesystem or missing config directory). A missing, non-regular or
+// invalid override falls back to the configured file.
+func LoadDaemon(path string) (Settings, error) {
+	base, err := Load(path)
+	if err != nil {
+		return Settings{}, err
+	}
+	overridePath := SettingsOverridePath(base.StateDir)
+	info, err := os.Lstat(overridePath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return base, nil
+	}
+	override, err := Load(overridePath)
+	if err != nil {
+		return base, nil
+	}
+	return override, nil
 }
 
 func (s Settings) Validate() error {

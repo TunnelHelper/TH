@@ -57,7 +57,7 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 			continue
 		}
 		if choice == "settings" {
-			if err := app.editDaemonSettings(); err != nil && !errors.Is(err, ErrAborted) {
+			if err := runSettingsEditor(app.client, app.timeout, output); err != nil && !errors.Is(err, ErrAborted) {
 				output.Warn(err.Error())
 			}
 			continue
@@ -100,7 +100,7 @@ func (a *tuiApp) mainMenuOptions() []ui.Option {
 		{Label: "Create IKEv2 XFRM", Value: string(model.KindXFRMIKEv2)},
 		{Label: "Create static XFRM", Value: string(model.KindXFRMStatic)},
 		{Label: "Create SRv6", Value: string(model.KindSRv6)},
-		{Label: "Babel & MPTCP settings", Value: "settings"},
+		{Label: "Settings", Value: "settings"},
 		{Label: "Exit", Value: "exit"},
 	}
 	for i := range options {

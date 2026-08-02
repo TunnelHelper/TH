@@ -46,6 +46,15 @@ func TestMainMenuDefaultsToManagementWorkflow(t *testing.T) {
 	if len(options) < 4 || options[2].Value != string(model.KindWireGuard) || options[3].Value != string(model.KindAmneziaWG) {
 		t.Fatalf("V1 creation order was not retained: %+v", options)
 	}
+	foundSettings := false
+	for _, option := range options {
+		if option.Value == "settings" && option.Label == "Settings" {
+			foundSettings = true
+		}
+	}
+	if !foundSettings {
+		t.Fatalf("main menu must expose a single Settings entry: %+v", options)
+	}
 }
 
 func TestAmneziaUnavailableWarningHidesLowLevelNetlinkError(t *testing.T) {

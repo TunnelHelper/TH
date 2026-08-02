@@ -201,9 +201,10 @@ Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
 - [x] Degrade gracefully when MPTCP is unavailable: tunnels and Babel keep
       working, `th health` reports `mptcp: unsupported (reason)` and
       endpoint counts appear in observations.
-- [x] Extend the settings API to a Babel + MPTCP payload and add the MPTCP
-      section to the TUI settings page (switch, scheduler, endpoint count,
-      capability reason) plus per-tunnel endpoint toggles in the create
+- [x] Extend the settings API to a Babel + MPTCP payload and add a unified
+      TUI settings editor (one page with Babel + MPTCP sections, external
+      interface sub-editor, MPTCP capability/endpoint readout and a
+      diff-before-save flow) plus per-tunnel endpoint toggles in the create
       wizard and workspace editor.
 - [x] Unit-test config/model validation, fake-genl Add/Del/List, reconcile
       diff and ownership rules, scheduler sysctl handling, and the backend

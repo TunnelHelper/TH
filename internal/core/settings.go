@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -21,16 +22,18 @@ func NewManagerWithSettings(records Store, reconciler *Reconciler, settingsPath 
 	manager := NewManager(records, reconciler)
 	manager.settingsPath = settingsPath
 	manager.applySettings = apply
+	manager.writeSettings = writeSettings
 	return manager
 }
 
 // Settings returns the operator-editable daemon settings (Babel and MPTCP
-// sections) from the daemon settings file.
+// sections), honoring a state-directory override when the configured
+// settings path cannot be written.
 func (m *Manager) Settings() (config.Settings, error) {
 	if m.settingsPath == "" {
 		return config.Settings{}, errors.New("daemon settings are not configured")
 	}
-	settings, err := config.Load(m.settingsPath)
+	settings, err := config.LoadDaemon(m.settingsPath)
 	if err != nil {
 		return config.Settings{}, fmt.Errorf("load daemon settings: %w", err)
 	}
@@ -45,7 +48,7 @@ func (m *Manager) UpdateSettings(ctx context.Context, next config.Settings) erro
 	if err := next.Validate(); err != nil {
 		return fmt.Errorf("invalid daemon settings: %w", err)
 	}
-	current, err := config.Load(m.settingsPath)
+	current, err := config.LoadDaemon(m.settingsPath)
 	if err != nil {
 		return fmt.Errorf("load daemon settings: %w", err)
 	}
@@ -54,7 +57,7 @@ func (m *Manager) UpdateSettings(ctx context.Context, next config.Settings) erro
 	settings := current
 	settings.Babel = next.Babel
 	settings.Mptcp = next.Mptcp
-	if err := writeSettings(m.settingsPath, settings); err != nil {
+	if err := m.saveSettings(m.settingsPath, settings); err != nil {
 		return fmt.Errorf("persist daemon settings: %w", err)
 	}
 	if m.applySettings != nil {
@@ -63,6 +66,36 @@ func (m *Manager) UpdateSettings(ctx context.Context, next config.Settings) erro
 		}
 	}
 	return nil
+}
+
+// saveSettings persists the settings to the configured path. When that
+// path is not writable (read-only root filesystem, missing config
+// directory), it falls back to a daemon-owned override in the state
+// directory so the TUI/API settings editor still works. The override is
+// removed automatically once the configured path is writable again.
+func (m *Manager) saveSettings(path string, settings config.Settings) error {
+	overridePath := config.SettingsOverridePath(settings.StateDir)
+	write := m.settingsWriter()
+	if err := write(path, settings); err == nil {
+		if removeErr := os.Remove(overridePath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			slog.Warn("remove stale daemon settings override failed", "path", overridePath, "error", removeErr)
+		}
+		return nil
+	} else {
+		slog.Warn("daemon settings path is not writable; falling back to the state-directory override",
+			"path", path, "error", err, "override", overridePath)
+		if overrideErr := write(overridePath, settings); overrideErr != nil {
+			return errors.Join(err, overrideErr)
+		}
+		return nil
+	}
+}
+
+func (m *Manager) settingsWriter() func(string, config.Settings) error {
+	if m.writeSettings != nil {
+		return m.writeSettings
+	}
+	return writeSettings
 }
 
 func writeSettings(path string, settings config.Settings) error {

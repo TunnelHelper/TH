@@ -7,6 +7,12 @@ and unspecified fields retain secure defaults. Unknown fields and multiple JSON
 values are rejected. When present, it must be a regular file owned by the daemon
 UID and must not be writable by its group or other users.
 
+When the configured settings path cannot be written (for example an immutable
+or read-only root filesystem), settings saved through the API or TUI are
+persisted to `<state_dir>/thd.json` instead. That override takes precedence
+when the daemon starts and is removed automatically once saving to the
+configured path succeeds again.
+
 ```json
 {
   "state_dir": "/var/lib/th",

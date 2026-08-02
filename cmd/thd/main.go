@@ -55,7 +55,7 @@ func run(args []string) error {
 		return errors.New("thd must run as root")
 	}
 
-	settings, err := config.Load(*configPath)
+	settings, err := config.LoadDaemon(*configPath)
 	if err != nil {
 		return err
 	}
