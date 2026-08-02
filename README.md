@@ -15,10 +15,21 @@ Supported tunnel kinds:
 - Static-key XFRM
 - IKEv2 XFRM controlled through strongSwan VICI
 - SRv6 route sets
+- Babel dynamic routing (RFC 8966) as an in-process control plane over
+  TH-managed tunnel links, with weighted multipath installation into
+  TH-owned route tables
 
 The current architecture is a clean break. It has no old-format importer,
 compatibility parser, or automatic cleanup workflow. Remove or disable old
 tunnel definitions before enabling TH records that use the same names.
+
+The Babel backend runs the protocol inside the daemon itself (no external
+routing daemon) and installs the selected routes with TH ownership tags
+(`protocol 242` + per-record realm) so stale dynamic routes are removed
+only when TH can prove it created them. Non-multicast links such as
+WireGuard use configured static neighbours with unicast Hellos; link cost
+is pluggable so measured bandwidth or latency can drive routing decisions,
+and multipath candidates are exported with their metrics for weighted ECMP.
 
 ## Architecture
 

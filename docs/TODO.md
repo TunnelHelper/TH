@@ -88,6 +88,25 @@ Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
 - [x] Reconcile links, addresses, peers, routes, and status.
 - [x] Add UAPI fixture and conditional-kernel lifecycle tests.
 
+### Babel
+
+- [x] Vendor the Babel protocol implementation as `internal/babel` with no
+      external module dependency.
+- [x] Implement route exchange: periodic and triggered updates, route
+      acquisition, feasibility, retractions, hold time, and expiry sweep.
+- [x] Implement route selection with RFC 8966 Appendix A.3 hysteresis.
+- [x] Implement route requests and seqno requests with forwarding.
+- [x] Bootstrap non-multicast links with static neighbours and unicast Hellos.
+- [x] Add pluggable cost/metric providers (RFC 8966 Sections 3.4.3/3.5.2)
+      including a bandwidth-to-cost mapping helper.
+- [x] Export feasible multipath candidates with metrics for weighted ECMP.
+- [x] Add the `babel` tunnel kind: model, validation, defaults, and the
+      Linux backend that installs owned routes with kernel weights.
+- [x] Migrate all ginkgo/gomega tests to the standard library and drop the
+      test-only dependencies.
+- [ ] Wire the bandwidth-measurement job (passive counters + short active
+      probes) into the pluggable cost provider.
+
 ## 4. TUI and Client Workflows
 
 - [x] List and manage records through the daemon API only.

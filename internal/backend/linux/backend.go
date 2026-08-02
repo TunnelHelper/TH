@@ -40,6 +40,7 @@ type Backend struct {
 	awg      *amneziaClient
 	awgErr   error
 	vici     *viciController
+	babel    *babelRegistry
 	eventCtx context.Context
 	eventEnd context.CancelFunc
 	events   chan core.BackendEvent
@@ -65,6 +66,7 @@ func New(settings config.Settings) (*Backend, error) {
 		awg:      awg,
 		awgErr:   awgErr,
 		vici:     newVICIController(settings.VICISocketPath, settings.RequestTimeout()),
+		babel:    newBabelRegistry(),
 		eventCtx: eventCtx,
 		eventEnd: eventEnd,
 		events:   make(chan core.BackendEvent, 64),
@@ -92,6 +94,8 @@ func (b *Backend) Apply(ctx context.Context, record model.Tunnel) (core.Observat
 		return b.applyIKEv2(ctx, record)
 	case model.KindSRv6:
 		return b.applySRv6(ctx, record)
+	case model.KindBabel:
+		return b.applyBabel(ctx, record)
 	default:
 		return core.Observation{}, fmt.Errorf("unsupported tunnel kind %q", record.Kind)
 	}
@@ -119,6 +123,8 @@ func (b *Backend) Remove(ctx context.Context, record model.Tunnel) (core.Observa
 		err = b.removeIKEv2(ctx, record)
 	case model.KindSRv6:
 		err = b.removeSRv6(record)
+	case model.KindBabel:
+		_, err = b.removeBabel(record)
 	default:
 		err = fmt.Errorf("unsupported tunnel kind %q", record.Kind)
 	}
@@ -140,6 +146,8 @@ func (b *Backend) Observe(ctx context.Context, record model.Tunnel) (core.Observ
 		return b.observeStaticXFRM(record)
 	case model.KindXFRMIKEv2:
 		return b.observeIKEv2(ctx, record)
+	case model.KindBabel:
+		return b.observeBabel(record)
 	default:
 		return b.observeLink(record)
 	}
@@ -173,6 +181,7 @@ func (b *Backend) Close() error {
 	b.close.Do(func() {
 		b.eventEnd()
 		b.eventWG.Wait()
+		b.closeBabelInstances()
 		close(b.events)
 		if b.wg != nil {
 			closeErr = b.wg.Close()

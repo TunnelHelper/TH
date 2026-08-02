@@ -45,6 +45,7 @@ This document is the authoritative scope for the current architecture.
 - XFRM interface with IKEv2 managed by strongSwan VICI
 - Static-key XFRM
 - SRv6 route sets
+- Babel (RFC 8966) dynamic routing as an in-process backend
 
 ## Process Architecture
 
@@ -175,6 +176,18 @@ Fetch route sources with a bounded HTTP client, validate every prefix, cache
 atomically in the daemon state directory, and apply exact routes with netlink
 `SEG6Encap`. Route tables and rules are reconciled without broad table flushes.
 
+### Babel
+
+Run the Babel routing protocol (RFC 8966) inside the daemon on TH-managed
+tunnel interfaces. Implement route acquisition, periodic and triggered
+updates, feasibility checking, route selection with hysteresis (Appendix
+A.3), explicit requests, and route expiry. Bootstrap non-multicast links
+(WireGuard, unicast VXLAN) with configured static neighbours and unicast
+Hellos. Keep cost and metric computation pluggable so measured bandwidth
+can drive decisions, and export feasible multipath candidates so the daemon
+can install weighted ECMP routes. Install selected routes with TH ownership
+tags and reconcile them per record without touching unrelated routes.
+
 ## Packaging and Privilege
 
 Runtime code does not call a service manager. Packaging installs service files
@@ -214,8 +227,9 @@ names. Ownership conflicts are reported by the daemon and never adopted.
 3. WireGuard and static-key XFRM.
 4. IKEv2 XFRM through VICI, including PSK and RPK.
 5. SRv6 and AmneziaWG.
-6. Packaging assets, hardening, and documentation.
-7. Remove all V1 execution/config-generation code and pass the completion
+6. Babel dynamic routing with weighted multipath.
+7. Packaging assets, hardening, and documentation.
+8. Remove all V1 execution/config-generation code and pass the completion
    audit below.
 
 ## Completion Audit

@@ -184,6 +184,10 @@ func validateStableOwnership(current, next model.Tunnel) error {
 		if current.Spec.SRv6.Table != next.Spec.SRv6.Table || current.Spec.SRv6.RulePriority != next.Spec.SRv6.RulePriority {
 			return errors.New("SRv6 table and policy-rule priority are immutable; delete and recreate the tunnel")
 		}
+	case model.KindBabel:
+		if current.Spec.Babel.RouteTable != next.Spec.Babel.RouteTable {
+			return errors.New("Babel route table is immutable; delete and recreate the tunnel")
+		}
 	}
 	return nil
 }

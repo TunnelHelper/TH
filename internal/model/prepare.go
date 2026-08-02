@@ -70,6 +70,9 @@ func prepareUpdate(next, current *Tunnel, now time.Time, generateSecrets bool) e
 	if next.Kind == KindSRv6 && next.Spec.SRv6 != nil && current.Spec.SRv6 != nil && next.Spec.SRv6.RulePriority == 0 {
 		next.Spec.SRv6.RulePriority = current.Spec.SRv6.RulePriority
 	}
+	if next.Kind == KindBabel && next.Spec.Babel != nil && current.Spec.Babel != nil && next.Spec.Babel.RouterID == "" {
+		next.Spec.Babel.RouterID = current.Spec.Babel.RouterID
+	}
 	applyDefaults(next)
 	if err := prepareSecrets(next, generateSecrets); err != nil {
 		return err
@@ -168,7 +171,38 @@ func applyDefaults(t *Tunnel) {
 				}
 			}
 		}
+	case KindBabel:
+		if t.Spec.Babel != nil {
+			spec := t.Spec.Babel
+			if spec.RouterID == "" {
+				spec.RouterID = randomBabelRouterID()
+			}
+			if spec.MaxPaths == 0 {
+				spec.MaxPaths = 4
+			}
+			if spec.SplitHorizon == nil {
+				enabled := true
+				spec.SplitHorizon = &enabled
+			}
+			if !spec.Multicast && spec.UnicastHelloSeconds == 0 {
+				spec.UnicastHelloSeconds = 4
+			}
+		}
 	}
+}
+
+// randomBabelRouterID returns 8 random octets as 16 lowercase hex
+// characters, the stable identifier advertised by the Babel speaker.
+func randomBabelRouterID() string {
+	value, err := randomUint32()
+	if err != nil {
+		return "0000000000000001"
+	}
+	high, err := randomUint32()
+	if err != nil {
+		return "0000000000000001"
+	}
+	return fmt.Sprintf("%08x%08x", high, value)
 }
 
 func setXFRMDefaults(id string, ifID, reqID *uint32) {

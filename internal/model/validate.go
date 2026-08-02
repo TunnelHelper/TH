@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -36,12 +37,12 @@ func Validate(t *Tunnel) error {
 	if len(t.Name) == 0 || len(t.Name) > 64 || !namePattern.MatchString(t.Name) {
 		return errors.New("name must be 1-64 characters using letters, digits, dot, underscore, or dash")
 	}
-	if t.Kind != KindSRv6 {
+	if t.Kind != KindSRv6 && t.Kind != KindBabel {
 		if err := validateInterface(t.Interface); err != nil {
 			return err
 		}
 	} else if t.Interface != "" {
-		return errors.New("srv6 records must not set interface")
+		return errors.New("srv6 and babel records must not set interface")
 	}
 	if err := validateSpecChoice(t); err != nil {
 		return err
@@ -62,6 +63,8 @@ func Validate(t *Tunnel) error {
 		return validateXFRMIKEv2(t.Spec.XFRMIKEv2)
 	case KindSRv6:
 		return validateSRv6(t.Spec.SRv6)
+	case KindBabel:
+		return validateBabel(t.Spec.Babel)
 	default:
 		return fmt.Errorf("unsupported tunnel kind %q", t.Kind)
 	}
@@ -77,6 +80,7 @@ func validateSpecChoice(t *Tunnel) error {
 		t.Spec.XFRMStatic != nil,
 		t.Spec.XFRMIKEv2 != nil,
 		t.Spec.SRv6 != nil,
+		t.Spec.Babel != nil,
 	} {
 		if set {
 			count++
@@ -93,6 +97,7 @@ func validateSpecChoice(t *Tunnel) error {
 		KindXFRMStatic: t.Spec.XFRMStatic != nil,
 		KindXFRMIKEv2:  t.Spec.XFRMIKEv2 != nil,
 		KindSRv6:       t.Spec.SRv6 != nil,
+		KindBabel:      t.Spec.Babel != nil,
 	}
 	if !matches[t.Kind] {
 		return fmt.Errorf("spec does not match kind %q", t.Kind)
@@ -316,4 +321,111 @@ func validateMagicHeader(value string) error {
 		return errors.New("must be a non-empty value of at most 255 bytes without NUL")
 	}
 	return nil
+}
+
+const (
+	MaxBabelInterfaces     = 8
+	MaxBabelAdvertised     = 256
+	MaxBabelMaxPaths       = 8
+	MaxBabelMultipathSlack = 65534
+)
+
+func validateBabel(spec *BabelSpec) error {
+	if spec == nil {
+		return errors.New("babel spec is required")
+	}
+	if len(spec.Interfaces) == 0 {
+		return errors.New("interfaces must contain at least one interface")
+	}
+	if len(spec.Interfaces) > MaxBabelInterfaces {
+		return fmt.Errorf("interfaces exceeds %d entries", MaxBabelInterfaces)
+	}
+	seenInterfaces := make(map[string]struct{}, len(spec.Interfaces))
+	for _, name := range spec.Interfaces {
+		if err := validateInterface(name); err != nil {
+			return fmt.Errorf("interfaces: %w", err)
+		}
+		if _, ok := seenInterfaces[name]; ok {
+			return fmt.Errorf("duplicate interface %q", name)
+		}
+		seenInterfaces[name] = struct{}{}
+	}
+
+	for name, neighbours := range spec.StaticNeighbours {
+		if _, ok := seenInterfaces[name]; !ok {
+			return fmt.Errorf("static_neighbours references unknown interface %q", name)
+		}
+		if len(neighbours) > MaxBabelInterfaces*64 {
+			return fmt.Errorf("static_neighbours for %q exceeds limit", name)
+		}
+		seen := make(map[netip.Addr]struct{}, len(neighbours))
+		for _, addr := range neighbours {
+			if !addr.IsValid() || addr.IsUnspecified() {
+				return fmt.Errorf("static_neighbours[%q] contains an invalid address", name)
+			}
+			if _, ok := seen[addr]; ok {
+				return fmt.Errorf("duplicate static neighbour %s on %q", addr, name)
+			}
+			seen[addr] = struct{}{}
+		}
+	}
+
+	if spec.UnicastHelloSeconds < 0 || spec.UnicastHelloSeconds > 3600 {
+		return errors.New("unicast_hello_seconds must be between 0 and 3600")
+	}
+	if spec.RouteTable < 0 || int64(spec.RouteTable) > 2147483647 {
+		return errors.New("route_table must be between 0 and 2147483647")
+	}
+	if err := validateNetworks(spec.AdvertisedPrefixes); err != nil {
+		return fmt.Errorf("advertised_prefixes: %w", err)
+	}
+	if len(spec.AdvertisedPrefixes) > MaxBabelAdvertised {
+		return fmt.Errorf("advertised_prefixes exceeds %d entries", MaxBabelAdvertised)
+	}
+	if spec.MaxPaths < 0 || spec.MaxPaths > MaxBabelMaxPaths {
+		return fmt.Errorf("max_paths must be between 0 and %d", MaxBabelMaxPaths)
+	}
+	if spec.MultipathSlack < 0 || spec.MultipathSlack > MaxBabelMultipathSlack {
+		return fmt.Errorf("multipath_slack must be between 0 and %d", MaxBabelMultipathSlack)
+	}
+	if spec.StrictNeighbours && spec.Multicast {
+		return errors.New("strict_neighbours requires multicast to be disabled")
+	}
+	if spec.StrictNeighbours && len(spec.StaticNeighbours) == 0 {
+		return errors.New("strict_neighbours requires at least one static neighbour")
+	}
+	if spec.RouterID != "" {
+		if len(spec.RouterID) != 16 {
+			return errors.New("router_id must be exactly 16 lowercase hex characters")
+		}
+		decoded, err := hex.DecodeString(spec.RouterID)
+		if err != nil {
+			return errors.New("router_id must be 16 hex characters")
+		}
+		if isAllZeros(decoded) {
+			return errors.New("router_id must not be all zeroes")
+		}
+		if isAllOnes(decoded) {
+			return errors.New("router_id must not be all ones")
+		}
+	}
+	return nil
+}
+
+func isAllZeros(b []byte) bool {
+	for _, value := range b {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllOnes(b []byte) bool {
+	for _, value := range b {
+		if value != 0xff {
+			return false
+		}
+	}
+	return true
 }

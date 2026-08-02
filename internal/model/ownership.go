@@ -100,6 +100,15 @@ func WireGuardRouteTable(t Tunnel, spec *WireGuardSpec) int {
 	return mainRouteTable
 }
 
+// BabelRouteTable returns the kernel table Babel-installed routes are
+// reconciled into. Zero in the spec means the main table.
+func BabelRouteTable(t Tunnel) int {
+	if t.Kind == KindBabel && t.Spec.Babel != nil && t.Spec.Babel.RouteTable != 0 {
+		return t.Spec.Babel.RouteTable
+	}
+	return mainRouteTable
+}
+
 func ManagedRouteClaims(t Tunnel) []RouteClaim {
 	var spec *WireGuardSpec
 	switch t.Kind {
