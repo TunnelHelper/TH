@@ -12,7 +12,7 @@ import (
 )
 
 func TestCreateFormDefersEnableChoiceUntilReview(t *testing.T) {
-	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n")
+	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n2\n")
 	record, err := collectTunnel(prompts, model.KindWireGuard, nil, "ux-wg", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -34,7 +34,7 @@ func TestCreateFormDefersEnableChoiceUntilReview(t *testing.T) {
 }
 
 func TestWireGuardShowsLocalKeyBeforePeerPrompt(t *testing.T) {
-	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n")
+	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n2\n")
 	if _, err := collectTunnel(prompts, model.KindWireGuard, nil, "ux-key-order", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +43,20 @@ func TestWireGuardShowsLocalKeyBeforePeerPrompt(t *testing.T) {
 	peers := strings.Index(transcript, "Peers")
 	if local < 0 || peers < 0 || local >= peers {
 		t.Fatalf("local key was not shown before peer collection:\n%s", transcript)
+	}
+}
+
+func TestCreateFormCollectsBabelToggle(t *testing.T) {
+	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n1\n250\n")
+	record, err := collectTunnel(prompts, model.KindWireGuard, nil, "ux-babel", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Spec.Babel == nil || !record.Spec.Babel.Enabled || record.Spec.Babel.BandwidthMbps != 250 {
+		t.Fatalf("Babel toggle was not collected: %+v", record.Spec.Babel)
+	}
+	if !strings.Contains(output.String(), "Babel routing") {
+		t.Fatalf("create form did not ask about Babel:\n%s", output.String())
 	}
 }
 

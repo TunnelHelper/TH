@@ -531,3 +531,23 @@ func TestPathMetricsPropagation(t *testing.T) {
 		t.Fatalf("hop B->C path metrics = (%d, %d), want (10, 800)", hopBC.PathBottleneckMbps, hopBC.PathRTTMicros)
 	}
 }
+
+func TestUpdateECMPParamsAppliesPenalty(t *testing.T) {
+	s := newTestSpeaker(t)
+	n := newFakeNeighbour(s, "fe80::1", 96)
+	rid := proto.RouterID{9}
+	r := insertRoute(s, n, "10.0.0.0/24", rid, 1, 100)
+	r.PathBottleneckMbps = 10
+	s.runSelection()
+	before := r.Metric
+	if before != 196 {
+		t.Fatalf("base metric = %d, want 196", before)
+	}
+
+	// A K penalty of 100 over a 10 Mbps bottleneck adds 10 to the metric,
+	// applied to the running speaker without a rebuild.
+	s.UpdateECMPParams(4, 0, 100)
+	if r.Metric != before+10 {
+		t.Fatalf("metric after penalty = %d, want %d", r.Metric, before+10)
+	}
+}

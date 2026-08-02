@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 
 	"github.com/TunnelHelper/TH/internal/model"
+	"github.com/TunnelHelper/TH/internal/ui"
 )
 
 func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel, suggestedName string, managed []model.TunnelView) (model.Tunnel, error) {
@@ -80,6 +82,27 @@ func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel, su
 		err = collectSRv6(prompts, &record, creating)
 	default:
 		err = fmt.Errorf("unsupported tunnel kind %q", kind)
+	}
+	if err == nil && creating && kind != model.KindSRv6 {
+		enableBabel := "No"
+		if err := prompts.selectValue("Babel routing (RFC 8966)", []ui.Option{
+			{Label: "On", Value: "Yes"},
+			{Label: "Off", Value: "No"},
+		}, &enableBabel); err != nil {
+			return model.Tunnel{}, err
+		}
+		if enableBabel == "Yes" {
+			record.Spec.Babel = &model.BabelTunnelConfig{Enabled: true}
+			bandwidth := "1000"
+			if err := prompts.input("Babel bandwidth (Mbps, drives ECMP weights)", &bandwidth, validateNonNegativeIntInput); err != nil {
+				return model.Tunnel{}, err
+			}
+			bandwidthMbps, parseErr := strconv.Atoi(strings.TrimSpace(bandwidth))
+			if parseErr != nil {
+				return model.Tunnel{}, parseErr
+			}
+			record.Spec.Babel.BandwidthMbps = bandwidthMbps
+		}
 	}
 	return record, err
 }

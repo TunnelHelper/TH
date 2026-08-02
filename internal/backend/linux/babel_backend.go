@@ -70,7 +70,6 @@ type babelEngine struct {
 	tunnels          map[string]babelTunnel
 	built            string // fingerprint of the tunnels the current speaker was built from
 	routerID         [8]byte
-	settingsRev      uint64
 	lastWeightChange time.Time
 	lastWeights      map[string]string
 
@@ -206,20 +205,51 @@ func (e *babelEngine) fingerprintLocked() string {
 		keys = append(keys, id+"="+t.fingerprint())
 	}
 	sort.Strings(keys)
-	return fmt.Sprintf("%d:%s", e.settingsRev, fmt.Sprint(keys))
+	return fmt.Sprintf("%s|%x|%v|%d|%s", fmt.Sprint(keys), e.routerID,
+		e.settings.DelayMetricEnabled(), e.settings.UnicastHelloSeconds, e.externalFingerprintLocked())
+}
+
+func (e *babelEngine) externalFingerprintLocked() string {
+	names := make([]string, 0, len(e.settings.Interfaces))
+	for name, external := range e.settings.Interfaces {
+		names = append(names, fmt.Sprintf("%s=%d/%v/%v", name, external.BandwidthMbps, external.Multicast, external.Neighbours))
+	}
+	sort.Strings(names)
+	return fmt.Sprint(names)
 }
 
 // refreshSettings applies a new Babel settings snapshot at runtime and
 // rebuilds the speaker (and thus the advertised prefix set) when needed.
 func (e *babelEngine) refreshSettings(settings config.BabelSettings) error {
 	e.mu.Lock()
+	previousFingerprint := e.fingerprintLocked()
+	oldTable := e.table
 	e.settings = settings
 	e.table = settings.RouteTable
 	if e.table == 0 {
 		e.table = unix.RT_TABLE_MAIN
 	}
-	e.settingsRev++
+	speakerFingerprintChanged := e.fingerprintLocked() != previousFingerprint
+	speaker := e.speaker
+	maxPaths := settings.MultipathMaxPaths
+	if maxPaths == 0 {
+		maxPaths = 4
+	}
+	tableChanged := e.table != oldTable
 	e.mu.Unlock()
+
+	// Route-table changes move the routes to a new table; remove the old
+	// table's owned routes first so nothing is orphaned.
+	if tableChanged {
+		if err := e.removeOwnedRoutesFrom(oldTable); err != nil {
+			return err
+		}
+	}
+	// Non-protocol settings (ECMP parameters) apply to the running speaker
+	// without rebuilding it, so adjacencies stay up.
+	if !speakerFingerprintChanged && speaker != nil {
+		speaker.UpdateECMPParams(maxPaths, uint16(settings.MultipathSlack), settings.WeightBottleneckPenalty)
+	}
 	return e.reconcile()
 }
 
@@ -505,9 +535,13 @@ func babelPathScore(bottleneck float64, pathRTT int64, localRTT time.Duration, h
 }
 
 func (e *babelEngine) removeOwnedRoutes() error {
-	current, err := e.backend.netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{Table: e.table}, netlink.RT_FILTER_TABLE)
+	return e.removeOwnedRoutesFrom(e.table)
+}
+
+func (e *babelEngine) removeOwnedRoutesFrom(table int) error {
+	current, err := e.backend.netlink.RouteListFiltered(netlink.FAMILY_ALL, &netlink.Route{Table: table}, netlink.RT_FILTER_TABLE)
 	if err != nil {
-		return fmt.Errorf("list Babel route table %d: %w", e.table, err)
+		return fmt.Errorf("list Babel route table %d: %w", table, err)
 	}
 	for i := range current {
 		route := current[i]

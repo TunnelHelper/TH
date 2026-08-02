@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/babel"
+	"github.com/TunnelHelper/TH/internal/config"
 	"github.com/vishvananda/netlink"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
@@ -74,6 +75,31 @@ func TestWeightsWithinTolerance(t *testing.T) {
 	}
 	if weightsWithinTolerance("255,25", "255") {
 		t.Fatal("fingerprints with different sizes must differ")
+	}
+}
+
+func TestBabelSettingsFingerprint(t *testing.T) {
+	engine := &babelEngine{
+		settings: config.Defaults().Babel,
+		tunnels:  map[string]babelTunnel{},
+		routerID: [8]byte{1},
+	}
+	base := engine.fingerprintLocked()
+
+	// Data-plane settings (advertisement filters, weight exponents, the
+	// bottleneck penalty) must NOT trigger a speaker rebuild.
+	engine.settings.Advertise.Include = []netip.Prefix{netip.MustParsePrefix("8.0.0.0/8")}
+	engine.settings.WeightBandwidthExponent = 2
+	engine.settings.WeightRTTExponent = 0.5
+	engine.settings.WeightBottleneckPenalty = 5
+	if got := engine.fingerprintLocked(); got != base {
+		t.Fatalf("data-plane settings changed the speaker fingerprint: %s != %s", got, base)
+	}
+
+	// Protocol-affecting settings must trigger a rebuild.
+	engine.routerID = [8]byte{2}
+	if got := engine.fingerprintLocked(); got == base {
+		t.Fatal("router id change must trigger a speaker rebuild")
 	}
 }
 

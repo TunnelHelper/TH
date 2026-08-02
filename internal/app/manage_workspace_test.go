@@ -42,6 +42,35 @@ func TestWorkspaceFieldsCoverEveryTunnelKind(t *testing.T) {
 	}
 }
 
+func TestWorkspaceBabelFields(t *testing.T) {
+	for _, kind := range []model.Kind{model.KindGRE, model.KindVXLAN, model.KindWireGuard, model.KindAmneziaWG, model.KindXFRMStatic, model.KindXFRMIKEv2} {
+		t.Run(string(kind), func(t *testing.T) {
+			fields := workspaceTunnelFields(workspaceTestTunnel(kind))
+			if workspaceFieldIndex(fields, "babel.enabled") == 0 || workspaceFieldIndex(fields, "babel.bandwidth") == 0 {
+				t.Fatalf("babel fields are missing for %s: %+v", kind, fields)
+			}
+		})
+	}
+	fields := workspaceTunnelFields(workspaceTestTunnel(model.KindSRv6))
+	if workspaceFieldIndex(fields, "babel.enabled") != 0 {
+		t.Fatalf("SRv6 must not expose Babel fields: %+v", fields)
+	}
+
+	editor := manageWorkspaceModel{draft: workspaceTestTunnel(model.KindWireGuard)}
+	if err := editor.applyTunnelInput("babel.bandwidth", "500"); err != nil {
+		t.Fatal(err)
+	}
+	if editor.draft.Spec.Babel == nil || editor.draft.Spec.Babel.BandwidthMbps != 500 {
+		t.Fatalf("bandwidth was not applied: %+v", editor.draft.Spec.Babel)
+	}
+	if err := editor.toggleWorkspaceField("babel.enabled"); err != nil {
+		t.Fatal(err)
+	}
+	if editor.draft.Spec.Babel == nil || !editor.draft.Spec.Babel.Enabled {
+		t.Fatal("babel enabled toggle did not take effect")
+	}
+}
+
 func TestWorkspaceEditPreparesLegacyNameMigration(t *testing.T) {
 	legacy := workspaceTestTunnel(model.KindXFRMIKEv2)
 	legacy.Name = "rfc-tyo"

@@ -126,8 +126,14 @@ Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
       view for the Babel globals.
 - [x] Integration-test two WireGuard nodes with only IPv6 link-local
       addresses: v4/v6 prefixes converge over both tunnels.
-- [ ] Surface the per-tunnel Babel toggle and bandwidth in the tunnel
-      editors (JSON API already supports `spec.babel`).
+- [x] Surface the per-tunnel Babel toggle and bandwidth in the tunnel
+      editors (manage workspace + create wizard; JSON API also supports
+      `spec.babel`).
+- [x] Apply daemon Babel settings changes at runtime without restarting:
+      data-plane settings (advertisement filters, weight exponents, ECMP
+      limits, route table) update the running engine without rebuilding the
+      speaker, so adjacencies stay up; protocol settings (router id, delay
+      metric, external interfaces) rebuild the speaker when they change.
 - [x] Migrate all ginkgo/gomega tests to the standard library and drop the
       test-only dependencies.
 

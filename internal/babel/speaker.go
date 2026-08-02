@@ -903,6 +903,31 @@ func (s *Speaker) runSelection() {
 	s.afterSelection(res)
 }
 
+// UpdateECMPParams applies data-plane ECMP parameters (multipath limits and
+// the bottleneck penalty) to a running speaker without rebuilding it, so
+// adjacencies are not disturbed. It re-runs route selection so metric
+// changes from the penalty take effect immediately.
+func (s *Speaker) UpdateECMPParams(maxPaths int, slack uint16, bottleneckPenalty float64) {
+	s.mu.Lock()
+	changed := false
+	if s.config.MaxPaths != maxPaths {
+		s.config.MaxPaths = maxPaths
+		changed = true
+	}
+	if s.config.MultipathSlack != slack {
+		s.config.MultipathSlack = slack
+		changed = true
+	}
+	if s.config.BottleneckPenalty != bottleneckPenalty {
+		s.config.BottleneckPenalty = bottleneckPenalty
+		changed = true
+	}
+	s.mu.Unlock()
+	if changed {
+		s.runSelection()
+	}
+}
+
 func routeLess(a, b *Route) bool {
 	if a.Metric != b.Metric {
 		return a.Metric < b.Metric

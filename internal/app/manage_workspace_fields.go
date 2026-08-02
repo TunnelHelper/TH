@@ -198,7 +198,23 @@ func workspaceTunnelFields(tunnel model.Tunnel) []workspaceField {
 			workspaceField{ID: "srv6.sources", Label: "Route sources", Value: fmt.Sprintf("%d configured", len(spec.Sources)), Kind: workspaceFieldNavigate},
 		)
 	}
+	if tunnel.Kind != model.KindSRv6 {
+		babel := workspaceBabelConfig(&tunnel)
+		fields = append(fields,
+			workspaceToggleField("babel.enabled", "Babel routing", babel.Enabled),
+			workspaceTextField("babel.bandwidth", "Babel bandwidth (Mbps)", strconv.Itoa(babel.BandwidthMbps), validateNonNegativeIntInput),
+		)
+	}
 	return fields
+}
+
+// workspaceBabelConfig returns the per-tunnel Babel configuration, creating
+// it on demand so the editor can toggle it on.
+func workspaceBabelConfig(tunnel *model.Tunnel) *model.BabelTunnelConfig {
+	if tunnel.Spec.Babel == nil {
+		tunnel.Spec.Babel = &model.BabelTunnelConfig{}
+	}
+	return tunnel.Spec.Babel
 }
 
 func workspaceTextField(id, label, value string, validator func(string) error) workspaceField {
@@ -257,6 +273,8 @@ func (m *manageWorkspaceModel) toggleWorkspaceField(id string) error {
 		m.draft.Spec.VXLAN.Learning = !m.draft.Spec.VXLAN.Learning
 	case "ike.encapsulation":
 		m.draft.Spec.XFRMIKEv2.Encapsulation = !m.draft.Spec.XFRMIKEv2.Encapsulation
+	case "babel.enabled":
+		workspaceBabelConfig(&m.draft).Enabled = !workspaceBabelConfig(&m.draft).Enabled
 	default:
 		return fmt.Errorf("unsupported toggle field %q", id)
 	}
@@ -336,6 +354,8 @@ func (m *manageWorkspaceModel) applyTunnelInput(id, value string) error {
 		workspaceWireGuardSpec(&m.draft).MTU = parseInt(value)
 	case "wg.mark":
 		workspaceWireGuardSpec(&m.draft).FirewallMark = parseInt(value)
+	case "babel.bandwidth":
+		workspaceBabelConfig(&m.draft).BandwidthMbps = parseInt(value)
 	case "awg.obfuscation":
 		applyAmneziaParameterString(m.draft.Spec.AmneziaWG, value)
 	case "xfrm.remote", "xfrm.local":
