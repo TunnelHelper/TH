@@ -172,7 +172,7 @@ func (m settingsModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m settingsModel) updateMain(key tea.KeyMsg) (tea.Model, tea.Cmd) {
-	fields := settingsFields(m.draft)
+	fields := settingsFields(m.draft, m.babel.RouterID)
 	changes := settingsChanges(m.original, m.draft)
 	if m.changesFocus && len(changes) > 0 {
 		switch key.String() {
@@ -432,7 +432,10 @@ func (m *settingsModel) applySettingsConfirm(action string) (tea.Cmd, error) {
 }
 
 // settingsFields lists every operator-editable setting as an editor field.
-func settingsFields(settings config.Settings) []workspaceField {
+// effectiveRouterID is the router ID the running speaker actually uses; when
+// the configuration leaves router_id empty, that effective value is shown
+// directly in the field (marked as auto) instead of a bare "none".
+func settingsFields(settings config.Settings, effectiveRouterID string) []workspaceField {
 	babel := settings.Babel
 	delay := "On"
 	delaySelected := 0
@@ -454,8 +457,19 @@ func settingsFields(settings config.Settings) []workspaceField {
 		scheduler = "Leave system default"
 	}
 
+	routerID := babel.RouterID
+	routerIDAuto := false
+	if strings.TrimSpace(routerID) == "" && effectiveRouterID != "" {
+		routerID = effectiveRouterID
+		routerIDAuto = true
+	}
+	routerIDField := workspaceTextField("babel.router_id", "Router ID", routerID, validateBabelRouterIDInput)
+	if routerIDAuto {
+		routerIDField.Value = routerID + " (auto)"
+		routerIDField.EditValue = routerID
+	}
 	fields := []workspaceField{
-		withFieldDescription(workspaceTextField("babel.router_id", "Router ID", babel.RouterID, validateBabelRouterIDInput),
+		withFieldDescription(routerIDField,
 			"16 lowercase hex characters; empty generates a stable ID at startup."),
 		withFieldDescription(workspaceChoiceField("babel.delay_metric", "Delay cost", delay, []workspaceButton{
 			{Label: "On", Value: "On"}, {Label: "Off", Value: "Off"},
@@ -553,7 +567,7 @@ func (m settingsModel) mptcpStatusLabel() string {
 }
 
 func (m settingsModel) mainView(width int) string {
-	fields := settingsFields(m.draft)
+	fields := settingsFields(m.draft, m.babel.RouterID)
 	changes := settingsChanges(m.original, m.draft)
 	status := workspaceGoodStyle.Render("Saved")
 	if len(changes) > 0 {
@@ -580,9 +594,6 @@ func (m settingsModel) mainView(width int) string {
 				sectionLabel = "MPTCP"
 			}
 			lines = append(lines, "", workspaceAccentStyle.Render(fit(sectionLabel, width)))
-			if section == "babel" && strings.TrimSpace(m.draft.Babel.RouterID) == "" && m.babel.RouterID != "" {
-				lines = append(lines, workspaceDimStyle.Render(truncateDisplay("Router ID (auto): "+m.babel.RouterID, width)))
-			}
 			if section == "mptcp" {
 				lines = append(lines, workspaceDimStyle.Render(truncateDisplay("Kernel: "+m.mptcpStatusLabel(), width)))
 				lines = append(lines, workspaceDimStyle.Render(truncateDisplay(fmt.Sprintf("TH-managed endpoints: %d", m.mptcp.Endpoints), width)))

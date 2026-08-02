@@ -43,7 +43,7 @@ func settingsFieldIndex(fields []workspaceField, id string) int {
 }
 
 func TestSettingsFieldsCoverEverySetting(t *testing.T) {
-	fields := settingsFields(settingsEditorFixture().draft)
+	fields := settingsFields(settingsEditorFixture().draft, settingsEditorFixture().babel.RouterID)
 	for _, id := range []string{
 		"babel.router_id", "babel.delay_metric", "babel.route_table",
 		"babel.unicast_hello_seconds", "babel.max_paths", "babel.slack", "babel.k_penalty",
@@ -293,23 +293,32 @@ func TestSettingsViewsRespectTerminalWidth(t *testing.T) {
 func TestSettingsMainViewRendersEveryFieldWithoutWindow(t *testing.T) {
 	model := settingsEditorFixture()
 	view := model.mainView(120)
-	for _, field := range settingsFields(model.draft) {
+	for _, field := range settingsFields(model.draft, model.babel.RouterID) {
 		if !strings.Contains(view, field.Label) {
 			t.Fatalf("settings view hides field %q behind a height window:\n%s", field.Label, view)
 		}
 	}
 }
 
-func TestSettingsMainViewShowsBabelHeaderAndEffectiveRouterID(t *testing.T) {
+func TestSettingsMainViewShowsBabelHeaderAndAutoRouterIDInField(t *testing.T) {
 	model := settingsEditorFixture()
 	model.draft.Babel.RouterID = ""
 	model.original.Babel.RouterID = ""
 	model.babel = core.BabelHealth{RouterID: "0011223344556677"}
 	view := model.mainView(120)
-	for _, expected := range []string{"Babel", "Router ID (auto): 0011223344556677", "MPTCP"} {
+	for _, expected := range []string{"Babel", "Router ID", "0011223344556677 (auto)", "MPTCP"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("settings view does not contain %q:\n%s", expected, view)
 		}
+	}
+	if strings.Contains(view, "Router ID (auto):") {
+		t.Fatalf("settings view must not duplicate the auto router id on a separate line:\n%s", view)
+	}
+
+	fields := settingsFields(model.draft, model.babel.RouterID)
+	routerID := fields[settingsFieldIndex(fields, "babel.router_id")-1]
+	if routerID.EditValue != "0011223344556677" {
+		t.Fatalf("auto router id must be editable as the effective value, got %q", routerID.EditValue)
 	}
 }
 
@@ -343,7 +352,7 @@ func TestSettingsEditorChangesScroll(t *testing.T) {
 	model.draft.Babel.RouterID = "0011223344556677"
 	model.draft.Babel.MultipathSlack = 128
 	model.draft.Mptcp.Enabled = true
-	model.fieldSelected = len(settingsFields(model.draft)) - 1
+	model.fieldSelected = len(settingsFields(model.draft, model.babel.RouterID)) - 1
 
 	updated, _ := model.updateMain(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
 	model = updated.(settingsModel)
