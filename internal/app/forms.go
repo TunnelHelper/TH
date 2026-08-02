@@ -86,6 +86,9 @@ func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel, su
 	if err == nil && creating && kind != model.KindSRv6 {
 		err = collectBabelTunnelConfig(prompts, &record)
 	}
+	if err == nil && creating && kind != model.KindSRv6 {
+		err = collectMptcpTunnelConfig(prompts, &record)
+	}
 	return record, err
 }
 
@@ -119,6 +122,28 @@ func collectBabelTunnelConfig(prompts *prompts, record *model.Tunnel) error {
 		return parseErr
 	}
 	record.Spec.Babel.BandwidthMbps = bandwidthMbps
+	return nil
+}
+
+// collectMptcpTunnelConfig asks whether this tunnel's addresses should be
+// registered as MPTCP endpoints. The default follows the daemon-global
+// mptcp.enabled switch; On and Off override it per tunnel. SRv6 tunnels
+// never get this prompt because they have no interface address.
+func collectMptcpTunnelConfig(prompts *prompts, record *model.Tunnel) error {
+	endpoint := "Follow global"
+	if err := prompts.selectValue("MPTCP endpoint (address registered for subflows)", []ui.Option{
+		{Label: "Follow global", Value: "Follow global"},
+		{Label: "On", Value: "On"},
+		{Label: "Off", Value: "Off"},
+	}, &endpoint); err != nil {
+		return err
+	}
+	switch endpoint {
+	case "On":
+		record.Spec.Mptcp = &model.MptcpTunnelConfig{Endpoint: boolPtr(true)}
+	case "Off":
+		record.Spec.Mptcp = &model.MptcpTunnelConfig{Endpoint: boolPtr(false)}
+	}
 	return nil
 }
 

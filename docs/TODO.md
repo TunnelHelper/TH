@@ -180,3 +180,33 @@ Status legend: `[ ]` pending, `[-]` in progress, `[x]` complete.
 - [x] Cross-build Linux amd64, arm64, and armv7 binaries.
 - [x] Audit every invariant and completion item in `docs/ROADMAP.md`.
 - [x] Confirm the git diff contains no accidental generated or unrelated files.
+
+## 8. MPTCP Infrastructure Management (`docs/MPTCP_MANAGEMENT.md`)
+
+- [x] Add daemon settings (`thd.json`) top-level `mptcp {enabled,
+      scheduler}` with defaults (off, empty), validation, and a scheduler
+      allowlist (`default`, `roundrobin`, `blest`).
+- [x] Add per-tunnel `spec.mptcp {endpoint}` tri-state switch (nil follows
+      global, false opts out, true opts in) and reject SRv6 records.
+- [x] Implement the `mptcp_pm` generic-netlink layer (no external
+      commands): capability detection (kernel >= 5.6 + family presence),
+      endpoint Add/Del/List, SUBFLOW|SIGNAL default flags, and
+      legacy/modern ABI-stable attribute encoding.
+- [x] Derive the desired endpoint set from tunnel records and reconcile it
+      after Apply (link/address ready), before Remove (endpoint first),
+      at daemon startup and on the 30s periodic pass; orphan cleanup only
+      deletes endpoints whose address belongs to a TH tunnel record.
+- [x] Optional node-global `net.mptcp.scheduler` write (only when enabled
+      and explicitly configured), with warning-only failures.
+- [x] Degrade gracefully when MPTCP is unavailable: tunnels and Babel keep
+      working, `th health` reports `mptcp: unsupported (reason)` and
+      endpoint counts appear in observations.
+- [x] Extend the settings API to a Babel + MPTCP payload and add the MPTCP
+      section to the TUI settings page (switch, scheduler, endpoint count,
+      capability reason) plus per-tunnel endpoint toggles in the create
+      wizard and workspace editor.
+- [x] Unit-test config/model validation, fake-genl Add/Del/List, reconcile
+      diff and ownership rules, scheduler sysctl handling, and the backend
+      hooks; integration-test the real kernel lifecycle in a network
+      namespace (endpoint appear/idempotent/withdraw) and the unsupported
+      degradation path.

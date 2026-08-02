@@ -1,8 +1,12 @@
 package app
 
 import (
+	"net"
+	"net/netip"
 	"strings"
 	"testing"
+
+	"github.com/TunnelHelper/TH/internal/config"
 )
 
 func TestBalanceBiasRoundTrip(t *testing.T) {
@@ -97,5 +101,122 @@ func TestValidateNonNegativeFloatInput(t *testing.T) {
 		if err := validateNonNegativeFloatInput(bad); err == nil {
 			t.Errorf("%q must be rejected", bad)
 		}
+	}
+}
+
+func TestSystemInterfaceOptionsFilter(t *testing.T) {
+	intfs := []net.Interface{
+		{Name: "lo", Flags: net.FlagLoopback | net.FlagUp},
+		{Name: "eth0", Flags: net.FlagUp},
+		{Name: "gre-ext0", Flags: net.FlagUp},
+		{Name: "wg-prod1", Flags: net.FlagUp},
+		{Name: "tap-down", Flags: 0},
+	}
+
+	t.Run("excludes loopback and configured external interfaces", func(t *testing.T) {
+		options := systemInterfaceOptions(intfs, "", map[string]bool{"gre-ext0": true}, nil)
+		want := []string{"eth0", "tap-down", "wg-prod1"}
+		if len(options) != len(want) {
+			t.Fatalf("options = %d, want %d: %+v", len(options), len(want), options)
+		}
+		for i := range want {
+			if options[i].Value != want[i] {
+				t.Fatalf("option %d = %q, want %q", i, options[i].Value, want[i])
+			}
+		}
+		if !strings.Contains(options[1].Label, "(down)") {
+			t.Fatalf("down interface must be marked, got %q", options[1].Label)
+		}
+	})
+
+	t.Run("keyword filter is case-insensitive", func(t *testing.T) {
+		options := systemInterfaceOptions(intfs, "PROD", nil, map[string]bool{"wg-prod1": true})
+		if len(options) != 1 || options[0].Value != "wg-prod1" {
+			t.Fatalf("keyword filter = %+v, want only wg-prod1", options)
+		}
+		if !strings.Contains(options[0].Label, "(TH tunnel interface)") {
+			t.Fatalf("TH tunnel interface must be marked, got %q", options[0].Label)
+		}
+	})
+
+	t.Run("no match yields no options", func(t *testing.T) {
+		options := systemInterfaceOptions(intfs, "zzz", nil, nil)
+		if len(options) != 0 {
+			t.Fatalf("expected no options, got %+v", options)
+		}
+	})
+}
+
+func TestCollectExternalInterfaceUnicast(t *testing.T) {
+	prompts, _ := transcriptPrompts("100\n2\nfe80::1, fe80::2\n")
+	external, err := collectExternalInterface(prompts, "tun-ext1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if external.BandwidthMbps != 100 || external.Multicast {
+		t.Fatalf("external = %+v, want 100 Mbps unicast", external)
+	}
+	if len(external.Neighbours) != 2 || external.Neighbours[0] != netip.MustParseAddr("fe80::1") ||
+		external.Neighbours[1] != netip.MustParseAddr("fe80::2") {
+		t.Fatalf("neighbours = %v, want fe80::1 and fe80::2", external.Neighbours)
+	}
+}
+
+func TestCollectExternalInterfaceMulticastClearsNeighbours(t *testing.T) {
+	existing := config.BabelExternalInterface{
+		BandwidthMbps: 10,
+		Multicast:     false,
+		Neighbours:    []netip.Addr{netip.MustParseAddr("fe80::1")},
+	}
+	prompts, _ := transcriptPrompts("0\n1\n")
+	external, err := collectExternalInterface(prompts, "gre-ext0", &existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !external.Multicast || external.BandwidthMbps != 0 || len(external.Neighbours) != 0 {
+		t.Fatalf("multicast edit must clear neighbours, got %+v", external)
+	}
+}
+
+func TestValidateNeighbourListInput(t *testing.T) {
+	if err := validateNeighbourListInput(""); err == nil {
+		t.Fatal("empty neighbour list must be rejected")
+	}
+	if err := validateNeighbourListInput("fe80::1,2001:db8::2"); err != nil {
+		t.Fatalf("valid addresses rejected: %v", err)
+	}
+	if err := validateNeighbourListInput("not-an-address"); err == nil {
+		t.Fatal("garbage must be rejected")
+	}
+	if err := validateNeighbourListInput("::"); err == nil {
+		t.Fatal("unspecified address must be rejected")
+	}
+}
+
+func TestNeighbourListRoundTrip(t *testing.T) {
+	addrs := parseNeighbourList("fe80::1, 192.0.2.1 ,2001:db8::5")
+	if len(addrs) != 3 {
+		t.Fatalf("parsed %d addresses, want 3: %v", len(addrs), addrs)
+	}
+	if got := formatNeighbourList(addrs); got != "fe80::1,192.0.2.1,2001:db8::5" {
+		t.Fatalf("formatted = %q", got)
+	}
+}
+
+func TestExternalInterfacesSummary(t *testing.T) {
+	interfaces := map[string]config.BabelExternalInterface{
+		"tun-ext1": {
+			BandwidthMbps: 10,
+			Neighbours:    []netip.Addr{netip.MustParseAddr("fe80::1")},
+		},
+		"gre-ext0": {BandwidthMbps: 100, Multicast: true},
+	}
+	summary := externalInterfacesSummary(interfaces)
+	if !strings.Contains(summary, "gre-ext0: multicast, 100 Mbps") ||
+		!strings.Contains(summary, "tun-ext1: unicast (fe80::1), 10 Mbps") {
+		t.Fatalf("summary = %q", summary)
+	}
+	if got := externalInterfacesSummary(nil); got != "none" {
+		t.Fatalf("empty summary = %q, want none", got)
 	}
 }

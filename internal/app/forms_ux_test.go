@@ -12,7 +12,7 @@ import (
 )
 
 func TestCreateFormDefersEnableChoiceUntilReview(t *testing.T) {
-	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n2\n")
+	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n2\n1\n")
 	record, err := collectTunnel(prompts, model.KindWireGuard, nil, "ux-wg", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -34,7 +34,7 @@ func TestCreateFormDefersEnableChoiceUntilReview(t *testing.T) {
 }
 
 func TestWireGuardShowsLocalKeyBeforePeerPrompt(t *testing.T) {
-	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n2\n")
+	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n2\n1\n")
 	if _, err := collectTunnel(prompts, model.KindWireGuard, nil, "ux-key-order", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestWireGuardShowsLocalKeyBeforePeerPrompt(t *testing.T) {
 }
 
 func TestCreateFormCollectsBabelToggle(t *testing.T) {
-	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n1\n250\n")
+	prompts, output := transcriptPrompts("\n\n\n\n\n2\n1\n1\n250\n1\n")
 	record, err := collectTunnel(prompts, model.KindWireGuard, nil, "ux-babel", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +87,46 @@ func TestCollectBabelUnicastFallback(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "unicast") {
 		t.Fatalf("wizard must explain the unicast fallback:\n%s", output.String())
+	}
+}
+
+func TestCreateFormCollectsMptcpToggle(t *testing.T) {
+	prompts, output := transcriptPrompts("2\n2\n") // Babel Off, then MPTCP On
+	record := model.Tunnel{
+		Kind: model.KindGRE,
+		Spec: model.Spec{GRE: &model.GRESpec{}},
+	}
+	if err := collectBabelTunnelConfig(prompts, &record); err != nil {
+		t.Fatal(err)
+	}
+	if err := collectMptcpTunnelConfig(prompts, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Spec.Mptcp == nil || record.Spec.Mptcp.Endpoint == nil || !*record.Spec.Mptcp.Endpoint {
+		t.Fatalf("MPTCP endpoint was not collected: %+v", record.Spec.Mptcp)
+	}
+	if !strings.Contains(output.String(), "MPTCP endpoint") {
+		t.Fatalf("create form did not ask about MPTCP:\n%s", output.String())
+	}
+}
+
+func TestCollectMptcpOffAndFollowGlobal(t *testing.T) {
+	record := model.Tunnel{Kind: model.KindGRE, Spec: model.Spec{GRE: &model.GRESpec{}}}
+	prompts, _ := transcriptPrompts("3\n") // Off
+	if err := collectMptcpTunnelConfig(prompts, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Spec.Mptcp == nil || record.Spec.Mptcp.Endpoint == nil || *record.Spec.Mptcp.Endpoint {
+		t.Fatalf("Off must set endpoint=false, got %+v", record.Spec.Mptcp)
+	}
+
+	record = model.Tunnel{Kind: model.KindGRE, Spec: model.Spec{GRE: &model.GRESpec{}}}
+	prompts, _ = transcriptPrompts("1\n") // Follow global
+	if err := collectMptcpTunnelConfig(prompts, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Spec.Mptcp != nil {
+		t.Fatalf("Follow global must leave the MPTCP section empty, got %+v", record.Spec.Mptcp)
 	}
 }
 

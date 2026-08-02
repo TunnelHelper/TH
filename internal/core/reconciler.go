@@ -245,43 +245,46 @@ func (r *Reconciler) ReconcileAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if len(records) == 0 {
-		return nil
-	}
-	workers := min(4, len(records))
-	jobs := make(chan model.Tunnel)
-	var (
-		workersDone sync.WaitGroup
-		errorsMu    sync.Mutex
-		joined      error
-	)
-	workersDone.Add(workers)
-	for range workers {
-		go func() {
-			defer workersDone.Done()
-			for record := range jobs {
-				if err := r.reconcileRecord(ctx, record); err != nil {
-					errorsMu.Lock()
-					joined = errors.Join(joined, fmt.Errorf("%s: %w", record.Name, err))
-					errorsMu.Unlock()
+	var joined error
+	if len(records) > 0 {
+		workers := min(4, len(records))
+		jobs := make(chan model.Tunnel)
+		var (
+			workersDone sync.WaitGroup
+			errorsMu    sync.Mutex
+		)
+		workersDone.Add(workers)
+		for range workers {
+			go func() {
+				defer workersDone.Done()
+				for record := range jobs {
+					if err := r.reconcileRecord(ctx, record); err != nil {
+						errorsMu.Lock()
+						joined = errors.Join(joined, fmt.Errorf("%s: %w", record.Name, err))
+						errorsMu.Unlock()
+					}
 				}
-			}
-		}()
-	}
-send:
-	for _, record := range records {
-		select {
-		case jobs <- record:
-		case <-ctx.Done():
-			errorsMu.Lock()
-			joined = errors.Join(joined, ctx.Err())
-			errorsMu.Unlock()
-			break send
+			}()
 		}
+	send:
+		for _, record := range records {
+			select {
+			case jobs <- record:
+			case <-ctx.Done():
+				errorsMu.Lock()
+				joined = errors.Join(joined, ctx.Err())
+				errorsMu.Unlock()
+				break send
+			}
+		}
+		close(jobs)
+		workersDone.Wait()
 	}
-	close(jobs)
-	workersDone.Wait()
-	return joined
+	// Reconcile daemon-global state (MPTCP endpoint set) from the
+	// authoritative record list after per-record work, and also when there
+	// are no records at all so stale endpoints from a previous run are
+	// still cleaned up.
+	return errors.Join(joined, r.backend.ReconcileGlobal(ctx, records))
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, id string) error {
@@ -466,6 +469,10 @@ func (r *Reconciler) Forget(id string) {
 
 func (r *Reconciler) Health(ctx context.Context) map[model.Kind]BackendHealth {
 	return r.backend.Health(ctx)
+}
+
+func (r *Reconciler) MptcpHealth() MptcpHealth {
+	return r.backend.MptcpHealth()
 }
 
 func (r *Reconciler) Close() error {

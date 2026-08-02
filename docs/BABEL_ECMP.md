@@ -207,7 +207,9 @@ settings 字段：`weight_bottleneck_penalty`（默认 0），在 TUI 的 Babel 
 
 外部接口没有 TH 记录，在 daemon settings 显式声明：
 
-TUI 的 Babel settings 打开时会列出已声明的外部接口（由 thd.json 管理）。
+TUI 的 Babel settings 可以直接管理外部接口：从系统真实接口列表里按关键词
+过滤选取，配置带宽、组播/单播模式和单播邻居；增删改后随其他 Babel settings
+一起保存（写入 thd.json）。
 
 ```json
 "babel": {
@@ -230,8 +232,11 @@ TUI 的 Babel settings 打开时会列出已声明的外部接口（由 thd.json
 - 接口名不能与 TH 隧道接口重名（配置校验拒绝）；
 - 组播能力因隧道类型而异：GRE/IPIP 通常可组播；不支持的就 `multicast: false` +
   `neighbours` 显式列表；
-- **IPv4-only 外部链路的前置项**：当前 Speaker 只绑 udp6 socket，Babel-over-IPv4
-  需要加 udp4 socket（双栈），否则只能支持有 IPv6 LLA 的外部链路。
+- 双栈：Speaker 同时绑 udp4/udp6 socket，组播接口按其地址族加入
+  ff02::1:6（IPv6）和/或 224.0.0.111（IPv4），IPv4-only 外部链路可以直接
+  组播；单播模式也支持 IPv4 邻居地址；
+- 自动降级：接口没有可用地址、组播加入失败时，若配置了单播邻居则自动回退
+  到单播模式，否则跳过该接口并告警日志，不会让整个引擎失败。
 
 ## 8. 配置总览（`internal/config/settings.go`）
 

@@ -11,11 +11,12 @@ import (
 	"github.com/TunnelHelper/TH/internal/config"
 )
 
-// settingsApplier applies a new settings snapshot to the running backend.
-type settingsApplier func(config.BabelSettings) error
+// settingsApplier applies a new daemon settings snapshot to the running
+// backend (Babel and MPTCP sections).
+type settingsApplier func(config.Settings) error
 
 // NewManagerWithSettings returns a manager that can read and update the
-// daemon settings file and push Babel settings changes to the backend.
+// daemon settings file and push settings changes to the backend.
 func NewManagerWithSettings(records Store, reconciler *Reconciler, settingsPath string, apply settingsApplier) *Manager {
 	manager := NewManager(records, reconciler)
 	manager.settingsPath = settingsPath
@@ -23,37 +24,42 @@ func NewManagerWithSettings(records Store, reconciler *Reconciler, settingsPath 
 	return manager
 }
 
-// Settings returns the Babel settings from the daemon settings file.
-func (m *Manager) Settings() (config.BabelSettings, error) {
+// Settings returns the operator-editable daemon settings (Babel and MPTCP
+// sections) from the daemon settings file.
+func (m *Manager) Settings() (config.Settings, error) {
 	if m.settingsPath == "" {
-		return config.BabelSettings{}, errors.New("daemon settings are not configured")
+		return config.Settings{}, errors.New("daemon settings are not configured")
 	}
 	settings, err := config.Load(m.settingsPath)
 	if err != nil {
-		return config.BabelSettings{}, fmt.Errorf("load daemon settings: %w", err)
+		return config.Settings{}, fmt.Errorf("load daemon settings: %w", err)
 	}
-	return settings.Babel, nil
+	return settings, nil
 }
 
-// UpdateSettings validates, persists and applies new Babel settings.
-func (m *Manager) UpdateSettings(ctx context.Context, babelSettings config.BabelSettings) error {
+// UpdateSettings validates, persists and applies new daemon settings.
+func (m *Manager) UpdateSettings(ctx context.Context, next config.Settings) error {
 	if m.settingsPath == "" {
 		return errors.New("daemon settings are not configured")
 	}
-	if err := babelSettings.Validate(); err != nil {
-		return fmt.Errorf("invalid Babel settings: %w", err)
+	if err := next.Validate(); err != nil {
+		return fmt.Errorf("invalid daemon settings: %w", err)
 	}
-	settings, err := config.Load(m.settingsPath)
+	current, err := config.Load(m.settingsPath)
 	if err != nil {
 		return fmt.Errorf("load daemon settings: %w", err)
 	}
-	settings.Babel = babelSettings
+	// The operator-editable surface is the Babel and MPTCP sections;
+	// filesystem layout fields stay owned by the daemon command line.
+	settings := current
+	settings.Babel = next.Babel
+	settings.Mptcp = next.Mptcp
 	if err := writeSettings(m.settingsPath, settings); err != nil {
 		return fmt.Errorf("persist daemon settings: %w", err)
 	}
 	if m.applySettings != nil {
-		if err := m.applySettings(babelSettings); err != nil {
-			return fmt.Errorf("apply Babel settings: %w", err)
+		if err := m.applySettings(settings); err != nil {
+			return fmt.Errorf("apply daemon settings: %w", err)
 		}
 	}
 	return nil

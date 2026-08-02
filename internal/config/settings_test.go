@@ -114,3 +114,60 @@ func TestBabelSettingsWeightExponents(t *testing.T) {
 		t.Fatalf("valid exponents must pass: %v", err)
 	}
 }
+
+func TestMptcpSettingsDefaults(t *testing.T) {
+	settings := Defaults()
+	if settings.Mptcp.Enabled {
+		t.Fatal("MPTCP must be disabled by default")
+	}
+	if settings.Mptcp.Scheduler != "" {
+		t.Fatalf("default MPTCP scheduler = %q, want empty", settings.Mptcp.Scheduler)
+	}
+	if err := settings.Validate(); err != nil {
+		t.Fatalf("defaults must validate: %v", err)
+	}
+}
+
+func TestMptcpSettingsSchedulerWhitelist(t *testing.T) {
+	for _, scheduler := range []string{"default", "roundrobin", "blest"} {
+		settings := Defaults()
+		settings.Mptcp.Scheduler = scheduler
+		if err := settings.Validate(); err != nil {
+			t.Errorf("scheduler %q must be accepted: %v", scheduler, err)
+		}
+	}
+	for _, scheduler := range []string{"min_rtt", "evil", "default\nreboot", "/proc/1/cmdline", ""} {
+		settings := Defaults()
+		settings.Mptcp.Scheduler = scheduler
+		if scheduler == "" {
+			if err := settings.Validate(); err != nil {
+				t.Errorf("empty scheduler must be accepted: %v", err)
+			}
+			continue
+		}
+		if err := settings.Validate(); err == nil {
+			t.Errorf("scheduler %q must be rejected", scheduler)
+		}
+	}
+}
+
+func TestMptcpSettingsRoundTripThroughLoad(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "thd.json")
+	if err := os.WriteFile(path, []byte(`{
+		"state_dir": "/var/lib/th",
+		"runtime_dir": "/run/th",
+		"socket_path": "/run/th/control.sock",
+		"socket_group": "th",
+		"mptcp": {"enabled": true, "scheduler": "roundrobin"}
+	}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("load MPTCP settings: %v", err)
+	}
+	if !loaded.Mptcp.Enabled || loaded.Mptcp.Scheduler != "roundrobin" {
+		t.Fatalf("loaded MPTCP settings = %+v, want enabled roundrobin", loaded.Mptcp)
+	}
+}

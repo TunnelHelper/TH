@@ -204,6 +204,7 @@ func workspaceTunnelFields(tunnel model.Tunnel) []workspaceField {
 			workspaceToggleField("babel.enabled", "Babel routing", babel.Enabled),
 			workspaceTextField("babel.bandwidth", "Babel bandwidth (Mbps)", strconv.Itoa(babel.BandwidthMbps), validateNonNegativeIntInput),
 		)
+		fields = append(fields, mptcpEndpointChoiceField(&tunnel))
 	}
 	return fields
 }
@@ -215,6 +216,24 @@ func workspaceBabelConfig(tunnel *model.Tunnel) *model.BabelTunnelConfig {
 		tunnel.Spec.Babel = &model.BabelTunnelConfig{}
 	}
 	return tunnel.Spec.Babel
+}
+
+// mptcpEndpointChoiceField renders the tri-state per-tunnel MPTCP endpoint
+// switch: Follow global (nil), On (true), or Off (false).
+func mptcpEndpointChoiceField(tunnel *model.Tunnel) workspaceField {
+	value, selected := "Follow global", 0
+	if tunnel.Spec.Mptcp != nil && tunnel.Spec.Mptcp.Endpoint != nil {
+		if *tunnel.Spec.Mptcp.Endpoint {
+			value, selected = "On", 1
+		} else {
+			value, selected = "Off", 2
+		}
+	}
+	return workspaceChoiceField("mptcp.endpoint", "MPTCP endpoint", value, []workspaceButton{
+		{Label: "Follow global", Value: "follow"},
+		{Label: "On", Value: "on"},
+		{Label: "Off", Value: "off"},
+	}, selected)
 }
 
 func workspaceTextField(id, label, value string, validator func(string) error) workspaceField {
@@ -441,6 +460,17 @@ func (m *manageWorkspaceModel) applyWorkspaceChoice(action, value string) error 
 			m.beginIKECredentialInput("switch-" + value)
 		case "ike.start":
 			m.draft.Spec.XFRMIKEv2.StartAction = value
+		case "mptcp.endpoint":
+			switch value {
+			case "follow":
+				m.draft.Spec.Mptcp = nil
+			case "on":
+				m.draft.Spec.Mptcp = &model.MptcpTunnelConfig{Endpoint: boolPtr(true)}
+			case "off":
+				m.draft.Spec.Mptcp = &model.MptcpTunnelConfig{Endpoint: boolPtr(false)}
+			default:
+				return fmt.Errorf("unsupported MPTCP endpoint choice %q", value)
+			}
 		default:
 			return fmt.Errorf("unsupported choice field %q", id)
 		}

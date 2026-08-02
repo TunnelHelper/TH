@@ -226,6 +226,12 @@ func NewSpeaker(cfg *SpeakerConfig) (*Speaker, error) {
 			s.conn4.Close()
 			return nil, fmt.Errorf("failed to create interface: %w", err)
 		}
+		if i == nil {
+			// The interface was skipped (for example multicast was
+			// requested but is unavailable and no unicast neighbours are
+			// configured); the reason was already logged.
+			continue
+		}
 
 		if h, ok := s.config.Handler.(InterfaceHandler); ok {
 			h.InterfaceAdded(i)

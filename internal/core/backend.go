@@ -22,6 +22,17 @@ type BackendHealth struct {
 	Message   string `json:"message,omitempty"`
 }
 
+// MptcpHealth reports the daemon-wide MPTCP infrastructure state: whether
+// the kernel supports it, whether TH endpoint management is enabled, and
+// how many TH-managed endpoints are currently registered.
+type MptcpHealth struct {
+	Supported bool   `json:"supported"`
+	Enabled   bool   `json:"enabled"`
+	Status    string `json:"status"`
+	Message   string `json:"message,omitempty"`
+	Endpoints int    `json:"endpoints"`
+}
+
 type BackendEventType string
 
 const (
@@ -45,6 +56,11 @@ type Backend interface {
 	Remove(context.Context, model.Tunnel) (Observation, error)
 	Observe(context.Context, model.Tunnel) (Observation, error)
 	Health(context.Context) map[model.Kind]BackendHealth
+	// ReconcileGlobal reconciles daemon-global state (currently the MPTCP
+	// endpoint set) from the authoritative record list. It runs at daemon
+	// startup and on the periodic reconcile pass.
+	ReconcileGlobal(context.Context, []model.Tunnel) error
+	MptcpHealth() MptcpHealth
 	Events() <-chan BackendEvent
 	Close() error
 }

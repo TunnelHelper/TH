@@ -90,8 +90,10 @@ func (b *fakeBackend) Health(context.Context) map[model.Kind]BackendHealth {
 	return map[model.Kind]BackendHealth{model.KindGRE: {Available: true}}
 }
 
-func (b *fakeBackend) Events() <-chan BackendEvent { return b.events }
-func (b *fakeBackend) Close() error                { return nil }
+func (b *fakeBackend) ReconcileGlobal(context.Context, []model.Tunnel) error { return nil }
+func (b *fakeBackend) MptcpHealth() MptcpHealth                              { return MptcpHealth{} }
+func (b *fakeBackend) Events() <-chan BackendEvent                           { return b.events }
+func (b *fakeBackend) Close() error                                          { return nil }
 
 type memoryStore struct {
 	mu      sync.Mutex

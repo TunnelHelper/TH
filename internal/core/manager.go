@@ -293,6 +293,10 @@ func (m *Manager) Health(ctx context.Context) map[model.Kind]BackendHealth {
 	return m.reconciler.Health(ctx)
 }
 
+func (m *Manager) MptcpHealth() MptcpHealth {
+	return m.reconciler.MptcpHealth()
+}
+
 func (m *Manager) SubscribeEvents(after uint64) EventSubscription {
 	return m.reconciler.SubscribeEvents(after)
 }

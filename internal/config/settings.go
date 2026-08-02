@@ -34,7 +34,36 @@ type Settings struct {
 	// itself is controlled per tunnel; this section holds node-global
 	// settings such as the router identifier and prefix advertisement.
 	Babel BabelSettings `json:"babel,omitempty"`
+
+	// Mptcp configures the daemon-wide MPTCP endpoint management. TH only
+	// registers MPTCP endpoints when Enabled is true and the kernel exposes
+	// the mptcp_pm generic-netlink family; otherwise everything degrades
+	// gracefully and tunnels/Babel keep working.
+	Mptcp MptcpSettings `json:"mptcp,omitempty"`
 }
+
+// MptcpSettings are the node-global MPTCP infrastructure controls. They
+// manage the endpoint set (which is derived from enabled tunnels), not the
+// applications' use of MPTCP.
+type MptcpSettings struct {
+	// Enabled turns on endpoint registration for tunnels that follow the
+	// global switch. When false (the default) TH registers no endpoint and
+	// changes no MPTCP sysctl.
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Scheduler optionally selects the node-global MPTCP packet scheduler
+	// written to net.mptcp.scheduler. Empty leaves the system setting
+	// untouched. A non-empty value must be one of the well-known kernel
+	// scheduler names; whether the running kernel actually provides it is
+	// checked during capability detection and only warns on mismatch.
+	Scheduler string `json:"scheduler,omitempty"`
+}
+
+// KnownMPTCPSchedulers is the allowlist of scheduler names TH may write to
+// net.mptcp.scheduler. The kernel may also report a value not listed here
+// (for example from an out-of-tree module); TH treats those as unsupported
+// at configuration time rather than risking a node-global side effect.
+var KnownMPTCPSchedulers = []string{"default", "roundrobin", "blest"}
 
 // BabelSettings are the node-global Babel controls.
 type BabelSettings struct {
@@ -143,6 +172,7 @@ func Defaults() Settings {
 				SourceInterfaces: []string{"lo"},
 			},
 		},
+		Mptcp: MptcpSettings{Enabled: false},
 	}
 }
 
@@ -242,7 +272,28 @@ func (s Settings) Validate() error {
 	if err := s.Babel.Validate(); err != nil {
 		return fmt.Errorf("babel: %w", err)
 	}
+	if err := s.Mptcp.Validate(); err != nil {
+		return fmt.Errorf("mptcp: %w", err)
+	}
 	return nil
+}
+
+// Validate checks the MPTCP settings. The scheduler is restricted to the
+// well-known kernel scheduler names so an operator typo is rejected before
+// it can change a node-global sysctl.
+func (m MptcpSettings) Validate() error {
+	if m.Scheduler == "" {
+		return nil
+	}
+	if len(m.Scheduler) > 64 || strings.ContainsAny(m.Scheduler, "/\x00 \t\r\n") {
+		return errors.New("scheduler must be a plain scheduler name without path or whitespace")
+	}
+	for _, known := range KnownMPTCPSchedulers {
+		if m.Scheduler == known {
+			return nil
+		}
+	}
+	return fmt.Errorf("scheduler must be one of %v", KnownMPTCPSchedulers)
 }
 
 // Validate checks the Babel settings.

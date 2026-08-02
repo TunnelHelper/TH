@@ -69,7 +69,10 @@ func Validate(t *Tunnel) error {
 	if kindErr != nil {
 		return kindErr
 	}
-	return validateTunnelBabel(t)
+	if err := validateTunnelBabel(t); err != nil {
+		return err
+	}
+	return validateTunnelMptcp(t)
 }
 
 func validateSpecChoice(t *Tunnel) error {
@@ -396,6 +399,21 @@ func BabelNeedsUnicastFallback(t *Tunnel) bool {
 	}
 	peers := babelWireGuardPeers(t)
 	return len(peers) <= 1 && !PeerAllowedIPsCoverBabelMulticast(peers)
+}
+
+// validateTunnelMptcp validates the optional per-tunnel MPTCP switch.
+// SRv6 tunnels have no interface address and can never be an MPTCP
+// endpoint source, so they are rejected outright (mirroring the Babel
+// handling). The endpoint switch itself is a three-state pointer and needs
+// no further constraint.
+func validateTunnelMptcp(t *Tunnel) error {
+	if t.Spec.Mptcp == nil {
+		return nil
+	}
+	if t.Kind == KindSRv6 {
+		return errors.New("srv6 records cannot register MPTCP endpoints")
+	}
+	return nil
 }
 
 // PeerAllowedIPsCoverBabelMulticast reports whether any peer AllowedIPs

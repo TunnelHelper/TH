@@ -103,6 +103,34 @@ func TestBabelSettingsFingerprint(t *testing.T) {
 	}
 }
 
+func TestConfiguredBabelInterfaces(t *testing.T) {
+	engine := &babelEngine{
+		tunnels: map[string]babelTunnel{
+			"t1": {interfaceName: "wg-prod1"},
+			"t2": {interfaceName: "wg-prod2"},
+		},
+		settings: config.BabelSettings{
+			Interfaces: map[string]config.BabelExternalInterface{
+				"gre-ext0": {},
+			},
+		},
+	}
+	got := engine.configuredBabelInterfaces()
+	want := map[string]string{
+		"wg-prod1": "tunnel",
+		"wg-prod2": "tunnel",
+		"gre-ext0": "external",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("configured interfaces = %v, want %v", got, want)
+	}
+	for name, source := range want {
+		if got[name] != source {
+			t.Fatalf("interface %s source = %q, want %q", name, got[name], source)
+		}
+	}
+}
+
 func TestBabelWeightEqualTolerance(t *testing.T) {
 	cases := []struct {
 		current, desired int

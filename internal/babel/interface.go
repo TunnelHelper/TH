@@ -83,34 +83,49 @@ func (s *Speaker) newInterface(index int) (*Interface, error) {
 		stopped: make(chan struct{}),
 	}
 
-	if i.multicast {
-		multicastAddr := &net.UDPAddr{
-			IP:   MulticastGroupIPv6.AsSlice(),
-			Port: Port,
-		}
-
-		i.queue = queue.NewQueue(intf.MTU, &netx.PacketConnWriter{
-			Conn6:   i.speaker.conn6,
-			Conn4:   i.speaker.conn4,
-			Dest:    multicastAddr,
-			Src:     i.sourceAddress(),
-			Src4:    i.sourceAddress4(),
-			IfIndex: intf.Index,
-		})
-
-		if err := i.speaker.conn6.JoinGroup(i.Interface, multicastAddr); err != nil {
-			return nil, fmt.Errorf("failed to join multicast group: %w", err)
-		}
-	} else {
-		i.queue = queue.NewQueue(intf.MTU, &netx.PacketConnWriter{
-			Conn6:   i.speaker.conn6,
-			Conn4:   i.speaker.conn4,
-			Dest:    nil,
-			Src:     i.sourceAddress(),
-			Src4:    i.sourceAddress4(),
-			IfIndex: intf.Index,
-		})
+	writer := &netx.PacketConnWriter{
+		Conn6:   i.speaker.conn6,
+		Conn4:   i.speaker.conn4,
+		Src:     i.sourceAddress(),
+		Src4:    i.sourceAddress4(),
+		IfIndex: intf.Index,
 	}
+
+	if i.multicast {
+		dest6, dest4 := i.multicastGroups()
+		if dest6 != nil {
+			writer.Dest = dest6
+			if err := i.speaker.conn6.JoinGroup(i.Interface, dest6); err != nil {
+				i.logger.Warn("IPv6 multicast unavailable on Babel interface; continuing without it",
+					slog.String("intf", intf.Name), slog.Any("error", err))
+				writer.Dest = nil
+			}
+		}
+		if dest4 != nil {
+			writer.Dest4 = dest4
+			if err := i.speaker.conn4.JoinGroup(i.Interface, dest4); err != nil {
+				i.logger.Warn("IPv4 multicast unavailable on Babel interface; continuing without it",
+					slog.String("intf", intf.Name), slog.Any("error", err))
+				writer.Dest4 = nil
+			}
+		}
+		if writer.Dest == nil && writer.Dest4 == nil {
+			// The link cannot carry Babel multicast (down, unaddressed, or
+			// both group joins failed). Fall back to unicast when static
+			// neighbours are configured; otherwise skip the interface so a
+			// single unusable link cannot take down the whole engine.
+			if static, ok := s.config.StaticNeighbours[intf.Name]; ok && len(static) > 0 {
+				i.logger.Warn("Multicast unavailable on Babel interface; falling back to unicast neighbours",
+					slog.String("intf", intf.Name))
+				i.multicast = false
+			} else {
+				i.logger.Warn("Multicast unavailable on Babel interface and no unicast neighbours are configured; skipping it",
+					slog.String("intf", intf.Name))
+				return nil, nil
+			}
+		}
+	}
+	i.queue = queue.NewQueue(intf.MTU, writer)
 
 	// Bootstrap static neighbours on non-multicast links (e.g. WireGuard):
 	// create the neighbour entries up front and send an initial unicast
@@ -128,6 +143,39 @@ func (s *Speaker) newInterface(index int) (*Interface, error) {
 	i.logger.Debug("Added new interface")
 
 	return i, nil
+}
+
+// multicastGroups selects the Babel multicast destination per address
+// family the interface can actually carry: the IPv6 group when the
+// interface has IPv6 addresses, the IPv4 group when it has IPv4 addresses.
+// An interface without any address cannot carry Babel multicast at all.
+func (i *Interface) multicastGroups() (v6, v4 *net.UDPAddr) {
+	addrs, err := i.Addrs()
+	if err != nil {
+		return nil, nil
+	}
+	return multicastGroupsForAddresses(addrs)
+}
+
+// multicastGroupsForAddresses is the pure address-family selection behind
+// multicastGroups so it can be unit-tested without a real interface.
+func multicastGroupsForAddresses(addrs []net.Addr) (v6, v4 *net.UDPAddr) {
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if ipNet.IP.To4() != nil {
+			if v4 == nil {
+				v4 = &net.UDPAddr{IP: MulticastGroupIPv4.AsSlice(), Port: Port}
+			}
+			continue
+		}
+		if v6 == nil {
+			v6 = &net.UDPAddr{IP: MulticastGroupIPv6.AsSlice(), Port: Port}
+		}
+	}
+	return v6, v4
 }
 
 func (i *Interface) addStaticNeighbour(addr proto.Address) error {

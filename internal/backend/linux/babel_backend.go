@@ -189,6 +189,7 @@ func (e *babelEngine) reconcile() error {
 		e.speaker = speaker
 		e.built = fingerprint
 		e.advertised = make(map[netip.Prefix]struct{})
+		e.warnMissingInterfaces(speaker)
 	}
 	speaker := e.speaker
 	e.mu.Unlock()
@@ -197,6 +198,35 @@ func (e *babelEngine) reconcile() error {
 		return err
 	}
 	return e.installRoutes(speaker)
+}
+
+// warnMissingInterfaces logs every interface that was configured for Babel
+// (a tunnel with Babel enabled or an external settings entry) but is not
+// present in the kernel, so a missing link is visible instead of being
+// silently ignored. The caller must hold e.mu.
+func (e *babelEngine) warnMissingInterfaces(speaker *babel.Speaker) {
+	configured := e.configuredBabelInterfaces()
+	_ = speaker.Interfaces.Foreach(func(_ int, iface *babel.Interface) error {
+		delete(configured, iface.Name)
+		return nil
+	})
+	for name, source := range configured {
+		slog.Warn("Configured Babel interface is not present in the kernel; Babel is inactive on it",
+			slog.String("interface", name), slog.String("source", source))
+	}
+}
+
+// configuredBabelInterfaces maps every interface expected to run Babel to
+// the source that configured it ("tunnel" or "external").
+func (e *babelEngine) configuredBabelInterfaces() map[string]string {
+	configured := make(map[string]string, len(e.tunnels)+len(e.settings.Interfaces))
+	for _, t := range e.tunnels {
+		configured[t.interfaceName] = "tunnel"
+	}
+	for name := range e.settings.Interfaces {
+		configured[name] = "external"
+	}
+	return configured
 }
 
 func (e *babelEngine) fingerprintLocked() string {

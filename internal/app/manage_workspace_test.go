@@ -77,6 +77,45 @@ func TestWorkspaceBabelFields(t *testing.T) {
 	}
 }
 
+func TestWorkspaceMptcpEndpointChoice(t *testing.T) {
+	for _, kind := range []model.Kind{model.KindGRE, model.KindVXLAN, model.KindWireGuard, model.KindAmneziaWG, model.KindXFRMStatic, model.KindXFRMIKEv2} {
+		t.Run(string(kind), func(t *testing.T) {
+			fields := workspaceTunnelFields(workspaceTestTunnel(kind))
+			index := workspaceFieldIndex(fields, "mptcp.endpoint")
+			if index == 0 {
+				t.Fatalf("mptcp.endpoint is missing for %s: %+v", kind, fields)
+			}
+			if fields[index].Value != "Follow global" {
+				t.Fatalf("default MPTCP endpoint state = %q, want Follow global", fields[index].Value)
+			}
+		})
+	}
+	fields := workspaceTunnelFields(workspaceTestTunnel(model.KindSRv6))
+	if workspaceFieldIndex(fields, "mptcp.endpoint") != 0 {
+		t.Fatalf("SRv6 must not expose MPTCP fields: %+v", fields)
+	}
+
+	editor := manageWorkspaceModel{draft: workspaceTestTunnel(model.KindWireGuard)}
+	if err := editor.applyWorkspaceChoice("tunnel:mptcp.endpoint", "on"); err != nil {
+		t.Fatal(err)
+	}
+	if editor.draft.Spec.Mptcp == nil || editor.draft.Spec.Mptcp.Endpoint == nil || !*editor.draft.Spec.Mptcp.Endpoint {
+		t.Fatalf("On choice was not applied: %+v", editor.draft.Spec.Mptcp)
+	}
+	if err := editor.applyWorkspaceChoice("tunnel:mptcp.endpoint", "off"); err != nil {
+		t.Fatal(err)
+	}
+	if editor.draft.Spec.Mptcp == nil || editor.draft.Spec.Mptcp.Endpoint == nil || *editor.draft.Spec.Mptcp.Endpoint {
+		t.Fatalf("Off choice was not applied: %+v", editor.draft.Spec.Mptcp)
+	}
+	if err := editor.applyWorkspaceChoice("tunnel:mptcp.endpoint", "follow"); err != nil {
+		t.Fatal(err)
+	}
+	if editor.draft.Spec.Mptcp != nil {
+		t.Fatalf("Follow choice must clear the section, got %+v", editor.draft.Spec.Mptcp)
+	}
+}
+
 func TestWorkspaceEditPreparesLegacyNameMigration(t *testing.T) {
 	legacy := workspaceTestTunnel(model.KindXFRMIKEv2)
 	legacy.Name = "rfc-tyo"

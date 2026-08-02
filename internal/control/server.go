@@ -30,13 +30,14 @@ type Manager interface {
 	Reconcile(context.Context, string) (model.TunnelView, error)
 	ReconcileAll(context.Context) ([]model.TunnelView, error)
 	Health(context.Context) map[model.Kind]core.BackendHealth
+	MptcpHealth() core.MptcpHealth
 	SubscribeEvents(uint64) core.EventSubscription
 	PlanBundle(model.Bundle, bool) (core.BundlePlan, error)
 	ApplyBundle(context.Context, model.Bundle, bool, bool) (core.BundleApplyResult, error)
 	BuildBackup() (backup.Archive, error)
 	RestoreBackup(context.Context, backup.Archive, bool, bool) (core.RestoreResult, error)
-	Settings() (config.BabelSettings, error)
-	UpdateSettings(context.Context, config.BabelSettings) error
+	Settings() (config.Settings, error)
+	UpdateSettings(context.Context, config.Settings) error
 }
 
 type Server struct {
@@ -87,7 +88,16 @@ type HealthResponse struct {
 	Ready         bool                              `json:"ready"`
 	Daemon        version.Info                      `json:"daemon"`
 	Backends      map[model.Kind]core.BackendHealth `json:"backends"`
+	Mptcp         core.MptcpHealth                  `json:"mptcp"`
 	Tunnels       TunnelHealthSummary               `json:"tunnels"`
+}
+
+// DaemonSettings is the operator-editable daemon settings payload exposed
+// by the settings API. It mirrors the babel and mptcp top-level sections
+// of thd.json; filesystem layout fields are owned by the daemon itself.
+type DaemonSettings struct {
+	Babel config.BabelSettings `json:"babel,omitempty"`
+	Mptcp config.MptcpSettings `json:"mptcp,omitempty"`
 }
 
 func NewServer(manager Manager) *Server {
@@ -334,6 +344,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		Ready:         ready,
 		Daemon:        version.Current(),
 		Backends:      health,
+		Mptcp:         s.manager.MptcpHealth(),
 		Tunnels:       summary,
 	})
 }
@@ -516,16 +527,19 @@ func (s *Server) getSettings(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, settings)
+	writeJSON(w, http.StatusOK, DaemonSettings{Babel: settings.Babel, Mptcp: settings.Mptcp})
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
-	var settings config.BabelSettings
+	var settings DaemonSettings
 	if err := decodeJSON(r, &settings); err != nil {
 		writeBadRequest(w, err)
 		return
 	}
-	if err := s.manager.UpdateSettings(r.Context(), settings); err != nil {
+	full := config.Defaults()
+	full.Babel = settings.Babel
+	full.Mptcp = settings.Mptcp
+	if err := s.manager.UpdateSettings(r.Context(), full); err != nil {
 		writeError(w, err)
 		return
 	}

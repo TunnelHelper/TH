@@ -99,6 +99,7 @@ func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
 		name      string
 		views     []model.TunnelView
 		health    map[model.Kind]core.BackendHealth
+		mptcp     core.MptcpHealth
 		wantReady bool
 		wantReq   bool
 	}{
@@ -125,13 +126,14 @@ func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
 				Status: model.Status{Phase: model.PhasePending},
 			}},
 			health:    map[model.Kind]core.BackendHealth{model.KindGRE: {Available: true}},
+			mptcp:     core.MptcpHealth{Supported: true, Enabled: true, Status: "enabled", Endpoints: 2},
 			wantReady: false,
 			wantReq:   true,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			manager := &stubManager{views: test.views, health: test.health}
+			manager := &stubManager{views: test.views, health: test.health, mptcpHealth: test.mptcp}
 			server := httptest.NewServer(NewServer(manager).Handler())
 			defer server.Close()
 			response, err := http.Get(server.URL + "/v1/health")
@@ -153,6 +155,9 @@ func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
 			}
 			if health.APIVersion != APIVersion || health.SchemaVersion != model.SchemaVersion || !health.Alive {
 				t.Fatalf("health metadata = %+v", health)
+			}
+			if health.Mptcp != test.mptcp {
+				t.Fatalf("Mptcp health = %+v, want %+v", health.Mptcp, test.mptcp)
 			}
 		})
 	}
@@ -231,7 +236,7 @@ func TestSettingsAPI(t *testing.T) {
 	}
 	response.Body.Close()
 
-	body := `{"router_id":"0011223344556677","route_table":100,"multipath_slack":256}`
+	body := `{"babel":{"router_id":"0011223344556677","route_table":100,"multipath_slack":256},"mptcp":{"enabled":true,"scheduler":"roundrobin"}}`
 	request, err := http.NewRequest(http.MethodPut, server.URL+"/v1/settings", bytes.NewBufferString(body))
 	if err != nil {
 		t.Fatal(err)
@@ -244,16 +249,22 @@ func TestSettingsAPI(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("PUT /v1/settings = %d, want 200", response.StatusCode)
 	}
-	var updated config.BabelSettings
+	var updated DaemonSettings
 	if err := json.NewDecoder(response.Body).Decode(&updated); err != nil {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if updated.RouterID != "0011223344556677" || updated.MultipathSlack != 256 {
+	if updated.Babel.RouterID != "0011223344556677" || updated.Babel.MultipathSlack != 256 {
 		t.Fatalf("updated settings = %+v", updated)
+	}
+	if !updated.Mptcp.Enabled || updated.Mptcp.Scheduler != "roundrobin" {
+		t.Fatalf("updated MPTCP settings = %+v, want enabled roundrobin", updated.Mptcp)
 	}
 	if manager.babelSettings.RouterID != "0011223344556677" {
 		t.Fatal("manager must receive the updated settings")
+	}
+	if !manager.mptcpSettings.Enabled || manager.mptcpSettings.Scheduler != "roundrobin" {
+		t.Fatalf("manager MPTCP settings = %+v", manager.mptcpSettings)
 	}
 }
 
@@ -388,8 +399,10 @@ type stubManager struct {
 	view              model.TunnelView
 	views             []model.TunnelView
 	health            map[model.Kind]core.BackendHealth
+	mptcpHealth       core.MptcpHealth
 	events            *core.EventHub
 	babelSettings     config.BabelSettings
+	mptcpSettings     config.MptcpSettings
 	getErr            error
 	updateErr         error
 	updateSettingsErr error
@@ -438,6 +451,7 @@ func (m *stubManager) Health(context.Context) map[model.Kind]core.BackendHealth 
 	}
 	return map[model.Kind]core.BackendHealth{model.KindGRE: {Available: true}}
 }
+func (m *stubManager) MptcpHealth() core.MptcpHealth { return m.mptcpHealth }
 func (m *stubManager) SubscribeEvents(after uint64) core.EventSubscription {
 	if m.events == nil {
 		m.events = core.NewEventHub(8)
@@ -463,14 +477,17 @@ func (m *stubManager) RestoreBackup(context.Context, backup.Archive, bool, bool)
 	return core.RestoreResult{}, nil
 }
 
-func (m *stubManager) Settings() (config.BabelSettings, error) {
-	return m.babelSettings, nil
+func (m *stubManager) Settings() (config.Settings, error) {
+	settings := config.Defaults()
+	settings.Babel = m.babelSettings
+	return settings, nil
 }
 
-func (m *stubManager) UpdateSettings(_ context.Context, settings config.BabelSettings) error {
+func (m *stubManager) UpdateSettings(_ context.Context, settings config.Settings) error {
 	if m.updateSettingsErr != nil {
 		return m.updateSettingsErr
 	}
-	m.babelSettings = settings
+	m.babelSettings = settings.Babel
+	m.mptcpSettings = settings.Mptcp
 	return nil
 }

@@ -278,16 +278,25 @@ func (c *Client) RestoreBackup(ctx context.Context, passphrase string, reader io
 	return result, nil
 }
 
-// Settings returns the daemon's Babel settings.
-func (c *Client) Settings(ctx context.Context) (config.BabelSettings, error) {
-	var settings config.BabelSettings
+// Settings returns the daemon's operator-editable settings (Babel and
+// MPTCP sections).
+func (c *Client) Settings(ctx context.Context) (config.Settings, error) {
+	var settings DaemonSettings
 	err := c.do(ctx, http.MethodGet, "/v1/settings", nil, 0, &settings)
-	return settings, err
+	if err != nil {
+		return config.Settings{}, err
+	}
+	full := config.Defaults()
+	full.Babel = settings.Babel
+	full.Mptcp = settings.Mptcp
+	return full, nil
 }
 
-// UpdateSettings persists and applies new Babel settings.
-func (c *Client) UpdateSettings(ctx context.Context, settings config.BabelSettings) error {
-	return c.do(ctx, http.MethodPut, "/v1/settings", settings, 0, &settings)
+// UpdateSettings persists and applies new daemon settings.
+func (c *Client) UpdateSettings(ctx context.Context, settings config.Settings) error {
+	payload := DaemonSettings{Babel: settings.Babel, Mptcp: settings.Mptcp}
+	var response DaemonSettings
+	return c.do(ctx, http.MethodPut, "/v1/settings", payload, 0, &response)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, generation uint64, target any) error {

@@ -71,6 +71,12 @@ type Spec struct {
 	// this tunnel. Tunnels without this section (or with enabled=false)
 	// never participate in Babel.
 	Babel *BabelTunnelConfig `json:"babel,omitempty"`
+
+	// Mptcp optionally overrides the daemon-wide MPTCP endpoint
+	// registration for this tunnel. Tunnels without this section follow
+	// the global mptcp.enabled switch; an explicit section can opt the
+	// tunnel out (endpoint=false) or force registration on (endpoint=true).
+	Mptcp *MptcpTunnelConfig `json:"mptcp,omitempty"`
 }
 
 type GRESpec struct {
@@ -225,6 +231,16 @@ type BabelTunnelConfig struct {
 	// multi-peer WireGuard meshes use unicast + static neighbours. nil
 	// selects automatically.
 	Multicast *bool `json:"multicast,omitempty"`
+}
+
+// MptcpTunnelConfig is the per-tunnel MPTCP endpoint switch. It only
+// decides whether TH registers this tunnel's addresses as MPTCP endpoints;
+// it does not make any application use MPTCP.
+type MptcpTunnelConfig struct {
+	// Endpoint is the tri-state per-tunnel switch: nil follows the global
+	// mptcp.enabled setting, false never registers an endpoint for this
+	// tunnel, true always does. The default (nil) is the recommended value.
+	Endpoint *bool `json:"endpoint,omitempty"`
 }
 
 type Phase string
