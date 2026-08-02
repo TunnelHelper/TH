@@ -31,6 +31,7 @@ type Manager interface {
 	ReconcileAll(context.Context) ([]model.TunnelView, error)
 	Health(context.Context) map[model.Kind]core.BackendHealth
 	MptcpHealth() core.MptcpHealth
+	BabelHealth() core.BabelHealth
 	SubscribeEvents(uint64) core.EventSubscription
 	PlanBundle(model.Bundle, bool) (core.BundlePlan, error)
 	ApplyBundle(context.Context, model.Bundle, bool, bool) (core.BundleApplyResult, error)
@@ -89,6 +90,7 @@ type HealthResponse struct {
 	Daemon        version.Info                      `json:"daemon"`
 	Backends      map[model.Kind]core.BackendHealth `json:"backends"`
 	Mptcp         core.MptcpHealth                  `json:"mptcp"`
+	Babel         core.BabelHealth                  `json:"babel"`
 	Tunnels       TunnelHealthSummary               `json:"tunnels"`
 }
 
@@ -345,6 +347,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		Daemon:        version.Current(),
 		Backends:      health,
 		Mptcp:         s.manager.MptcpHealth(),
+		Babel:         s.manager.BabelHealth(),
 		Tunnels:       summary,
 	})
 }

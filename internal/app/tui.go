@@ -37,8 +37,8 @@ func runTUI(client *control.Client, timeout time.Duration) error {
 		choice := "manage"
 		output.Title("TH")
 		output.Dim(version.Current().Label())
-		err := app.prompts.selectValue("Action", app.mainMenuOptions(), &choice)
-		if errors.Is(err, ErrAborted) || choice == "exit" {
+		err := app.prompts.selectValueWithHint("Action", "arrows/tab  Select    enter  Apply    esc  Cancel    ctrl+c  Exit", app.mainMenuOptions(), &choice)
+		if errors.Is(err, ErrAborted) {
 			return nil
 		}
 		if err != nil {
@@ -101,7 +101,6 @@ func (a *tuiApp) mainMenuOptions() []ui.Option {
 		{Label: "Create static XFRM", Value: string(model.KindXFRMStatic)},
 		{Label: "Create SRv6", Value: string(model.KindSRv6)},
 		{Label: "Settings", Value: "settings"},
-		{Label: "Exit", Value: "exit"},
 	}
 	for i := range options {
 		_, options[i].Dimmed = a.unavailable(model.Kind(options[i].Value))

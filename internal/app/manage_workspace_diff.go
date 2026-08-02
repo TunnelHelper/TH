@@ -256,25 +256,17 @@ func workspaceDiffLines(changes []workspaceChange, width, maxLines int) []string
 	if len(changes) == 0 {
 		return append(lines, workspaceDimStyle.Render("No pending changes"))
 	}
-	limit := len(changes)
-	if maxLines > 1 {
-		limit = min(limit, maxLines-1)
-	}
-	for index := 0; index < limit; index++ {
+	for index := range changes {
 		change := changes[index]
 		line := fmt.Sprintf("%s: %s -> %s", change.Path, change.Before, change.After)
 		lines = append(lines, fit(line, max(10, width)))
 	}
-	if limit < len(changes) {
-		lines = append(lines, workspaceDimStyle.Render(fmt.Sprintf("... %d more change(s)", len(changes)-limit)))
-	}
 	return lines
 }
 
-// workspaceDiffWindow renders the pending-changes block as a scrollable
-// window around the selected change. The window uses at most maxLines
-// lines (including the section header) and marks the focused selection;
-// up/down in the editor scrolls through changes beyond the window.
+// workspaceDiffWindow renders every pending change in full; height limiting
+// is intentionally disabled, so the block never hides changes behind a
+// scroll window or a "N more change(s)" marker.
 func workspaceDiffWindow(changes []workspaceChange, selected int, focused bool, width, maxLines int) []string {
 	lines := []string{workspaceAccentStyle.Render("Pending changes")}
 	if len(changes) == 0 {
@@ -290,12 +282,8 @@ func workspaceDiffWindow(changes []workspaceChange, selected int, focused bool, 
 		}
 		content[index] = fit(line, max(10, width))
 	}
-	start, end := workspaceVisibleRange(len(content), selected, max(1, maxLines-1))
-	for _, line := range content[start:end] {
+	for _, line := range content {
 		lines = append(lines, line)
-	}
-	if len(changes) > end-start {
-		lines = append(lines, workspaceDimStyle.Render(fmt.Sprintf("%d change(s) — ↑/↓ to scroll", len(changes))))
 	}
 	return lines
 }

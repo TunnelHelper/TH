@@ -119,7 +119,7 @@ func TestDashboardPeerDetailsShowLiveHandshakeAndBothCounterSources(t *testing.T
 	}
 }
 
-func TestDashboardPeerDetailsStayWithinTerminalHeight(t *testing.T) {
+func TestDashboardPeerDetailsRenderWithoutHeightLimit(t *testing.T) {
 	peers := make([]model.PeerStatus, 3)
 	for index := range peers {
 		peers[index] = model.PeerStatus{PublicKey: strings.Repeat(string(rune('a'+index)), 16)}
@@ -129,27 +129,25 @@ func TestDashboardPeerDetailsStayWithinTerminalHeight(t *testing.T) {
 		views[index] = model.TunnelView{Tunnel: model.Tunnel{Name: "wg", Kind: model.KindWireGuard}, Status: model.Status{Peers: peers}}
 	}
 	dashboard := (dashboardModel{views: views, width: 100, height: 20}).View()
-	if lines := strings.Count(dashboard, "\n") + 1; lines > 20 {
-		t.Fatalf("dashboard uses %d lines in a 20-line terminal:\n%s", lines, dashboard)
+	if strings.Contains(dashboard, "more peers") {
+		t.Fatalf("dashboard hid peer details behind a more-marker:\n%s", dashboard)
 	}
-	if !strings.Contains(dashboard, "more peers") {
-		t.Fatalf("dashboard did not report hidden peer details:\n%s", dashboard)
+	for _, key := range []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"} {
+		if !strings.Contains(dashboard, "Peer "+key) {
+			t.Fatalf("dashboard did not render peer %q in full:\n%s", key, dashboard)
+		}
 	}
 }
 
-func TestDashboardExpandsToTerminalHeight(t *testing.T) {
+func TestDashboardShowsAllTunnelsRegardlessOfTerminalHeight(t *testing.T) {
 	views := make([]model.TunnelView, 30)
 	for index := range views {
 		views[index] = model.TunnelView{Tunnel: model.Tunnel{Name: "tunnel", Kind: model.KindGRE}}
 	}
 	for _, height := range []int{20, 80} {
 		dashboard := (dashboardModel{views: views, width: 100, height: height}).View()
-		lines := strings.Count(dashboard, "\n") + 1
-		if lines > height {
-			t.Fatalf("dashboard uses %d lines in a %d-line terminal:\n%s", lines, height, dashboard)
-		}
-		if lines < min(height, 10) {
-			t.Fatalf("dashboard must use the terminal height %d, used %d:\n%s", height, lines, dashboard)
+		if rows := strings.Count(dashboard, "tunnel"); rows < len(views) {
+			t.Fatalf("dashboard shows %d of %d tunnel rows at height %d:\n%s", rows, len(views), height, dashboard)
 		}
 	}
 }

@@ -266,6 +266,15 @@ func (b *Backend) MptcpHealth() core.MptcpHealth {
 	return b.mptcp.health()
 }
 
+// BabelHealth returns the daemon-wide Babel state (the effective router ID)
+// for th health and the TUI settings editor.
+func (b *Backend) BabelHealth() core.BabelHealth {
+	if b.babel == nil {
+		return core.BabelHealth{}
+	}
+	return b.babel.health()
+}
+
 func (b *Backend) Close() error {
 	var closeErr error
 	b.close.Do(func() {

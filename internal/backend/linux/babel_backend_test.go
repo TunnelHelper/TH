@@ -3,9 +3,12 @@
 package linux
 
 import (
+	"encoding/hex"
 	"errors"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -273,6 +276,69 @@ func TestParseBabelRouterID(t *testing.T) {
 		if _, err := parseBabelRouterID(reserved); err == nil {
 			t.Errorf("reserved router id %s must fail", reserved)
 		}
+	}
+}
+
+func TestLoadBabelRouterIDGeneratesStableIDWhenUnconfigured(t *testing.T) {
+	stateDir := t.TempDir()
+	first, err := loadBabelRouterID("", stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == [8]byte{} {
+		t.Fatal("empty configuration must auto-generate a router id")
+	}
+	second, err := loadBabelRouterID("", stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("generated router id is not stable across loads: %x vs %x", first, second)
+	}
+	persisted, err := os.ReadFile(filepath.Join(stateDir, "babel-router-id"))
+	if err != nil {
+		t.Fatalf("generated router id was not persisted: %v", err)
+	}
+	if got := hex.EncodeToString(first[:]); string(persisted) != got {
+		t.Fatalf("persisted router id = %q, want %q", persisted, got)
+	}
+
+	configured, err := loadBabelRouterID("aabbccddeeff0011", stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured[0] != 0xaa || configured[7] != 0x11 {
+		t.Fatalf("explicit configuration must win over the generated id: %x", configured)
+	}
+}
+
+func TestRefreshRouterIDAppliesConfiguredAndPersistedID(t *testing.T) {
+	stateDir := t.TempDir()
+	engine := &babelEngine{
+		backend: &Backend{settings: config.Settings{StateDir: stateDir}},
+	}
+	persisted, err := loadBabelRouterID("", stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.routerID = persisted
+
+	next := config.Defaults().Babel
+	next.RouterID = "aabbccddeeff0011"
+	if err := engine.refreshRouterIDLocked(next); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.health().RouterID; got != "aabbccddeeff0011" {
+		t.Fatalf("configured router id was not applied, got %q", got)
+	}
+
+	// Clearing the field returns to the persisted auto-generated ID.
+	next.RouterID = ""
+	if err := engine.refreshRouterIDLocked(next); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.health().RouterID; got != hex.EncodeToString(persisted[:]) {
+		t.Fatalf("clearing router id must restore the persisted id, got %q", got)
 	}
 }
 

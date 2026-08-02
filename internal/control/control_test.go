@@ -100,6 +100,7 @@ func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
 		views     []model.TunnelView
 		health    map[model.Kind]core.BackendHealth
 		mptcp     core.MptcpHealth
+		babel     core.BabelHealth
 		wantReady bool
 		wantReq   bool
 	}{
@@ -127,13 +128,14 @@ func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
 			}},
 			health:    map[model.Kind]core.BackendHealth{model.KindGRE: {Available: true}},
 			mptcp:     core.MptcpHealth{Supported: true, Enabled: true, Status: "enabled", Endpoints: 2},
+			babel:     core.BabelHealth{RouterID: "0011223344556677"},
 			wantReady: false,
 			wantReq:   true,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			manager := &stubManager{views: test.views, health: test.health, mptcpHealth: test.mptcp}
+			manager := &stubManager{views: test.views, health: test.health, mptcpHealth: test.mptcp, babelHealth: test.babel}
 			server := httptest.NewServer(NewServer(manager).Handler())
 			defer server.Close()
 			response, err := http.Get(server.URL + "/v1/health")
@@ -158,6 +160,9 @@ func TestHealthReadinessUsesConfiguredTunnels(t *testing.T) {
 			}
 			if health.Mptcp != test.mptcp {
 				t.Fatalf("Mptcp health = %+v, want %+v", health.Mptcp, test.mptcp)
+			}
+			if health.Babel != test.babel {
+				t.Fatalf("Babel health = %+v, want %+v", health.Babel, test.babel)
 			}
 		})
 	}
@@ -400,6 +405,7 @@ type stubManager struct {
 	views             []model.TunnelView
 	health            map[model.Kind]core.BackendHealth
 	mptcpHealth       core.MptcpHealth
+	babelHealth       core.BabelHealth
 	events            *core.EventHub
 	babelSettings     config.BabelSettings
 	mptcpSettings     config.MptcpSettings
@@ -452,6 +458,7 @@ func (m *stubManager) Health(context.Context) map[model.Kind]core.BackendHealth 
 	return map[model.Kind]core.BackendHealth{model.KindGRE: {Available: true}}
 }
 func (m *stubManager) MptcpHealth() core.MptcpHealth { return m.mptcpHealth }
+func (m *stubManager) BabelHealth() core.BabelHealth { return m.babelHealth }
 func (m *stubManager) SubscribeEvents(after uint64) core.EventSubscription {
 	if m.events == nil {
 		m.events = core.NewEventHub(8)

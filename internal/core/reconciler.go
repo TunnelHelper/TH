@@ -475,6 +475,10 @@ func (r *Reconciler) MptcpHealth() MptcpHealth {
 	return r.backend.MptcpHealth()
 }
 
+func (r *Reconciler) BabelHealth() BabelHealth {
+	return r.backend.BabelHealth()
+}
+
 func (r *Reconciler) Close() error {
 	return r.backend.Close()
 }

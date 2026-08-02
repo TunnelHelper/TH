@@ -163,8 +163,11 @@ func TestWorkspaceEditorChangesScroll(t *testing.T) {
 		t.Fatalf("down must scroll into the changes, selected = %d", editor.changeSelected)
 	}
 	view := editor.tunnelEditorView(120)
-	if !strings.Contains(view, "Pending changes") || !strings.Contains(view, "↑/↓ to scroll") {
-		t.Fatalf("changes view must indicate scrolling:\n%s", view)
+	if !strings.Contains(view, "Pending changes") {
+		t.Fatalf("changes view must render the pending changes:\n%s", view)
+	}
+	if strings.Contains(view, "↑/↓ to scroll") || strings.Contains(view, "more change") {
+		t.Fatalf("changes must render in full without a scroll window:\n%s", view)
 	}
 
 	// Up at the top of the changes returns to the fields.
@@ -213,9 +216,6 @@ func TestWorkspaceViewShowsBreadcrumbDirtyStateAndDiff(t *testing.T) {
 	}
 	if strings.Contains(view, "│") {
 		t.Fatalf("wide editor unexpectedly rendered a split-pane divider:\n%s", view)
-	}
-	if lines := strings.Count(view, "\n") + 1; lines > m.height {
-		t.Fatalf("workspace uses %d lines, terminal height is %d:\n%s", lines, m.height, view)
 	}
 }
 
@@ -502,9 +502,6 @@ func TestWorkspaceKeepsPairingMaterialAndActionsVisible(t *testing.T) {
 	workspace.width, workspace.height = 72, 24
 
 	view := workspace.View()
-	if lines := len(strings.Split(view, "\n")); lines > workspace.height {
-		t.Fatalf("view has %d lines, height is %d:\n%s", lines, workspace.height, view)
-	}
 	for _, expected := range []string{"New pairing material", "material-1", "material-6", "e  Edit", "esc  Back"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("priority content %q was clipped:\n%s", expected, view)

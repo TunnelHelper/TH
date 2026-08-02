@@ -92,6 +92,7 @@ func (b *fakeBackend) Health(context.Context) map[model.Kind]BackendHealth {
 
 func (b *fakeBackend) ReconcileGlobal(context.Context, []model.Tunnel) error { return nil }
 func (b *fakeBackend) MptcpHealth() MptcpHealth                              { return MptcpHealth{} }
+func (b *fakeBackend) BabelHealth() BabelHealth                              { return BabelHealth{} }
 func (b *fakeBackend) Events() <-chan BackendEvent                           { return b.events }
 func (b *fakeBackend) Close() error                                          { return nil }
 

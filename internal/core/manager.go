@@ -299,6 +299,10 @@ func (m *Manager) MptcpHealth() MptcpHealth {
 	return m.reconciler.MptcpHealth()
 }
 
+func (m *Manager) BabelHealth() BabelHealth {
+	return m.reconciler.BabelHealth()
+}
+
 func (m *Manager) SubscribeEvents(after uint64) EventSubscription {
 	return m.reconciler.SubscribeEvents(after)
 }

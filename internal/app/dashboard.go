@@ -153,17 +153,12 @@ func (m dashboardModel) View() string {
 		lines = append(lines, "No managed tunnels")
 	} else {
 		lines = append(lines, m.tableHeader(width))
-		start, end := m.visibleRange()
+		start, end := 0, len(m.views)
 		for index := start; index < end; index++ {
 			lines = append(lines, m.tableRow(index, width))
 		}
 		lines = append(lines, "")
-		detailBudget := height - len(lines) - 3
-		if m.err != nil {
-			detailBudget -= 2
-		}
-		detailBudget = max(0, detailBudget)
-		lines = append(lines, m.peerLinesWithin(width, detailBudget)...)
+		lines = append(lines, m.peerLines(width)...)
 	}
 	if m.err != nil {
 		lines = append(lines, "", lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(fit(m.err.Error(), width)))
@@ -278,20 +273,9 @@ func sortDashboardViews(views []model.TunnelView) {
 }
 
 func (m dashboardModel) visibleRange() (int, int) {
-	rows := len(m.views)
-	maxRows := m.inlineHeight() - 15
-	if maxRows < 1 {
-		maxRows = 1
-	}
-	if maxRows > rows {
-		maxRows = rows
-	}
-	start := 0
-	if m.selected >= maxRows {
-		start = m.selected - maxRows + 1
-	}
-	end := min(rows, start+maxRows)
-	return start, end
+	// Height limiting is intentionally disabled: the whole tunnel table is
+	// always rendered and the terminal scrolls.
+	return 0, len(m.views)
 }
 
 func (m dashboardModel) inlineHeight() int {
@@ -345,9 +329,6 @@ func (m dashboardModel) peerLines(width int) []string {
 }
 
 func (m dashboardModel) peerLinesWithin(width, maxLines int) []string {
-	if maxLines == 0 {
-		return nil
-	}
 	if len(m.views) == 0 || m.selected >= len(m.views) {
 		return nil
 	}
@@ -364,27 +345,13 @@ func (m dashboardModel) peerLinesWithin(width, maxLines int) []string {
 			lines = append(lines, "Interface link: unavailable")
 		}
 	}
-	if maxLines > 0 && len(lines) >= maxLines {
-		return lines[:maxLines]
-	}
 	if len(view.Status.Peers) == 0 {
 		if message := statusMessage(view); message != "" {
 			lines = append(lines, fit(message, width))
 		}
 		return lines
 	}
-	completePeers := 0
-	for index, peer := range view.Status.Peers {
-		if maxLines >= 0 && len(lines)+3 > maxLines {
-			if len(lines) < maxLines {
-				lines = append(lines, fit(fmt.Sprintf("... %d more peers", len(view.Status.Peers)-index), width))
-			}
-			break
-		}
-		if maxLines >= 0 && completePeers > 0 && index+1 < len(view.Status.Peers) && len(lines)+3 == maxLines {
-			lines = append(lines, fit(fmt.Sprintf("... %d more peers", len(view.Status.Peers)-index), width))
-			break
-		}
+	for _, peer := range view.Status.Peers {
 		key := peer.PublicKey
 		if len(key) > 12 {
 			key = key[:12]
@@ -406,7 +373,6 @@ func (m dashboardModel) peerLinesWithin(width, maxLines int) []string {
 			fit("  Handshake: "+handshake, width),
 			fit(fmt.Sprintf("  %s: rx %s  tx %s", transferLabel, formatBytes(peer.ReceiveBytes), formatBytes(peer.TransmitBytes)), width),
 		)
-		completePeers++
 	}
 	return lines
 }

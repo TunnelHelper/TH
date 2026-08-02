@@ -28,6 +28,7 @@ const (
 
 type settingsLoadMsg struct {
 	settings config.Settings
+	babel    core.BabelHealth
 	mptcp    core.MptcpHealth
 	err      error
 }
@@ -46,6 +47,7 @@ type settingsModel struct {
 	page     settingsPage
 	original config.Settings
 	draft    config.Settings
+	babel    core.BabelHealth
 	mptcp    core.MptcpHealth
 
 	fieldSelected  int
@@ -101,7 +103,7 @@ func (m settingsModel) load() tea.Cmd {
 		if healthErr != nil {
 			return settingsLoadMsg{err: healthErr}
 		}
-		return settingsLoadMsg{settings: settings, mptcp: health.Mptcp}
+		return settingsLoadMsg{settings: settings, babel: health.Babel, mptcp: health.Mptcp}
 	}
 }
 
@@ -130,6 +132,7 @@ func (m settingsModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if message.err == nil {
 			m.original = message.settings
 			m.draft = message.settings
+			m.babel = message.babel
 			m.mptcp = message.mptcp
 		}
 		return m, nil
@@ -318,6 +321,7 @@ func (m *settingsModel) activateSettingsField(field workspaceField) error {
 }
 
 func (m *settingsModel) toggleSettingsField(id string) error {
+	m.notice = ""
 	switch id {
 	case "mptcp.enabled":
 		m.draft.Mptcp.Enabled = !m.draft.Mptcp.Enabled
@@ -333,6 +337,7 @@ func (m *settingsModel) toggleSettingsField(id string) error {
 }
 
 func (m *settingsModel) applySettingsInput(action string, values []string) error {
+	m.notice = ""
 	if action == "add-interface-name" {
 		name := values[0]
 		if name == "" {
@@ -392,6 +397,7 @@ func (m *settingsModel) applySettingsInput(action string, values []string) error
 }
 
 func (m *settingsModel) applySettingsChoice(action, value string) error {
+	m.notice = ""
 	if !strings.HasPrefix(action, "settings:") {
 		return fmt.Errorf("unsupported settings action %q", action)
 	}
@@ -555,24 +561,13 @@ func (m settingsModel) mainView(width int) string {
 	}
 	feedback := m.feedbackLines(width)
 	hints := workspaceHintLines(width, "enter  Edit field", "s  Save settings", "esc  Back")
-	fixed := 5 + 1 + 1 + len(feedback) + 1 + len(hints) + 1 + 2 // header, sections, mptcp hint
-	if m.busy != "" {
-		fixed += 2
-	}
-	changesRows := min(max(len(changes), 1), 8)
-	changeBlock := 1 + changesRows
-	if len(changes) > changesRows {
-		changeBlock++
-	}
-	fieldBudget := max(3, m.inlineHeight()-fixed-changeBlock)
-	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, 1+changesRows)
+	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, len(changes)+1)
 	lines := []string{
 		workspaceDimStyle.Render(fit("TH / Settings", width)), "",
 		workspaceAccentStyle.Render(fit("Daemon settings", width)), status, "",
 	}
 	section := ""
-	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, fieldBudget)
-	for index := start; index < end; index++ {
+	for index := range fields {
 		field := fields[index]
 		next := "babel"
 		if strings.HasPrefix(field.ID, "mptcp.") {
@@ -580,8 +575,15 @@ func (m settingsModel) mainView(width int) string {
 		}
 		if next != section {
 			section = next
+			sectionLabel := "Babel"
 			if section == "mptcp" {
-				lines = append(lines, "", workspaceAccentStyle.Render("MPTCP"))
+				sectionLabel = "MPTCP"
+			}
+			lines = append(lines, "", workspaceAccentStyle.Render(fit(sectionLabel, width)))
+			if section == "babel" && strings.TrimSpace(m.draft.Babel.RouterID) == "" && m.babel.RouterID != "" {
+				lines = append(lines, workspaceDimStyle.Render(truncateDisplay("Router ID (auto): "+m.babel.RouterID, width)))
+			}
+			if section == "mptcp" {
 				lines = append(lines, workspaceDimStyle.Render(truncateDisplay("Kernel: "+m.mptcpStatusLabel(), width)))
 				lines = append(lines, workspaceDimStyle.Render(truncateDisplay(fmt.Sprintf("TH-managed endpoints: %d", m.mptcp.Endpoints), width)))
 			}

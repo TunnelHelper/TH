@@ -290,6 +290,52 @@ func TestSettingsViewsRespectTerminalWidth(t *testing.T) {
 	}
 }
 
+func TestSettingsMainViewRendersEveryFieldWithoutWindow(t *testing.T) {
+	model := settingsEditorFixture()
+	view := model.mainView(120)
+	for _, field := range settingsFields(model.draft) {
+		if !strings.Contains(view, field.Label) {
+			t.Fatalf("settings view hides field %q behind a height window:\n%s", field.Label, view)
+		}
+	}
+}
+
+func TestSettingsMainViewShowsBabelHeaderAndEffectiveRouterID(t *testing.T) {
+	model := settingsEditorFixture()
+	model.draft.Babel.RouterID = ""
+	model.original.Babel.RouterID = ""
+	model.babel = core.BabelHealth{RouterID: "0011223344556677"}
+	view := model.mainView(120)
+	for _, expected := range []string{"Babel", "Router ID (auto): 0011223344556677", "MPTCP"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("settings view does not contain %q:\n%s", expected, view)
+		}
+	}
+}
+
+func TestSettingsEditClearsStaleSavedNotice(t *testing.T) {
+	model := settingsEditorFixture()
+	model.notice = "Settings saved"
+	if err := model.applySettingsChoice("settings:babel.delay_metric", "Off"); err != nil {
+		t.Fatal(err)
+	}
+	if model.notice != "" {
+		t.Fatalf("editing after a save must clear the stale notice, got %q", model.notice)
+	}
+	if err := model.toggleSettingsField("mptcp.enabled"); err != nil {
+		t.Fatal(err)
+	}
+	if model.notice != "" {
+		t.Fatalf("toggling after a save must clear the stale notice, got %q", model.notice)
+	}
+	if err := model.applySettingsInput("settings:babel.router_id", []string{"0011223344556677"}); err != nil {
+		t.Fatal(err)
+	}
+	if model.notice != "" {
+		t.Fatalf("editing input after a save must clear the stale notice, got %q", model.notice)
+	}
+}
+
 func TestSettingsEditorChangesScroll(t *testing.T) {
 	model := settingsEditorFixture()
 	model.original = config.Defaults()

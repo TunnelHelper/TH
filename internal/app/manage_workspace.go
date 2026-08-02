@@ -373,7 +373,7 @@ func (m manageWorkspaceModel) tunnelListView(width int) string {
 		lines = append(lines, "", "No managed tunnels")
 	} else {
 		lines = append(lines, "", m.tunnelTableHeader(width))
-		start, end := workspaceVisibleRange(len(m.views), m.selected, m.inlineHeight()-10)
+		start, end := workspaceVisibleRange(len(m.views), m.selected, len(m.views))
 		for index := start; index < end; index++ {
 			lines = append(lines, m.tunnelTableRow(index, width))
 		}
@@ -393,25 +393,7 @@ func (m manageWorkspaceModel) tunnelDetailView(width int) string {
 	feedback := m.feedbackLines(width)
 	hints := workspaceHintLines(width, "e  Edit", "space  Enable/disable", "r  Refresh", "a  Reconcile", "d  Delete", "esc  Back")
 	status := workspaceStatusLines(m.view, width)
-	fixedLines := len(lines) + len(feedback) + len(hints) + 1
-	if m.busy != "" {
-		fixedLines += 2
-	}
-	budget := len(status)
-	budget = m.inlineHeight() - fixedLines
-	if budget < 4 {
-		budget = 4
-	}
-	maxOffset := max(0, len(status)-budget)
-	offset := min(m.detailOffset, maxOffset)
-	end := min(len(status), offset+budget)
-	if offset > 0 {
-		lines = append(lines, workspaceDimStyle.Render(fmt.Sprintf("... %d lines above", offset)))
-	}
-	lines = append(lines, status[offset:end]...)
-	if end < len(status) {
-		lines = append(lines, workspaceDimStyle.Render(fmt.Sprintf("... %d lines below", len(status)-end)))
-	}
+	lines = append(lines, status...)
 	lines = append(lines, feedback...)
 	if m.busy != "" {
 		lines = append(lines, "", workspaceWarnStyle.Render(m.busy+"..."))
@@ -728,14 +710,9 @@ func workspaceVisibleRange(length, selected, available int) (int, int) {
 	if length <= 0 {
 		return 0, 0
 	}
-	if available < 1 || available > length {
-		available = length
-	}
-	start := 0
-	if selected >= available {
-		start = selected - available + 1
-	}
-	return start, min(length, start+available)
+	// Views intentionally render in full; terminal height is not used to
+	// hide content, so the whole range is always visible.
+	return 0, length
 }
 
 func (m manageWorkspaceModel) inlineHeight() int {
@@ -780,25 +757,10 @@ func optionalWorkspaceValue(value string) string {
 }
 
 func fitWorkspaceHeight(value string, height int) string {
-	if height <= 0 {
-		return value
-	}
-	lines := strings.Split(value, "\n")
-	if len(lines) <= height {
-		return value
-	}
-	if height == 1 {
-		return lines[0]
-	}
-	if height <= 3 {
-		return strings.Join(append(lines[:height-1], workspaceDimStyle.Render("...")), "\n")
-	}
-	tail := min(10, height-2)
-	head := height - tail - 1
-	visible := append([]string(nil), lines[:head]...)
-	visible = append(visible, workspaceDimStyle.Render("..."))
-	visible = append(visible, lines[len(lines)-tail:]...)
-	return strings.Join(visible, "\n")
+	// Height limiting is intentionally disabled: views render in full and
+	// the terminal scrolls. Callers keep passing their height so future
+	// call sites do not need to change if limiting is ever reintroduced.
+	return value
 }
 
 func workspaceHintLines(width int, hints ...string) []string {

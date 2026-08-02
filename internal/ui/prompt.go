@@ -39,8 +39,6 @@ const (
 	promptSlider
 )
 
-const promptMaxVisibleOptions = 10
-
 type promptModel struct {
 	ui           *UI
 	kind         promptKind
@@ -54,6 +52,7 @@ type promptModel struct {
 	value        string
 	err          error
 	warning      error
+	hint         string
 	width        int
 	done         bool
 	aborted      bool
@@ -76,6 +75,7 @@ func newSelectPrompt(output *UI, kind promptKind, title, description string, opt
 	return promptModel{
 		ui: output, kind: kind, title: title, description: description,
 		options: append([]Option(nil), options...), selected: selected, width: 80,
+		hint: "arrows/tab  Select    enter  Apply    esc  Cancel",
 	}
 }
 
@@ -271,11 +271,7 @@ func (m promptModel) View() string {
 			lines = append(lines, m.sliderRender(m.sliderValue))
 		}
 	default:
-		start, end := promptVisibleRange(len(m.options), m.selected)
-		if start > 0 {
-			lines = append(lines, m.ui.dim.Render(fmt.Sprintf("  %d more above", start)))
-		}
-		for index := start; index < end; index++ {
+		for index := range m.options {
 			marker := "  "
 			style := lipgloss.NewStyle()
 			if m.options[index].Dimmed {
@@ -287,9 +283,6 @@ func (m promptModel) View() string {
 			}
 			lines = append(lines, style.Render(fitPrompt(marker+m.options[index].Label, width)))
 		}
-		if end < len(m.options) {
-			lines = append(lines, m.ui.dim.Render(fmt.Sprintf("  %d more below", len(m.options)-end)))
-		}
 	}
 
 	if m.err != nil {
@@ -298,7 +291,7 @@ func (m promptModel) View() string {
 		lines = append(lines, m.ui.warn.Render(fitPrompt(m.warning.Error(), width)))
 	}
 	if !m.done && !m.aborted {
-		hint := "arrows/tab  Select    enter  Apply    esc  Cancel"
+		hint := m.hint
 		if m.kind == promptInput {
 			hint = "enter  Apply    esc  Cancel"
 		} else if m.kind == promptSlider {
@@ -307,20 +300,6 @@ func (m promptModel) View() string {
 		lines = append(lines, m.ui.dim.Render(fitPrompt(hint, width)))
 	}
 	return strings.Join(lines, "\n")
-}
-
-func promptVisibleRange(length, selected int) (int, int) {
-	if length <= promptMaxVisibleOptions {
-		return 0, length
-	}
-	start := selected - promptMaxVisibleOptions/2
-	if start < 0 {
-		start = 0
-	}
-	if start+promptMaxVisibleOptions > length {
-		start = length - promptMaxVisibleOptions
-	}
-	return start, start + promptMaxVisibleOptions
 }
 
 func fitPrompt(value string, width int) string {
@@ -353,12 +332,22 @@ func (p *Prompter) run(model promptModel) (promptModel, error) {
 }
 
 func (p *Prompter) Select(title string, options []Option, value *string) error {
+	return p.SelectWithHint(title, options, value, "")
+}
+
+// SelectWithHint is Select with a custom footer hint line. An empty hint
+// falls back to the default navigation hint.
+func (p *Prompter) SelectWithHint(title string, options []Option, value *string, hint string) error {
 	if value == nil || len(options) == 0 {
 		return errors.New("invalid selection configuration")
 	}
 	if p.ui.TTY {
 		fieldTitle, description := p.consumePending(title)
-		result, err := p.run(newSelectPrompt(p.ui, promptSelect, fieldTitle, description, options, *value))
+		model := newSelectPrompt(p.ui, promptSelect, fieldTitle, description, options, *value)
+		if hint != "" {
+			model.hint = hint
+		}
+		result, err := p.run(model)
 		if err != nil {
 			return err
 		}

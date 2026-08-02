@@ -152,7 +152,7 @@ func TestPromptModelEscAborts(t *testing.T) {
 	}
 }
 
-func TestPromptSelectUsesCompactWindow(t *testing.T) {
+func TestPromptSelectShowsAllOptionsWithoutWindow(t *testing.T) {
 	userInterface := New(&bytes.Buffer{}, &bytes.Buffer{}, strings.NewReader(""))
 	options := make([]Option, 20)
 	for index := range options {
@@ -160,11 +160,13 @@ func TestPromptSelectUsesCompactWindow(t *testing.T) {
 	}
 	model := newSelectPrompt(userInterface, promptSelect, "Choose", "", options, options[10].Value)
 	view := model.View()
-	if strings.Contains(view, "Option A") || !strings.Contains(view, "Option K") || !strings.Contains(view, "more above") || !strings.Contains(view, "more below") {
-		t.Fatalf("long selection was not windowed around the current option:\n%s", view)
+	for _, label := range []string{"Option A", "Option K", "Option T"} {
+		if !strings.Contains(view, label) {
+			t.Fatalf("selection hides %q; all options must be rendered:\n%s", label, view)
+		}
 	}
-	if lines := strings.Count(view, "\n") + 1; lines > promptMaxVisibleOptions+4 {
-		t.Fatalf("selection uses %d lines, expected a compact viewport:\n%s", lines, view)
+	if strings.Contains(view, "more above") || strings.Contains(view, "more below") {
+		t.Fatalf("selection still windows options behind a more-marker:\n%s", view)
 	}
 }
 

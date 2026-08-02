@@ -33,6 +33,13 @@ type MptcpHealth struct {
 	Endpoints int    `json:"endpoints"`
 }
 
+// BabelHealth reports the daemon-wide Babel state. RouterID is the
+// identifier the running speaker actually uses: the configured value, or
+// the persisted auto-generated one when the configuration leaves it empty.
+type BabelHealth struct {
+	RouterID string `json:"router_id,omitempty"`
+}
+
 type BackendEventType string
 
 const (
@@ -61,6 +68,7 @@ type Backend interface {
 	// startup and on the periodic reconcile pass.
 	ReconcileGlobal(context.Context, []model.Tunnel) error
 	MptcpHealth() MptcpHealth
+	BabelHealth() BabelHealth
 	Events() <-chan BackendEvent
 	Close() error
 }

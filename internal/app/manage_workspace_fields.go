@@ -104,21 +104,10 @@ func (m manageWorkspaceModel) tunnelEditorView(width int) string {
 	}
 	feedback := m.feedbackLines(width)
 	hints := workspaceHintLines(width, "enter  Edit field", "s  Save changes", "esc  Discard/back")
-	fixed := 5 + 1 + 1 + len(feedback) + 1 + len(hints) + 1
-	if m.busy != "" {
-		fixed += 2
-	}
-	changesRows := min(max(len(changes), 1), 8)
-	changeBlock := 1 + changesRows
-	if len(changes) > changesRows {
-		changeBlock++
-	}
-	fieldBudget := max(3, m.inlineHeight()-fixed-changeBlock)
-	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, 1+changesRows)
+	changeLines := workspaceDiffWindow(changes, m.changeSelected, m.changesFocus, width, len(changes)+1)
 	header := []string{m.breadcrumb(width), "", workspaceAccentStyle.Render(fit("Edit "+m.draft.Name, width)), status, ""}
 	fieldLines := []string{workspaceAccentStyle.Render("Configuration")}
-	start, end := workspaceVisibleRange(len(fields), m.fieldSelected, fieldBudget)
-	for index := start; index < end; index++ {
+	for index := range fields {
 		fieldLines = append(fieldLines, renderWorkspaceField(fields[index], index == m.fieldSelected, width))
 	}
 	header = append(header, fieldLines...)

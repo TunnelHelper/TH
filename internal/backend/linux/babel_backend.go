@@ -134,6 +134,14 @@ func randomBabelRouterIDBytes() ([8]byte, error) {
 	return id, nil
 }
 
+// health reports the router ID the running speaker actually uses, which is
+// the persisted auto-generated value when the configuration is empty.
+func (e *babelEngine) health() core.BabelHealth {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return core.BabelHealth{RouterID: hex.EncodeToString(e.routerID[:])}
+}
+
 // upsertTunnel records (or updates) a tunnel's participation. It marks the
 // engine dirty only when the derived configuration actually changed.
 func (e *babelEngine) upsertTunnel(record model.Tunnel) {
@@ -257,6 +265,10 @@ func (e *babelEngine) refreshSettings(settings config.BabelSettings) error {
 	e.mu.Lock()
 	previousFingerprint := e.fingerprintLocked()
 	oldTable := e.table
+	if err := e.refreshRouterIDLocked(settings); err != nil {
+		e.mu.Unlock()
+		return err
+	}
 	e.settings = settings
 	e.table = settings.RouteTable
 	if e.table == 0 {
@@ -284,6 +296,18 @@ func (e *babelEngine) refreshSettings(settings config.BabelSettings) error {
 		speaker.UpdateECMPParams(maxPaths, uint16(settings.MultipathSlack), settings.WeightBottleneckPenalty)
 	}
 	return e.reconcile()
+}
+
+// refreshRouterIDLocked resolves the effective router ID for a settings
+// snapshot: the configured value, or the persisted auto-generated one when
+// the configuration leaves it empty. The caller must hold e.mu.
+func (e *babelEngine) refreshRouterIDLocked(settings config.BabelSettings) error {
+	routerID, err := loadBabelRouterID(settings.RouterID, e.backend.settings.StateDir)
+	if err != nil {
+		return err
+	}
+	e.routerID = routerID
+	return nil
 }
 
 func (e *babelEngine) buildSpeakerLocked() (*babel.Speaker, error) {

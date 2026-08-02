@@ -30,8 +30,17 @@ func (p *prompts) section(title, description string) {
 }
 
 func (p *prompts) selectValue(title string, options []ui.Option, value *string) error {
+	return p.selectValueWithHint(title, "", options, value)
+}
+
+func (p *prompts) selectValueWithHint(title, hint string, options []ui.Option, value *string) error {
 	for {
-		err := p.prompter.Select(title, options, value)
+		var err error
+		if hint == "" {
+			err = p.prompter.Select(title, options, value)
+		} else {
+			err = p.prompter.SelectWithHint(title, options, value, hint)
+		}
 		if err == nil {
 			return nil
 		}
