@@ -84,27 +84,42 @@ func collectTunnel(prompts *prompts, kind model.Kind, existing *model.Tunnel, su
 		err = fmt.Errorf("unsupported tunnel kind %q", kind)
 	}
 	if err == nil && creating && kind != model.KindSRv6 {
-		enableBabel := "No"
-		if err := prompts.selectValue("Babel routing (RFC 8966)", []ui.Option{
-			{Label: "On", Value: "Yes"},
-			{Label: "Off", Value: "No"},
-		}, &enableBabel); err != nil {
-			return model.Tunnel{}, err
-		}
-		if enableBabel == "Yes" {
-			record.Spec.Babel = &model.BabelTunnelConfig{Enabled: true}
-			bandwidth := "1000"
-			if err := prompts.input("Babel bandwidth (Mbps, drives ECMP weights)", &bandwidth, validateNonNegativeIntInput); err != nil {
-				return model.Tunnel{}, err
-			}
-			bandwidthMbps, parseErr := strconv.Atoi(strings.TrimSpace(bandwidth))
-			if parseErr != nil {
-				return model.Tunnel{}, parseErr
-			}
-			record.Spec.Babel.BandwidthMbps = bandwidthMbps
-		}
+		err = collectBabelTunnelConfig(prompts, &record)
 	}
 	return record, err
+}
+
+// collectBabelTunnelConfig asks whether the tunnel participates in Babel and
+// collects its declared bandwidth. WireGuard-style tunnels whose peer
+// AllowedIPs cannot carry the Babel multicast group automatically fall back
+// to unicast mode with neighbours derived from peer public keys.
+func collectBabelTunnelConfig(prompts *prompts, record *model.Tunnel) error {
+	enableBabel := "No"
+	if err := prompts.selectValue("Babel routing (RFC 8966)", []ui.Option{
+		{Label: "On", Value: "Yes"},
+		{Label: "Off", Value: "No"},
+	}, &enableBabel); err != nil {
+		return err
+	}
+	if enableBabel != "Yes" {
+		return nil
+	}
+	record.Spec.Babel = &model.BabelTunnelConfig{Enabled: true}
+	if model.BabelNeedsUnicastFallback(record) {
+		multicast := false
+		record.Spec.Babel.Multicast = &multicast
+		prompts.ui.Info("Babel will use unicast mode: peer AllowedIPs do not cover ff02::1:6; neighbours are derived from peer public keys.")
+	}
+	bandwidth := "1000"
+	if err := prompts.input("Babel bandwidth (Mbps, drives ECMP weights)", &bandwidth, validateNonNegativeIntInput); err != nil {
+		return err
+	}
+	bandwidthMbps, parseErr := strconv.Atoi(strings.TrimSpace(bandwidth))
+	if parseErr != nil {
+		return parseErr
+	}
+	record.Spec.Babel.BandwidthMbps = bandwidthMbps
+	return nil
 }
 
 func defaultTunnelName(kind model.Kind) string {

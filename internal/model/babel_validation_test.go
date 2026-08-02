@@ -41,8 +41,6 @@ func newBabelTunnel() *Tunnel {
 	}
 }
 
-func boolPtr(value bool) *bool { return &value }
-
 func TestValidateBabelTunnelValid(t *testing.T) {
 	if err := Validate(newBabelTunnel()); err != nil {
 		t.Fatal(err)
@@ -88,18 +86,27 @@ func TestValidateBabelTunnelNeighbours(t *testing.T) {
 }
 
 func TestValidateBabelTunnelMulticastCoverage(t *testing.T) {
-	// Single peer, multicast auto-selected, AllowedIPs does not cover the
-	// Babel multicast group.
+	// Single peer, multicast auto-selected: narrow AllowedIPs fall back to
+	// unicast mode, so the tunnel stays valid.
 	record := newBabelTunnel()
 	record.Spec.WireGuard.Peers[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")}
-	if err := Validate(record); err == nil {
-		t.Fatal("multicast mode without ff02::1:6 coverage must fail")
+	if !BabelNeedsUnicastFallback(record) {
+		t.Fatal("narrow AllowedIPs must trigger the unicast fallback")
+	}
+	if err := Validate(record); err != nil {
+		t.Fatalf("auto-selected unicast fallback must validate: %v", err)
 	}
 
-	// Explicit unicast mode skips the multicast requirement.
+	// Explicit unicast mode skips the multicast requirement as well.
 	record.Spec.Babel.Multicast = boolPtr(false)
 	if err := Validate(record); err != nil {
 		t.Fatalf("explicit unicast mode must be allowed: %v", err)
+	}
+
+	// Explicit multicast mode without coverage must still fail.
+	record.Spec.Babel.Multicast = boolPtr(true)
+	if err := Validate(record); err == nil {
+		t.Fatal("explicit multicast mode without ff02::1:6 coverage must fail")
 	}
 
 	// ::/0 covers the group.
@@ -107,6 +114,35 @@ func TestValidateBabelTunnelMulticastCoverage(t *testing.T) {
 	record.Spec.WireGuard.Peers[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("::/0")}
 	if err := Validate(record); err != nil {
 		t.Fatalf("::/0 must cover the Babel multicast group: %v", err)
+	}
+	if BabelNeedsUnicastFallback(record) {
+		t.Fatal("::/0 coverage must not trigger the unicast fallback")
+	}
+}
+
+func TestApplyDefaultsBabelMulticastFallback(t *testing.T) {
+	// A single-peer WireGuard tunnel with narrow AllowedIPs is normalized to
+	// explicit unicast mode so the engine uses auto-derived neighbours.
+	record := newBabelTunnel()
+	record.Spec.WireGuard.Peers[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")}
+	applyDefaults(record)
+	if record.Spec.Babel.Multicast == nil || *record.Spec.Babel.Multicast {
+		t.Fatalf("narrow AllowedIPs must normalize multicast to false, got %v", record.Spec.Babel.Multicast)
+	}
+	if err := Validate(record); err != nil {
+		t.Fatalf("normalized record must validate: %v", err)
+	}
+
+	// Wide AllowedIPs keep auto multicast; an explicit choice is untouched.
+	record = newBabelTunnel()
+	record.Spec.Babel.Multicast = boolPtr(true)
+	record.Spec.WireGuard.Peers[0].AllowedIPs = []netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")}
+	applyDefaults(record)
+	if record.Spec.Babel.Multicast == nil || !*record.Spec.Babel.Multicast {
+		t.Fatal("an explicit multicast choice must never be overridden")
+	}
+	if err := Validate(record); err == nil {
+		t.Fatal("explicit multicast without coverage must still fail after defaults")
 	}
 }
 

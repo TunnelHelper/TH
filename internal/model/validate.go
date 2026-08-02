@@ -354,25 +354,53 @@ func validateTunnelBabel(t *Tunnel) error {
 		seen[addr] = struct{}{}
 	}
 	if t.Kind == KindWireGuard || t.Kind == KindAmneziaWG {
-		peers := t.Spec.WireGuard.Peers
-		if t.Kind == KindAmneziaWG && t.Spec.AmneziaWG != nil {
-			peers = t.Spec.AmneziaWG.Peers
-		}
+		peers := babelWireGuardPeers(t)
 		multicast := spec.Multicast
 		if multicast == nil {
-			enabled := len(peers) <= 1
+			enabled := len(peers) <= 1 && !BabelNeedsUnicastFallback(t)
 			multicast = &enabled
 		}
 		if *multicast {
-			if !peerAllowedIPsCoverBabelMulticast(peers) {
-				return errors.New("Babel multicast on a WireGuard tunnel requires at least one peer AllowedIPs to cover ff02::1:6 (for example ::/0 or ff02::/16)")
+			if !PeerAllowedIPsCoverBabelMulticast(peers) {
+				return errors.New("Babel multicast on a WireGuard tunnel requires at least one peer AllowedIPs to cover ff02::1:6 (for example ::/0 or ff02::/16); set babel.multicast=false to use unicast with auto-derived neighbours")
 			}
 		}
 	}
 	return nil
 }
 
-func peerAllowedIPsCoverBabelMulticast(peers []WireGuardPeer) bool {
+// babelWireGuardPeers returns the peers of a WireGuard-style tunnel, or nil
+// when the record does not carry one.
+func babelWireGuardPeers(t *Tunnel) []WireGuardPeer {
+	switch t.Kind {
+	case KindWireGuard:
+		if t.Spec.WireGuard != nil {
+			return t.Spec.WireGuard.Peers
+		}
+	case KindAmneziaWG:
+		if t.Spec.AmneziaWG != nil {
+			return t.Spec.AmneziaWG.Peers
+		}
+	}
+	return nil
+}
+
+// BabelNeedsUnicastFallback reports whether a WireGuard-style tunnel would
+// auto-select multicast Babel even though no peer AllowedIPs covers the
+// Babel multicast group (ff02::1:6). Multicast traffic cannot be delivered
+// on such a link, so the tunnel must fall back to unicast mode with static
+// neighbours auto-derived from peer public keys.
+func BabelNeedsUnicastFallback(t *Tunnel) bool {
+	if t == nil || t.Spec.Babel == nil || !t.Spec.Babel.Enabled || t.Spec.Babel.Multicast != nil {
+		return false
+	}
+	peers := babelWireGuardPeers(t)
+	return len(peers) <= 1 && !PeerAllowedIPsCoverBabelMulticast(peers)
+}
+
+// PeerAllowedIPsCoverBabelMulticast reports whether any peer AllowedIPs
+// covers the Babel multicast group address ff02::1:6.
+func PeerAllowedIPsCoverBabelMulticast(peers []WireGuardPeer) bool {
 	group := netip.MustParseAddr("ff02::1:6")
 	for _, peer := range peers {
 		for _, allowed := range peer.AllowedIPs {

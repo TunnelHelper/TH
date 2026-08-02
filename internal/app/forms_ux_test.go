@@ -60,6 +60,36 @@ func TestCreateFormCollectsBabelToggle(t *testing.T) {
 	}
 }
 
+func TestCollectBabelUnicastFallback(t *testing.T) {
+	prompts, output := transcriptPrompts("1\n250\n")
+	record := model.Tunnel{
+		Kind: model.KindWireGuard,
+		Spec: model.Spec{
+			WireGuard: &model.WireGuardSpec{
+				Peers: []model.WireGuardPeer{{
+					PublicKey:  "peer",
+					AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.0.0.2/32")},
+				}},
+			},
+		},
+	}
+	if err := collectBabelTunnelConfig(prompts, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Spec.Babel == nil || !record.Spec.Babel.Enabled {
+		t.Fatal("Babel must be enabled")
+	}
+	if record.Spec.Babel.Multicast == nil || *record.Spec.Babel.Multicast {
+		t.Fatalf("narrow AllowedIPs must select unicast mode, got %v", record.Spec.Babel.Multicast)
+	}
+	if record.Spec.Babel.BandwidthMbps != 250 {
+		t.Fatalf("bandwidth = %d, want 250", record.Spec.Babel.BandwidthMbps)
+	}
+	if !strings.Contains(output.String(), "unicast") {
+		t.Fatalf("wizard must explain the unicast fallback:\n%s", output.String())
+	}
+}
+
 func TestAmneziaShowsObfuscationAndLocalKeyBeforePeerPrompt(t *testing.T) {
 	prompts, output := transcriptPrompts("\n\n\n\n2\n4,40,1200,10,20,1,2,3,4\n2\n1\n")
 	record := model.Tunnel{}

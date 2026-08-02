@@ -69,6 +69,12 @@ func TestWorkspaceBabelFields(t *testing.T) {
 	if editor.draft.Spec.Babel == nil || !editor.draft.Spec.Babel.Enabled {
 		t.Fatal("babel enabled toggle did not take effect")
 	}
+	if editor.draft.Spec.Babel.Multicast == nil || *editor.draft.Spec.Babel.Multicast {
+		t.Fatal("peerless WireGuard must fall back to unicast Babel mode")
+	}
+	if !strings.Contains(editor.notice, "unicast") {
+		t.Fatalf("toggle must explain the unicast fallback, notice = %q", editor.notice)
+	}
 }
 
 func TestWorkspaceEditPreparesLegacyNameMigration(t *testing.T) {

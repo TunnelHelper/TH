@@ -77,6 +77,8 @@ func prepareUpdate(next, current *Tunnel, now time.Time, generateSecrets bool) e
 	return Validate(next)
 }
 
+func boolPtr(value bool) *bool { return &value }
+
 func applyDefaults(t *Tunnel) {
 	switch t.Kind {
 	case KindGRE:
@@ -168,6 +170,13 @@ func applyDefaults(t *Tunnel) {
 				}
 			}
 		}
+	}
+	// A WireGuard-style tunnel whose auto-selected multicast mode cannot
+	// carry Babel traffic (no peer AllowedIPs covers ff02::1:6) falls back
+	// to unicast mode with neighbours derived from peer public keys. An
+	// explicit multicast choice is never overridden here.
+	if t.Spec.Babel != nil && BabelNeedsUnicastFallback(t) {
+		t.Spec.Babel.Multicast = boolPtr(false)
 	}
 }
 

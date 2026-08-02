@@ -182,7 +182,8 @@ bias ∈ [-2, 2]（整数步进，默认 0）
 
 settings 里存储显式的 `weight_bandwidth_exponent` / `weight_rtt_exponent`
 （float64，默认 1.0，范围 [0,4]），TUI 只操作 bias 并写回换算结果，滑块旁实时显示
-当前 α/β 与生效公式。
+当前 α/β 与生效公式。滑块只能表达 α+β=2 的组合；当存储值不在该线上时，TUI 会给出
+提示，并且除非用户真正移动滑块，否则原指数保持不变，避免无关保存静默改写 ECMP 调优。
 
 ## 6. B-lite（可选）：带宽进入主路径选择
 
@@ -199,11 +200,14 @@ metric = rtt_cost + K / bottleneck_bw      # K 默认 0（= 纯 A）
 - 保持加性形式，满足 RFC 8966 §3.5.2 的严格单调/左分配要求；
 - 选择层已有的滞回（A.3）压住主路径抖动。
 
-settings 字段：`weight_bottleneck_penalty`（默认 0）。
+settings 字段：`weight_bottleneck_penalty`（默认 0），在 TUI 的 Babel settings 中
+可直接编辑（Bottleneck penalty K）。
 
 ## 7. 外部 PTP 接口支持（BIRD 风格）
 
 外部接口没有 TH 记录，在 daemon settings 显式声明：
+
+TUI 的 Babel settings 打开时会列出已声明的外部接口（由 thd.json 管理）。
 
 ```json
 "babel": {

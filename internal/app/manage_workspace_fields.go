@@ -274,7 +274,13 @@ func (m *manageWorkspaceModel) toggleWorkspaceField(id string) error {
 	case "ike.encapsulation":
 		m.draft.Spec.XFRMIKEv2.Encapsulation = !m.draft.Spec.XFRMIKEv2.Encapsulation
 	case "babel.enabled":
-		workspaceBabelConfig(&m.draft).Enabled = !workspaceBabelConfig(&m.draft).Enabled
+		babel := workspaceBabelConfig(&m.draft)
+		babel.Enabled = !babel.Enabled
+		if babel.Enabled && model.BabelNeedsUnicastFallback(&m.draft) {
+			multicast := false
+			babel.Multicast = &multicast
+			m.notice = "Babel enabled: peer AllowedIPs do not cover ff02::1:6; using unicast mode with auto-derived neighbours."
+		}
 	default:
 		return fmt.Errorf("unsupported toggle field %q", id)
 	}

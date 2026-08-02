@@ -320,6 +320,12 @@ func tunnelMulticastMode(record model.Tunnel) bool {
 	if record.Spec.Babel != nil && record.Spec.Babel.Multicast != nil {
 		return *record.Spec.Babel.Multicast
 	}
+	// A tunnel whose auto-selected multicast mode cannot carry Babel
+	// traffic falls back to unicast even when the stored record was not
+	// normalized yet.
+	if model.BabelNeedsUnicastFallback(&record) {
+		return false
+	}
 	switch record.Kind {
 	case model.KindWireGuard, model.KindAmneziaWG:
 		peers := 0
