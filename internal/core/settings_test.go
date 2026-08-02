@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,7 +83,7 @@ func TestManagerUpdateSettingsFallsBackToReadOnlyConfig(t *testing.T) {
 		}
 		return writeSettings(path, settings)
 	})
-	manager.applySettings = func(settings config.Settings) error {
+	manager.applySettings = func(_ context.Context, settings config.Settings) error {
 		applied = settings
 		return nil
 	}
@@ -111,6 +113,132 @@ func TestManagerUpdateSettingsFallsBackToReadOnlyConfig(t *testing.T) {
 	}
 	if settings.Babel.RouterID != "0011223344556677" {
 		t.Fatalf("Settings() after fallback = %+v", settings)
+	}
+}
+
+func TestManagerUpdateSettingsRollsBackFailedRuntimeApply(t *testing.T) {
+	_, _, configPath := settingsFixtureDirs(t)
+	manager := newSettingsManager(t, configPath, writeSettings)
+	var applied []string
+	manager.applySettings = func(_ context.Context, settings config.Settings) error {
+		applied = append(applied, settings.Babel.RouterID)
+		if settings.Babel.RouterID == "0011223344556677" {
+			return errors.New("simulated runtime failure")
+		}
+		return nil
+	}
+
+	next := config.Defaults()
+	next.Babel.RouterID = "0011223344556677"
+	err := manager.UpdateSettings(context.Background(), next)
+	if err == nil || !strings.Contains(err.Error(), "simulated runtime failure") {
+		t.Fatalf("update error = %v, want runtime failure", err)
+	}
+	if len(applied) != 2 || applied[0] != next.Babel.RouterID || applied[1] != "" {
+		t.Fatalf("applied router IDs = %v, want new then rollback", applied)
+	}
+	loaded, loadErr := config.LoadDaemon(configPath)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if loaded.Babel.RouterID != "" {
+		t.Fatalf("failed runtime update changed persisted settings: %+v", loaded.Babel)
+	}
+}
+
+func TestManagerUpdateSettingsRollsBackRuntimeAfterPersistFailure(t *testing.T) {
+	_, _, configPath := settingsFixtureDirs(t)
+	manager := newSettingsManager(t, configPath, func(path string, settings config.Settings) error {
+		if settings.Babel.RouterID == "0011223344556677" {
+			return errors.New("simulated persist failure")
+		}
+		return writeSettings(path, settings)
+	})
+	var applied []string
+	manager.applySettings = func(_ context.Context, settings config.Settings) error {
+		applied = append(applied, settings.Babel.RouterID)
+		return nil
+	}
+
+	next := config.Defaults()
+	next.Babel.RouterID = "0011223344556677"
+	err := manager.UpdateSettings(context.Background(), next)
+	if err == nil || !strings.Contains(err.Error(), "simulated persist failure") {
+		t.Fatalf("update error = %v, want persist failure", err)
+	}
+	if len(applied) != 2 || applied[0] != next.Babel.RouterID || applied[1] != "" {
+		t.Fatalf("applied router IDs = %v, want new then rollback", applied)
+	}
+}
+
+func TestManagerUpdateSettingsReportsStaleOverrideRemovalFailure(t *testing.T) {
+	stateDir, runtimeDir, configPath := settingsFixtureDirs(t)
+	override := config.Defaults()
+	override.StateDir = stateDir
+	override.RuntimeDir = runtimeDir
+	override.SocketPath = filepath.Join(runtimeDir, "control.sock")
+	override.Babel.RouterID = "aabbccddeeff0011"
+	if err := writeSettings(config.SettingsOverridePath(stateDir), override); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newSettingsManager(t, configPath, writeSettings)
+	manager.removeSettingsOverride = func(string) error { return errors.New("simulated remove failure") }
+	var applied []string
+	manager.applySettings = func(_ context.Context, settings config.Settings) error {
+		applied = append(applied, settings.Babel.RouterID)
+		return nil
+	}
+	next := config.Defaults()
+	next.Babel.RouterID = "0011223344556677"
+	err := manager.UpdateSettings(context.Background(), next)
+	if err == nil || !strings.Contains(err.Error(), "simulated remove failure") {
+		t.Fatalf("update error = %v, want stale override removal failure", err)
+	}
+	loaded, loadErr := manager.Settings()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if loaded.Babel.RouterID != override.Babel.RouterID {
+		t.Fatalf("authoritative settings = %q, want old override %q", loaded.Babel.RouterID, override.Babel.RouterID)
+	}
+	if len(applied) != 2 || applied[0] != next.Babel.RouterID || applied[1] != override.Babel.RouterID {
+		t.Fatalf("applied router IDs = %v, want new then old override", applied)
+	}
+}
+
+func TestManagerUpdateSettingsSerializesConcurrentUpdates(t *testing.T) {
+	_, _, configPath := settingsFixtureDirs(t)
+	manager := newSettingsManager(t, configPath, writeSettings)
+	var inFlight atomic.Int32
+	var maxInFlight atomic.Int32
+	manager.applySettings = func(_ context.Context, _ config.Settings) error {
+		current := inFlight.Add(1)
+		for current > maxInFlight.Load() && !maxInFlight.CompareAndSwap(maxInFlight.Load(), current) {
+		}
+		time.Sleep(10 * time.Millisecond)
+		inFlight.Add(-1)
+		return nil
+	}
+
+	first := config.Defaults()
+	first.Babel.RouterID = "0011223344556677"
+	second := config.Defaults()
+	second.Babel.RouterID = "aabbccddeeff0011"
+	var workers sync.WaitGroup
+	for _, settings := range []config.Settings{first, second} {
+		settings := settings
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := manager.UpdateSettings(context.Background(), settings); err != nil {
+				t.Errorf("concurrent update: %v", err)
+			}
+		}()
+	}
+	workers.Wait()
+	if got := maxInFlight.Load(); got != 1 {
+		t.Fatalf("maximum concurrent settings applies = %d, want 1", got)
 	}
 }
 

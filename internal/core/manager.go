@@ -23,9 +23,10 @@ type Manager struct {
 	now        func() time.Time
 	mutationMu sync.RWMutex
 
-	settingsPath  string
-	applySettings settingsApplier
-	writeSettings func(string, config.Settings) error
+	settingsPath           string
+	applySettings          settingsApplier
+	writeSettings          func(string, config.Settings) error
+	removeSettingsOverride func(string) error
 }
 
 func NewManager(records Store, reconciler *Reconciler) *Manager {

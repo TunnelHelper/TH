@@ -355,7 +355,7 @@ func (b *Backend) removeWireGuardRoutes(record model.Tunnel) error {
 	if record.Interface == "" {
 		return nil
 	}
-	link, err := b.netlink.LinkByName(record.Interface)
+	link, err := b.linkByName(record.Interface)
 	if isLinkNotFound(err) {
 		return b.removeManagedRules(record)
 	}

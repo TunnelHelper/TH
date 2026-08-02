@@ -25,7 +25,7 @@ func (b *Backend) applyStaticXFRM(ctx context.Context, record model.Tunnel) (cor
 	if err := b.preflightXFRMOwnership(record, spec.IfID, spec.ReqID); err != nil {
 		return core.Observation{}, err
 	}
-	underlay, err := b.netlink.LinkByName(spec.UnderlayInterface)
+	underlay, err := b.linkByName(spec.UnderlayInterface)
 	if err != nil {
 		return core.Observation{}, fmt.Errorf("lookup XFRM underlay %s: %w", spec.UnderlayInterface, err)
 	}
@@ -59,7 +59,7 @@ func (b *Backend) applyStaticXFRM(ctx context.Context, record model.Tunnel) (cor
 
 func (b *Backend) preflightXFRMOwnership(record model.Tunnel, ifID, reqID uint32) error {
 	ownedLink := false
-	link, err := b.netlink.LinkByName(record.Interface)
+	link, err := b.linkByName(record.Interface)
 	if err == nil {
 		if link.Attrs().Alias != ownershipAlias(record.ID) {
 			return fmt.Errorf("link %s has alias %q: %w", record.Interface, link.Attrs().Alias, ErrOwnershipConflict)

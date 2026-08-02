@@ -97,7 +97,7 @@ func (i *Interface) NewNeighbour(addr proto.Address) (*Neighbour, error) {
 		// first IHU updates it.
 		TxCost: i.nominalCost,
 
-		queue: queue.NewQueue(i.MTU, &netx.PacketConnWriter{
+		queue: queue.NewQueue(babelPayloadSize(i.MTU, !addr.Unmap().Is4()), &netx.PacketConnWriter{
 			Conn6:   i.speaker.conn6,
 			Conn4:   i.speaker.conn4,
 			Dest:    neighbourAddr,
@@ -125,9 +125,11 @@ func (i *Interface) NewNeighbour(addr proto.Address) (*Neighbour, error) {
 		n.helloTicker.Stop()
 	}
 
-	go n.runTimers()
-
 	return n, nil
+}
+
+func (n *Neighbour) startTimers() {
+	go n.runTimers()
 }
 
 func (n *Neighbour) runTimers() {

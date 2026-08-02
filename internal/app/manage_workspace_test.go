@@ -73,6 +73,11 @@ func TestWorkspaceBabelFields(t *testing.T) {
 	if err := editor.applyTunnelInput("babel.balance", "9"); err == nil {
 		t.Fatal("balance outside [-2, 2] must be rejected")
 	}
+	for _, invalid := range []string{"NaN", "Inf", "-Inf"} {
+		if err := editor.applyTunnelInput("babel.balance", invalid); err == nil {
+			t.Fatalf("balance %q must be rejected", invalid)
+		}
+	}
 	if err := editor.toggleWorkspaceField("babel.enabled"); err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -506,7 +507,7 @@ func (m *manageWorkspaceModel) applyTunnelInput(id, value string) error {
 		workspaceBabelConfig(&m.draft).BandwidthMbps = parseInt(value)
 	case "babel.balance":
 		bias, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-		if err != nil || bias < -2 || bias > 2 {
+		if err != nil || math.IsNaN(bias) || math.IsInf(bias, 0) || bias < -2 || bias > 2 {
 			return errors.New("balance must be between -2 (latency) and +2 (bandwidth)")
 		}
 		workspaceBabelConfig(&m.draft).Balance = &bias

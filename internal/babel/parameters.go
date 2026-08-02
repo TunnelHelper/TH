@@ -116,7 +116,7 @@ const LocalRouteMetric uint16 = 0
 // 5. IANA Considerations
 // https://datatracker.ietf.org/doc/html/rfc8966#name-iana-considerations
 var (
-	Port               = 6697
+	Port               = 6696
 	MulticastGroupIPv6 = netip.MustParseAddr("ff02::1:6")
 	MulticastGroupIPv4 = netip.MustParseAddr("224.0.0.111")
 )

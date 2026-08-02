@@ -4,6 +4,7 @@ package linux
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"os"
 	"strings"
@@ -144,6 +145,71 @@ func TestMptcpReconcileIsIdempotent(t *testing.T) {
 	added, deleted := client.snapshot()
 	if len(added) != 1 || len(deleted) != 0 {
 		t.Fatalf("second reconcile changed the kernel: added=%d deleted=%d", len(added), len(deleted))
+	}
+}
+
+func TestMptcpReconcileRepairsEndpointFlags(t *testing.T) {
+	address := netip.MustParseAddr("10.0.0.1")
+	client := &fakeMptcpPMClient{endpoints: []mptcpEndpoint{{
+		ID: 7, Address: address, Flags: mptcpPMAddrFlagSignal,
+	}}}
+	control := newFakeMptcpControl(client, true)
+	control.upsertTunnel(mptcpTestRecord("a", "10.0.0.1/30"))
+
+	if err := control.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	added, deleted := client.snapshot()
+	if len(deleted) != 1 || deleted[0] != 7 {
+		t.Fatalf("deleted endpoint IDs = %v, want [7]", deleted)
+	}
+	if len(added) != 1 || added[0].Address != address || added[0].Flags != mptcpDefaultEndpointFlags {
+		t.Fatalf("replacement endpoints = %+v, want %s with flags %d", added, address, mptcpDefaultEndpointFlags)
+	}
+	remaining, err := client.list(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 1 || remaining[0].Flags != mptcpDefaultEndpointFlags {
+		t.Fatalf("kernel endpoints after repair = %+v", remaining)
+	}
+}
+
+func TestMptcpHealthRecoversAfterTransientError(t *testing.T) {
+	client := &fakeMptcpPMClient{failList: errors.New("temporary netlink failure")}
+	control := newFakeMptcpControl(client, true)
+	control.upsertTunnel(mptcpTestRecord("a", "10.0.0.1/30"))
+	control.schedulerWarn = "stale scheduler warning"
+
+	if err := control.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if health := control.health(); health.Status != mptcpStatusError || !strings.Contains(health.Message, "temporary netlink failure") {
+		t.Fatalf("health after failure = %+v", health)
+	}
+	client.mu.Lock()
+	client.failList = nil
+	client.mu.Unlock()
+	if err := control.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if health := control.health(); health.Status != mptcpStatusEnabled || health.Message != "" || health.Endpoints != 1 {
+		t.Fatalf("health after recovery = %+v, want enabled without stale errors", health)
+	}
+}
+
+func TestMptcpReconcilePropagatesContextCancellation(t *testing.T) {
+	control := newFakeMptcpControl(&fakeMptcpPMClient{}, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := control.reconcile(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("reconcile error = %v, want context cancellation", err)
+	}
+	if err := control.refreshSettings(ctx, config.MptcpSettings{Enabled: false}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("refresh settings error = %v, want context cancellation", err)
+	}
+	if !control.settings.Enabled {
+		t.Fatal("cancelled refresh must not mutate MPTCP settings")
 	}
 }
 

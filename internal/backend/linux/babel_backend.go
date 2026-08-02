@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TunnelHelper/TH/internal/babel"
@@ -68,7 +69,9 @@ type babelEngine struct {
 	settings config.BabelSettings
 	table    int
 
+	reconcileMu      sync.Mutex
 	mu               sync.Mutex
+	eventTable       atomic.Int64
 	speaker          *babel.Speaker
 	tunnels          map[string]babelTunnel
 	built            string // fingerprint of the tunnels the current speaker was built from
@@ -89,7 +92,7 @@ func newBabelEngine(backend *Backend) (*babelEngine, error) {
 	if table == 0 {
 		table = unix.RT_TABLE_MAIN
 	}
-	return &babelEngine{
+	engine := &babelEngine{
 		backend:     backend,
 		settings:    settings,
 		table:       table,
@@ -97,7 +100,9 @@ func newBabelEngine(backend *Backend) (*babelEngine, error) {
 		routerID:    routerID,
 		advertised:  make(map[netip.Prefix]struct{}),
 		lastWeights: make(map[string]string),
-	}, nil
+	}
+	engine.eventTable.Store(int64(table))
+	return engine, nil
 }
 
 // loadBabelRouterID returns the configured router ID or a persisted random
@@ -176,6 +181,12 @@ func (e *babelEngine) removeTunnel(recordID string) {
 // reconcile rebuilds the speaker when the tunnel set changed, refreshes the
 // advertised prefixes and installs the current forwarding set.
 func (e *babelEngine) reconcile() error {
+	e.reconcileMu.Lock()
+	defer e.reconcileMu.Unlock()
+	return e.reconcileSerialized()
+}
+
+func (e *babelEngine) reconcileSerialized() error {
 	e.mu.Lock()
 	fingerprint := e.fingerprintLocked()
 	needBuild := e.speaker == nil || e.built != fingerprint
@@ -262,6 +273,8 @@ func (e *babelEngine) externalFingerprintLocked() string {
 // refreshSettings applies a new Babel settings snapshot at runtime and
 // rebuilds the speaker (and thus the advertised prefix set) when needed.
 func (e *babelEngine) refreshSettings(settings config.BabelSettings) error {
+	e.reconcileMu.Lock()
+	defer e.reconcileMu.Unlock()
 	e.mu.Lock()
 	previousFingerprint := e.fingerprintLocked()
 	oldTable := e.table
@@ -274,6 +287,7 @@ func (e *babelEngine) refreshSettings(settings config.BabelSettings) error {
 	if e.table == 0 {
 		e.table = unix.RT_TABLE_MAIN
 	}
+	e.eventTable.Store(int64(e.table))
 	speakerFingerprintChanged := e.fingerprintLocked() != previousFingerprint
 	speaker := e.speaker
 	maxPaths := settings.MultipathMaxPaths
@@ -295,7 +309,7 @@ func (e *babelEngine) refreshSettings(settings config.BabelSettings) error {
 	if !speakerFingerprintChanged && speaker != nil {
 		speaker.UpdateECMPParams(maxPaths, uint16(settings.MultipathSlack), settings.WeightBottleneckPenalty)
 	}
-	return e.reconcile()
+	return e.reconcileSerialized()
 }
 
 // refreshRouterIDLocked resolves the effective router ID for a settings
@@ -361,6 +375,7 @@ func (e *babelEngine) buildSpeakerLocked() (*babel.Speaker, error) {
 		RouterID:            e.routerID,
 		InterfaceFilter:     func(name string) bool { return interfaces[name] },
 		StaticNeighbours:    static,
+		StrictNeighbours:    true,
 		MulticastInterfaces: multicast,
 		InterfaceBandwidth:  bandwidth,
 		Handler:             babelEngineHandler{engine: e},
@@ -649,8 +664,12 @@ func (e *babelEngine) observe(record model.Tunnel) core.Observation {
 	if record.Spec.Babel == nil || !record.Spec.Babel.Enabled {
 		return core.Observation{}
 	}
+	e.reconcileMu.Lock()
+	defer e.reconcileMu.Unlock()
 	e.mu.Lock()
 	speaker := e.speaker
+	routerID := e.routerID
+	table := e.table
 	e.mu.Unlock()
 	if speaker == nil {
 		return core.Observation{}
@@ -659,9 +678,9 @@ func (e *babelEngine) observe(record model.Tunnel) core.Observation {
 	selected := speaker.SelectedRoutes()
 	details := map[string]string{
 		"babel":           "enabled",
-		"router_id":       hex.EncodeToString(e.routerID[:]),
+		"router_id":       hex.EncodeToString(routerID[:]),
 		"selected_routes": strconv.Itoa(len(selected)),
-		"route_table":     strconv.Itoa(e.table),
+		"route_table":     strconv.Itoa(table),
 	}
 	peers := make([]model.PeerStatus, 0)
 	_ = speaker.Interfaces.Foreach(func(_ int, iface *babel.Interface) error {
@@ -686,6 +705,8 @@ func (e *babelEngine) observe(record model.Tunnel) core.Observation {
 }
 
 func (e *babelEngine) close() {
+	e.reconcileMu.Lock()
+	defer e.reconcileMu.Unlock()
 	e.mu.Lock()
 	speaker := e.speaker
 	e.speaker = nil
@@ -770,8 +791,9 @@ func (h babelEngineHandler) NeighbourRemoved(*babel.Neighbour) {
 }
 
 func (h babelEngineHandler) emit(eventType core.BackendEventType) {
+	table := int(h.engine.eventTable.Load())
 	select {
-	case h.engine.backend.events <- core.BackendEvent{Type: eventType, RouteTable: h.engine.table}:
+	case h.engine.backend.events <- core.BackendEvent{Type: eventType, RouteTable: table}:
 	default:
 	}
 }
@@ -818,7 +840,7 @@ func babelWeightFromScores(scoreBest, candidate float64) int {
 type babelLinkResolver func(name string) (int, error)
 
 func (b *Backend) resolveBabelLink(name string) (int, error) {
-	link, err := b.netlink.LinkByName(name)
+	link, err := b.linkByName(name)
 	if err != nil {
 		return 0, fmt.Errorf("lookup Babel next-hop interface %s: %w", name, err)
 	}

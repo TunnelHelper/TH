@@ -112,6 +112,29 @@ func TestSettingsInputs(t *testing.T) {
 	}
 }
 
+func TestSettingsInputOverlayAcceptsTyping(t *testing.T) {
+	model := settingsEditorFixture()
+	model.fieldSelected = settingsFieldIndex(settingsFields(model.draft, model.babel.RouterID), "babel.include") - 1
+
+	opened, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = opened.(settingsModel)
+	if model.overlay == nil || !model.input.Focused() {
+		t.Fatal("opening a settings text field must focus its input")
+	}
+
+	typed, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("10.0.0.0/8")})
+	model = typed.(settingsModel)
+	applied, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = applied.(settingsModel)
+	if model.overlay != nil {
+		t.Fatal("enter must apply and close the input overlay")
+	}
+	want := netip.MustParsePrefix("10.0.0.0/8")
+	if len(model.draft.Babel.Advertise.Include) != 1 || model.draft.Babel.Advertise.Include[0] != want {
+		t.Fatalf("include filter = %+v, want [%s]", model.draft.Babel.Advertise.Include, want)
+	}
+}
+
 func TestSettingsChangesDiff(t *testing.T) {
 	before := config.Defaults()
 	after := config.Defaults()
@@ -375,7 +398,7 @@ func TestValidateBalanceInput(t *testing.T) {
 			t.Errorf("%q must be accepted: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"-2.1", "2.5", "abc", ""} {
+	for _, bad := range []string{"-2.1", "2.5", "abc", "", "NaN", "Inf", "-Inf"} {
 		if err := validateBalanceInput(bad); err == nil {
 			t.Errorf("%q must be rejected", bad)
 		}

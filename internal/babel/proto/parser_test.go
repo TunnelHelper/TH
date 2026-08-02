@@ -4,12 +4,46 @@
 package proto
 
 import (
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"reflect"
 	"testing"
 	"time"
 )
+
+func TestParserPacketHonorsBodyLength(t *testing.T) {
+	p := NewParser()
+	packet := &Packet{
+		Body:    []Value{&Hello{Seqno: 7, Interval: time.Second}},
+		Trailer: []Value{&Pad1{}},
+	}
+	encoded := p.AppendPacket(nil, packet)
+	wantBodyLength := p.ValuesLength(packet.Body)
+	if got := binary.BigEndian.Uint16(encoded[2:4]); got != wantBodyLength {
+		t.Fatalf("body length = %d, want %d", got, wantBodyLength)
+	}
+
+	remaining, decoded, err := NewParser().Packet(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 || len(decoded.Body) != 1 || len(decoded.Trailer) != 1 {
+		t.Fatalf("decoded packet = body %d trailer %d remaining %d", len(decoded.Body), len(decoded.Trailer), len(remaining))
+	}
+	if _, ok := decoded.Trailer[0].(*Pad1); !ok {
+		t.Fatalf("trailer value = %T, want *Pad1", decoded.Trailer[0])
+	}
+}
+
+func TestParserDoesNotTreatTrailerAsBody(t *testing.T) {
+	p := NewParser()
+	encoded := []byte{PacketHeaderMagic, PacketHeaderVersion, 0, 0}
+	encoded = p.AppendValue(encoded, &Hello{Seqno: 7, Interval: time.Second})
+	if _, _, err := NewParser().Packet(encoded); !errors.Is(err, ErrInvalidValueForTrailer) {
+		t.Fatalf("body TLV beyond declared body length must be rejected as trailer, got %v", err)
+	}
+}
 
 func TestParserUintRoundTrips(t *testing.T) {
 	uint8s := []uint8{0xaa, 0xbb, 0xcc}

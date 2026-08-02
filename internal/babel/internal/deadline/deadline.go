@@ -4,6 +4,7 @@
 package deadline
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -12,7 +13,11 @@ type Deadline struct {
 	C chan any
 
 	expired atomic.Bool
-	timer   *time.Timer
+
+	mu         sync.Mutex
+	timer      *time.Timer
+	generation uint64
+	closed     bool
 }
 
 func NewDeadline() Deadline {
@@ -24,6 +29,14 @@ func NewDeadline() Deadline {
 }
 
 func (t *Deadline) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil
+	}
+	t.closed = true
+	t.generation++
+	t.stopLocked()
 	close(t.C)
 	return nil
 }
@@ -33,10 +46,21 @@ func (t *Deadline) Expired() bool {
 }
 
 func (t *Deadline) Reset(d time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return
+	}
 	t.expired.Store(false)
-
-	t.Stop()
+	t.generation++
+	generation := t.generation
+	t.stopLocked()
 	t.timer = time.AfterFunc(d, func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.closed || t.generation != generation {
+			return
+		}
 		t.expired.Store(true)
 		select {
 		case t.C <- nil:
@@ -46,6 +70,13 @@ func (t *Deadline) Reset(d time.Duration) {
 }
 
 func (t *Deadline) Stop() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.generation++
+	t.stopLocked()
+}
+
+func (t *Deadline) stopLocked() {
 	if t.timer != nil {
 		t.timer.Stop()
 		t.timer = nil

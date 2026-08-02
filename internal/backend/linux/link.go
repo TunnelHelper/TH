@@ -16,12 +16,24 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+func (b *Backend) linkByName(name string) (netlink.Link, error) {
+	b.linkLookupMu.Lock()
+	defer b.linkLookupMu.Unlock()
+	return b.netlink.LinkByName(name)
+}
+
+func (b *Backend) linkByAlias(alias string) (netlink.Link, error) {
+	b.linkLookupMu.Lock()
+	defer b.linkLookupMu.Unlock()
+	return b.netlink.LinkByAlias(alias)
+}
+
 func ownershipAlias(id string) string {
 	return "th:" + id
 }
 
 func (b *Backend) ensureLink(record model.Tunnel, desired netlink.Link, matches func(netlink.Link) bool) (netlink.Link, error) {
-	existing, err := b.netlink.LinkByName(record.Interface)
+	existing, err := b.linkByName(record.Interface)
 	if err != nil && !isLinkNotFound(err) {
 		return nil, fmt.Errorf("lookup link %s: %w", record.Interface, err)
 	}
@@ -37,7 +49,7 @@ func (b *Backend) ensureLink(record model.Tunnel, desired netlink.Link, matches 
 		}
 	}
 	if existing == nil {
-		aliased, aliasErr := b.netlink.LinkByAlias(ownershipAlias(record.ID))
+		aliased, aliasErr := b.linkByAlias(ownershipAlias(record.ID))
 		if aliasErr == nil && aliased.Attrs().Name != record.Interface {
 			return nil, fmt.Errorf("ownership alias is already attached to link %s: %w", aliased.Attrs().Name, ErrOwnershipConflict)
 		}
@@ -47,7 +59,7 @@ func (b *Backend) ensureLink(record model.Tunnel, desired netlink.Link, matches 
 		if err := b.netlink.LinkAdd(desired); err != nil {
 			return nil, fmt.Errorf("create link %s: %w", record.Interface, err)
 		}
-		existing, err = b.netlink.LinkByName(record.Interface)
+		existing, err = b.linkByName(record.Interface)
 		if err != nil {
 			return nil, fmt.Errorf("reload created link %s: %w", record.Interface, err)
 		}
@@ -56,7 +68,7 @@ func (b *Backend) ensureLink(record model.Tunnel, desired netlink.Link, matches 
 		if err := b.netlink.LinkSetAlias(existing, ownershipAlias(record.ID)); err != nil {
 			return nil, fmt.Errorf("set link ownership alias: %w", err)
 		}
-		existing, err = b.netlink.LinkByName(record.Interface)
+		existing, err = b.linkByName(record.Interface)
 		if err != nil {
 			return nil, fmt.Errorf("reload link after setting ownership alias: %w", err)
 		}
@@ -157,7 +169,7 @@ func (b *Backend) assertLinkOwnershipOrMissing(record model.Tunnel) error {
 	if record.Interface == "" {
 		return nil
 	}
-	link, err := b.netlink.LinkByName(record.Interface)
+	link, err := b.linkByName(record.Interface)
 	if isLinkNotFound(err) {
 		return nil
 	}
@@ -174,7 +186,7 @@ func (b *Backend) removeOwnedLink(record model.Tunnel) error {
 	if record.Interface == "" {
 		return nil
 	}
-	link, err := b.netlink.LinkByName(record.Interface)
+	link, err := b.linkByName(record.Interface)
 	if isLinkNotFound(err) {
 		return nil
 	}
@@ -191,7 +203,7 @@ func (b *Backend) removeOwnedLink(record model.Tunnel) error {
 }
 
 func (b *Backend) observeLink(record model.Tunnel) (core.Observation, error) {
-	link, err := b.netlink.LinkByName(record.Interface)
+	link, err := b.linkByName(record.Interface)
 	if isLinkNotFound(err) {
 		return core.Observation{}, nil
 	}

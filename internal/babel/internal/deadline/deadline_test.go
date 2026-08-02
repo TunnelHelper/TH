@@ -4,6 +4,7 @@
 package deadline_test
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -109,4 +110,22 @@ func TestDeadlineCanBeResetTwiceWhileArmed(t *testing.T) {
 	if elapsed := time.Since(started); elapsed < 10*time.Millisecond || elapsed > 50*time.Millisecond {
 		t.Fatalf("second reset must shorten the deadline, fired after %v", elapsed)
 	}
+}
+
+func TestDeadlineConcurrentResetAndStop(t *testing.T) {
+	d := deadline.NewDeadline()
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for range 100 {
+				d.Reset(time.Millisecond)
+				d.Stop()
+			}
+		}()
+	}
+	workers.Wait()
+	d.Reset(time.Millisecond)
+	eventuallyReceive(t, &d)
 }

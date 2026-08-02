@@ -18,7 +18,7 @@ func (b *Backend) applyIKEv2(ctx context.Context, record model.Tunnel) (core.Obs
 	if err := b.preflightXFRMOwnership(record, spec.IfID, spec.ReqID); err != nil {
 		return core.Observation{}, err
 	}
-	underlay, err := b.netlink.LinkByName(spec.UnderlayInterface)
+	underlay, err := b.linkByName(spec.UnderlayInterface)
 	if err != nil {
 		return core.Observation{}, fmt.Errorf("lookup XFRM underlay %s: %w", spec.UnderlayInterface, err)
 	}

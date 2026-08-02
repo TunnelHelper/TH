@@ -535,7 +535,7 @@ func zeroExternalInterface(external config.BabelExternalInterface) bool {
 
 func validateBalanceInput(value string) error {
 	bias, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
-	if err != nil || bias < -2 || bias > 2 {
+	if err != nil || math.IsNaN(bias) || math.IsInf(bias, 0) || bias < -2 || bias > 2 {
 		return errors.New("balance must be between -2 (latency) and +2 (bandwidth)")
 	}
 	return nil
@@ -756,6 +756,7 @@ func (m *settingsModel) configureInputStep() {
 		input.EchoMode = textinput.EchoPassword
 		input.EchoCharacter = '*'
 	}
+	input.Focus()
 	input.CursorEnd()
 	m.input = input
 }

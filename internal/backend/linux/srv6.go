@@ -44,7 +44,7 @@ type srv6Route struct {
 
 func (b *Backend) applySRv6(ctx context.Context, record model.Tunnel) (core.Observation, error) {
 	spec := record.Spec.SRv6
-	underlay, err := b.netlink.LinkByName(spec.UnderlayInterface)
+	underlay, err := b.linkByName(spec.UnderlayInterface)
 	if err != nil {
 		return core.Observation{}, fmt.Errorf("lookup SRv6 underlay %s: %w", spec.UnderlayInterface, err)
 	}
@@ -598,7 +598,7 @@ func (b *Backend) observeSRv6(record model.Tunnel) (core.Observation, error) {
 	if !record.Enabled {
 		return b.observeSRv6Desired(record, nil)
 	}
-	underlay, err := b.netlink.LinkByName(record.Spec.SRv6.UnderlayInterface)
+	underlay, err := b.linkByName(record.Spec.SRv6.UnderlayInterface)
 	if err != nil {
 		return core.Observation{}, fmt.Errorf("%w: lookup SRv6 underlay %s: %v", core.ErrDriftDetected, record.Spec.SRv6.UnderlayInterface, err)
 	}

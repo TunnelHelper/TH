@@ -34,19 +34,20 @@ func legacyExpectedRoute(route netlink.Route, expectedKeys map[string]netlink.Ro
 }
 
 type Backend struct {
-	settings config.Settings
-	netlink  *netlink.Handle
-	wg       *wireGuardControl
-	awg      *amneziaClient
-	awgErr   error
-	vici     *viciController
-	babel    *babelEngine
-	mptcp    *mptcpControl
-	eventCtx context.Context
-	eventEnd context.CancelFunc
-	events   chan core.BackendEvent
-	eventWG  sync.WaitGroup
-	close    sync.Once
+	settings     config.Settings
+	netlink      *netlink.Handle
+	wg           *wireGuardControl
+	awg          *amneziaClient
+	awgErr       error
+	vici         *viciController
+	babel        *babelEngine
+	mptcp        *mptcpControl
+	eventCtx     context.Context
+	eventEnd     context.CancelFunc
+	events       chan core.BackendEvent
+	eventWG      sync.WaitGroup
+	linkLookupMu sync.Mutex
+	close        sync.Once
 }
 
 func New(settings config.Settings) (*Backend, error) {
@@ -229,12 +230,15 @@ func (b *Backend) Events() <-chan core.BackendEvent {
 
 // ApplySettings applies a new daemon settings snapshot at runtime: Babel
 // protocol settings and the MPTCP infrastructure switch.
-func (b *Backend) ApplySettings(settings config.Settings) error {
+func (b *Backend) ApplySettings(ctx context.Context, settings config.Settings) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := b.babel.refreshSettings(settings.Babel); err != nil {
 		return err
 	}
 	if b.mptcp != nil {
-		if err := b.mptcp.refreshSettings(settings.Mptcp); err != nil {
+		if err := b.mptcp.refreshSettings(ctx, settings.Mptcp); err != nil {
 			return err
 		}
 	}

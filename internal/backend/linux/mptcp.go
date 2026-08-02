@@ -184,12 +184,15 @@ func (c *mptcpControl) removeTunnel(record model.Tunnel) {
 	c.tunnels[record.ID] = entry
 }
 
-func (c *mptcpControl) refreshSettings(settings config.MptcpSettings) error {
+func (c *mptcpControl) refreshSettings(ctx context.Context, settings config.MptcpSettings) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	c.settings = settings
 	c.mu.Unlock()
-	c.refreshDetection(context.Background())
-	return c.reconcile(context.Background())
+	c.refreshDetection(ctx)
+	return c.reconcile(ctx)
 }
 
 // reconcileAll rebuilds the registry from the authoritative record list,
@@ -221,6 +224,11 @@ func (c *mptcpControl) reconcile(ctx context.Context) error {
 }
 
 func (c *mptcpControl) reconcileLocked(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.message = ""
+	c.schedulerWarn = ""
 	if !c.supported {
 		c.status = mptcpStatusDisabled
 		if c.settings.Enabled {
@@ -229,6 +237,10 @@ func (c *mptcpControl) reconcileLocked(ctx context.Context) error {
 		c.message = c.unsupportedMsg
 		c.endpoints = 0
 		return nil
+	}
+	c.status = mptcpStatusEnabled
+	if !c.settings.Enabled {
+		c.status = mptcpStatusDisabled
 	}
 
 	// The scheduler is a node-global sysctl and is only ever written when
@@ -244,6 +256,9 @@ func (c *mptcpControl) reconcileLocked(ctx context.Context) error {
 	desired := c.desiredSetLocked()
 	current, err := c.client.list(ctx)
 	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		c.status = mptcpStatusError
 		c.message = fmt.Sprintf("list MPTCP endpoints: %v", err)
 		c.endpoints = 0
@@ -251,12 +266,28 @@ func (c *mptcpControl) reconcileLocked(ctx context.Context) error {
 		return nil
 	}
 
-	// Missing endpoints are added with the default SUBFLOW|SIGNAL flags.
+	// Missing endpoints are added with the default SUBFLOW|SIGNAL flags;
+	// endpoints with stale flags are replaced because the kernel API has no
+	// in-place flag update operation.
 	for addr, flags := range desired {
-		if findEndpoint(current, addr) {
-			continue
+		if endpoint, exists := findEndpoint(current, addr); exists {
+			if endpoint.Flags == flags {
+				continue
+			}
+			if err := c.client.delByID(ctx, endpoint.ID); err != nil {
+				if contextErr := ctx.Err(); contextErr != nil {
+					return contextErr
+				}
+				c.status = mptcpStatusError
+				c.message = fmt.Sprintf("replace MPTCP endpoint %s flags: %v", addr, err)
+				slog.Warn("MPTCP endpoint flag replacement failed", slog.String("address", addr.String()), slog.String("error", err.Error()))
+				continue
+			}
 		}
 		if err := c.client.add(ctx, addr, flags); err != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return contextErr
+			}
 			c.status = mptcpStatusError
 			c.message = fmt.Sprintf("add MPTCP endpoint %s: %v", addr, err)
 			slog.Warn("MPTCP endpoint add failed", slog.String("address", addr.String()), slog.String("error", err.Error()))
@@ -267,13 +298,16 @@ func (c *mptcpControl) reconcileLocked(ctx context.Context) error {
 	// Orphan cleanup deletes only endpoints whose address belongs to a TH
 	// tunnel record; user-registered endpoints are never touched.
 	for _, endpoint := range current {
-		if _, keep := desired[endpoint.Address]; keep {
+		if _, keep := desired[endpoint.Address.Unmap()]; keep {
 			continue
 		}
 		if !c.ownedLocked(endpoint.Address) {
 			continue
 		}
 		if err := c.client.delByID(ctx, endpoint.ID); err != nil {
+			if contextErr := ctx.Err(); contextErr != nil {
+				return contextErr
+			}
 			c.status = mptcpStatusError
 			c.message = fmt.Sprintf("delete MPTCP endpoint %s: %v", endpoint.Address, err)
 			slog.Warn("MPTCP endpoint delete failed", slog.String("address", endpoint.Address.String()), slog.String("error", err.Error()))
@@ -285,6 +319,9 @@ func (c *mptcpControl) reconcileLocked(ctx context.Context) error {
 	// add/del pass, not the pre-pass snapshot.
 	refreshed, err := c.client.list(ctx)
 	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		c.status = mptcpStatusError
 		c.message = fmt.Sprintf("list MPTCP endpoints: %v", err)
 		slog.Warn("MPTCP endpoint recount failed", slog.String("error", err.Error()))
@@ -292,13 +329,6 @@ func (c *mptcpControl) reconcileLocked(ctx context.Context) error {
 	}
 	current = refreshed
 
-	if c.status != mptcpStatusError {
-		c.status = mptcpStatusEnabled
-		if !c.settings.Enabled {
-			c.status = mptcpStatusDisabled
-		}
-	}
-	c.message = c.schedulerWarn
 	c.endpoints = c.thManagedCountLocked(current)
 	return nil
 }
@@ -512,14 +542,14 @@ func tunnelAddresses(record model.Tunnel) []netip.Addr {
 	return addresses
 }
 
-func findEndpoint(endpoints []mptcpEndpoint, addr netip.Addr) bool {
+func findEndpoint(endpoints []mptcpEndpoint, addr netip.Addr) (mptcpEndpoint, bool) {
 	addr = addr.Unmap()
 	for _, endpoint := range endpoints {
 		if endpoint.Address.Unmap() == addr {
-			return true
+			return endpoint, true
 		}
 	}
-	return false
+	return mptcpEndpoint{}, false
 }
 
 // applyMPTCPScheduler writes the configured scheduler to

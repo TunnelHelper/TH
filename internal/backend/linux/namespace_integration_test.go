@@ -12,10 +12,12 @@ import (
 	"net/netip"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/TunnelHelper/TH/internal/babel"
 	"github.com/TunnelHelper/TH/internal/config"
 	"github.com/TunnelHelper/TH/internal/core"
 	"github.com/TunnelHelper/TH/internal/model"
@@ -28,6 +30,11 @@ import (
 func TestNamespaceTunnelLifecycles(t *testing.T) {
 	restore := enterTestNamespace(t)
 	defer restore()
+	testNamespace, err := netns.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer testNamespace.Close()
 
 	loopback, err := netlink.LinkByName("lo")
 	if err != nil {
@@ -84,6 +91,127 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 			}},
 		})
 		assertLifecycle(t, backend, record)
+	})
+
+	t.Run("parallel-babel-reconcile", func(t *testing.T) {
+		runtime.LockOSThread()
+		originalNamespace, err := netns.Get()
+		if err != nil {
+			runtime.UnlockOSThread()
+			t.Fatal(err)
+		}
+		if err := netns.Set(testNamespace); err != nil {
+			originalNamespace.Close()
+			runtime.UnlockOSThread()
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := netns.Set(originalNamespace); err != nil {
+				t.Errorf("restore subtest namespace: %v", err)
+			}
+			originalNamespace.Close()
+			runtime.UnlockOSThread()
+		}()
+
+		multicast := false
+		records := []model.Tunnel{
+			prepareIntegrationRecord(t, model.Tunnel{
+				Name: "babel-a", Kind: model.KindGRE, Interface: "babel-a",
+				Spec: model.Spec{
+					GRE: &model.GRESpec{
+						Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.2"),
+						Addresses: []netip.Prefix{netip.MustParsePrefix("10.10.0.1/30")},
+					},
+					Babel: &model.BabelTunnelConfig{
+						Enabled: true, BandwidthMbps: 100, Multicast: &multicast,
+						Neighbours: []netip.Addr{netip.MustParseAddr("10.10.0.2")},
+					},
+				},
+			}),
+			prepareIntegrationRecord(t, model.Tunnel{
+				Name: "babel-b", Kind: model.KindGRE, Interface: "babel-b",
+				Spec: model.Spec{
+					GRE: &model.GRESpec{
+						Local: netip.MustParseAddr("192.0.2.1"), Remote: netip.MustParseAddr("192.0.2.3"),
+						Addresses: []netip.Prefix{netip.MustParsePrefix("10.10.1.1/30")},
+					},
+					Babel: &model.BabelTunnelConfig{
+						Enabled: true, BandwidthMbps: 200, Multicast: &multicast,
+						Neighbours: []netip.Addr{netip.MustParseAddr("10.10.1.2")},
+					},
+				},
+			}),
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		// Create both links before enabling Babel so every concurrent rebuild
+		// observes the same complete kernel interface set.
+		for _, record := range records {
+			withoutBabel := record
+			withoutBabel.Spec.Babel = nil
+			if _, err := backend.Apply(ctx, withoutBabel); err != nil {
+				t.Fatalf("prepare %s: %v", record.Name, err)
+			}
+		}
+		var (
+			workers sync.WaitGroup
+			errorsC = make(chan error, len(records))
+		)
+		for _, record := range records {
+			record := record
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				runtime.LockOSThread()
+				defer runtime.UnlockOSThread()
+				originalNamespace, err := netns.Get()
+				if err != nil {
+					errorsC <- err
+					return
+				}
+				if err := netns.Set(testNamespace); err != nil {
+					originalNamespace.Close()
+					errorsC <- err
+					return
+				}
+				_, applyErr := backend.Apply(ctx, record)
+				restoreErr := netns.Set(originalNamespace)
+				originalNamespace.Close()
+				errorsC <- errors.Join(applyErr, restoreErr)
+			}()
+		}
+		workers.Wait()
+		close(errorsC)
+		for err := range errorsC {
+			if err != nil {
+				t.Fatalf("parallel Babel apply: %v", err)
+			}
+		}
+
+		backend.babel.mu.Lock()
+		speaker := backend.babel.speaker
+		tunnelCount := len(backend.babel.tunnels)
+		backend.babel.mu.Unlock()
+		if speaker == nil || tunnelCount != len(records) {
+			t.Fatalf("Babel engine after parallel apply = speaker %v, tunnels %d", speaker != nil, tunnelCount)
+		}
+		activeInterfaces := make(map[string]bool, len(records))
+		if err := speaker.Interfaces.Foreach(func(_ int, intf *babel.Interface) error {
+			activeInterfaces[intf.Name] = true
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for _, record := range records {
+			if !activeInterfaces[record.Interface] {
+				t.Fatalf("Babel speaker is missing %s after parallel apply: %+v", record.Interface, activeInterfaces)
+			}
+		}
+		for _, record := range records {
+			if _, err := backend.Remove(ctx, record); err != nil {
+				t.Fatalf("remove %s: %v", record.Name, err)
+			}
+		}
 	})
 
 	t.Run("vxlan", func(t *testing.T) {

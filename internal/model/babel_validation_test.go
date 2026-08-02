@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"net/netip"
 	"testing"
 	"time"
@@ -67,7 +68,7 @@ func TestValidateBabelTunnelBalanceRange(t *testing.T) {
 			t.Errorf("balance %v must validate: %v", balance, err)
 		}
 	}
-	for _, balance := range []float64{-2.1, 2.5} {
+	for _, balance := range []float64{-2.1, 2.5, math.NaN(), math.Inf(1), math.Inf(-1)} {
 		record.Spec.Babel.Balance = &balance
 		if err := Validate(record); err == nil {
 			t.Errorf("balance %v must be rejected", balance)

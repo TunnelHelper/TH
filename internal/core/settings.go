@@ -14,7 +14,7 @@ import (
 
 // settingsApplier applies a new daemon settings snapshot to the running
 // backend (Babel and MPTCP sections).
-type settingsApplier func(config.Settings) error
+type settingsApplier func(context.Context, config.Settings) error
 
 // NewManagerWithSettings returns a manager that can read and update the
 // daemon settings file and push settings changes to the backend.
@@ -30,6 +30,8 @@ func NewManagerWithSettings(records Store, reconciler *Reconciler, settingsPath 
 // sections), honoring a state-directory override when the configured
 // settings path cannot be written.
 func (m *Manager) Settings() (config.Settings, error) {
+	m.mutationMu.RLock()
+	defer m.mutationMu.RUnlock()
 	if m.settingsPath == "" {
 		return config.Settings{}, errors.New("daemon settings are not configured")
 	}
@@ -42,6 +44,11 @@ func (m *Manager) Settings() (config.Settings, error) {
 
 // UpdateSettings validates, persists and applies new daemon settings.
 func (m *Manager) UpdateSettings(ctx context.Context, next config.Settings) error {
+	m.mutationMu.Lock()
+	defer m.mutationMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if m.settingsPath == "" {
 		return errors.New("daemon settings are not configured")
 	}
@@ -57,15 +64,36 @@ func (m *Manager) UpdateSettings(ctx context.Context, next config.Settings) erro
 	settings := current
 	settings.Babel = next.Babel
 	settings.Mptcp = next.Mptcp
-	if err := m.saveSettings(m.settingsPath, settings); err != nil {
-		return fmt.Errorf("persist daemon settings: %w", err)
-	}
 	if m.applySettings != nil {
-		if err := m.applySettings(settings); err != nil {
-			return fmt.Errorf("apply daemon settings: %w", err)
+		if err := m.applySettings(ctx, settings); err != nil {
+			rollbackErr := m.applySettingsRollback(current)
+			return fmt.Errorf("apply daemon settings: %w", errors.Join(err, wrapSettingsRollback("runtime", rollbackErr)))
 		}
 	}
+	if err := m.saveSettings(m.settingsPath, settings); err != nil {
+		restoreErr := m.saveSettings(m.settingsPath, current)
+		rollbackErr := m.applySettingsRollback(current)
+		return fmt.Errorf("persist daemon settings: %w", errors.Join(err,
+			wrapSettingsRollback("disk", restoreErr), wrapSettingsRollback("runtime", rollbackErr)))
+	}
 	return nil
+}
+
+func (m *Manager) applySettingsRollback(settings config.Settings) error {
+	if m.applySettings == nil {
+		return nil
+	}
+	timeout := settings.RequestTimeout()
+	rollbackContext, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return m.applySettings(rollbackContext, settings)
+}
+
+func wrapSettingsRollback(target string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("rollback %s settings: %w", target, err)
 }
 
 // saveSettings persists the settings to the configured path. When that
@@ -77,8 +105,8 @@ func (m *Manager) saveSettings(path string, settings config.Settings) error {
 	overridePath := config.SettingsOverridePath(settings.StateDir)
 	write := m.settingsWriter()
 	if err := write(path, settings); err == nil {
-		if removeErr := os.Remove(overridePath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			slog.Warn("remove stale daemon settings override failed", "path", overridePath, "error", removeErr)
+		if removeErr := m.settingsOverrideRemover()(overridePath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return fmt.Errorf("remove stale daemon settings override %s: %w", overridePath, removeErr)
 		}
 		return nil
 	} else {
@@ -89,6 +117,13 @@ func (m *Manager) saveSettings(path string, settings config.Settings) error {
 		}
 		return nil
 	}
+}
+
+func (m *Manager) settingsOverrideRemover() func(string) error {
+	if m.removeSettingsOverride != nil {
+		return m.removeSettingsOverride
+	}
+	return os.Remove
 }
 
 func (m *Manager) settingsWriter() func(string, config.Settings) error {

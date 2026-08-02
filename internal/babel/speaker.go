@@ -1024,7 +1024,7 @@ func (s *Speaker) runReadLoop6() {
 	defer s.workerWG.Done()
 	s.logger.Debug("Start receiving packets")
 
-	buf := make([]byte, 1500)
+	buf := make([]byte, maxBabelReceiveSize)
 
 	for {
 		n, cm, sAddr, err := s.conn6.ReadFrom(buf)
@@ -1080,7 +1080,7 @@ func (s *Speaker) runReadLoop4() {
 	defer s.workerWG.Done()
 	s.logger.Debug("Start receiving IPv4 packets")
 
-	buf := make([]byte, 1500)
+	buf := make([]byte, maxBabelReceiveSize)
 
 	for {
 		n, cm, sAddr, err := s.conn4.ReadFrom(buf)
@@ -1092,7 +1092,12 @@ func (s *Speaker) runReadLoop4() {
 			continue
 		}
 
-		srcAddr := proto.AddressFrom(sAddr).WithZone("")
+		srcAddr := proto.AddressFrom(sAddr).WithZone("").Unmap()
+		intf, exists := s.Interfaces.Lookup(cm.IfIndex)
+		if !exists || !intf.acceptsIPv4Source(srcAddr) {
+			s.logger.Debug("Ignoring IPv4 packet from source outside the local network", slog.Any("saddr", srcAddr))
+			continue
+		}
 		if srcAddr.Is4() {
 			// Neighbour keys are normalised to the 4-in-6 form.
 			srcAddr = netip.AddrFrom16(srcAddr.As16())

@@ -16,7 +16,7 @@ func (b *Backend) applyVXLAN(ctx context.Context, record model.Tunnel) (core.Obs
 		return core.Observation{}, err
 	}
 	spec := record.Spec.VXLAN
-	underlay, err := b.netlink.LinkByName(spec.UnderlayInterface)
+	underlay, err := b.linkByName(spec.UnderlayInterface)
 	if err != nil {
 		return core.Observation{}, fmt.Errorf("lookup VXLAN underlay %s: %w", spec.UnderlayInterface, err)
 	}

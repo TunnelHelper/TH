@@ -86,15 +86,17 @@ func (p *Parser) Packet(b []byte) ([]byte, *Packet, error) {
 		return nil, nil, ErrTooShort
 	}
 
-	if b, pkt.Body, err = p.Values(b, false); err != nil {
+	body := b[:bodyLength]
+	trailer := b[bodyLength:]
+	if _, pkt.Body, err = p.Values(body, false); err != nil {
 		return nil, nil, err
 	}
 
-	if b, pkt.Trailer, err = p.Values(b, true); err != nil {
+	if _, pkt.Trailer, err = p.Values(trailer, true); err != nil {
 		return nil, nil, err
 	}
 
-	return b, pkt, nil
+	return b[len(b):], pkt, nil
 }
 
 // AppendPacket encodes a packet by appending it to the provided
@@ -105,10 +107,10 @@ func (p *Parser) AppendPacket(b []byte, pkt *Packet) []byte {
 
 	b = p.appendPacketHeader(b)
 	b = p.AppendValues(b, pkt.Body)
+	bodyLength := len(b) - o - PacketHeaderLength
 	b = p.AppendValues(b, pkt.Trailer)
 
 	// Fill in body length
-	bodyLength := len(b) - o - PacketHeaderLength
 	binary.BigEndian.PutUint16(b[o+2:], uint16(bodyLength))
 
 	return b

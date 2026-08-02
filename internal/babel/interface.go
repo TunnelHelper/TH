@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -24,6 +25,13 @@ const (
 	// as defined by RFC 2474. Routing protocols are recommended to use
 	// the network control service class (CS6) as recommended by RFC 4594.
 	TrafficClassNetworkControl = 48 << 2 // DiffServ / DSCP name CS6
+
+	ipv4UDPHeaderLength = 28
+	ipv6UDPHeaderLength = 48
+	minBabelPacketSize  = 512
+	maxBabelIPv4Size    = 65535 - ipv4UDPHeaderLength
+	maxBabelIPv6Size    = 65535 - ipv6UDPHeaderLength
+	maxBabelReceiveSize = maxBabelIPv4Size
 )
 
 // 3.2.3. The Interface Table
@@ -125,7 +133,7 @@ func (s *Speaker) newInterface(index int) (*Interface, error) {
 			}
 		}
 	}
-	i.queue = queue.NewQueue(intf.MTU, writer)
+	i.queue = queue.NewQueue(babelPayloadSize(intf.MTU, writer.Dest != nil), writer)
 
 	// Bootstrap static neighbours on non-multicast links (e.g. WireGuard):
 	// create the neighbour entries up front and send an initial unicast
@@ -178,6 +186,56 @@ func multicastGroupsForAddresses(addrs []net.Addr) (v6, v4 *net.UDPAddr) {
 	return v6, v4
 }
 
+func babelPayloadSize(mtu int, ipv6Transport bool) int {
+	overhead := ipv4UDPHeaderLength
+	if ipv6Transport {
+		overhead = ipv6UDPHeaderLength
+	}
+	size := mtu - overhead
+	maximum := maxBabelIPv4Size
+	if ipv6Transport {
+		maximum = maxBabelIPv6Size
+	}
+	if size < minBabelPacketSize {
+		size = minBabelPacketSize
+	}
+	if size > maximum {
+		size = maximum
+	}
+	return size
+}
+
+func (i *Interface) acceptsIPv4Source(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	if !addr.Is4() {
+		return false
+	}
+	for _, configured := range i.speaker.config.StaticNeighbours[i.Name] {
+		if configured.Unmap() == addr {
+			return true
+		}
+	}
+	addrs, err := i.Addrs()
+	if err != nil {
+		return false
+	}
+	return ipv4SourceOnLocalNetwork(addrs, addr)
+}
+
+func ipv4SourceOnLocalNetwork(addrs []net.Addr, source netip.Addr) bool {
+	source = source.Unmap()
+	if !source.Is4() {
+		return false
+	}
+	ip := net.IP(source.AsSlice())
+	for _, addr := range addrs {
+		if network, ok := addr.(*net.IPNet); ok && network.IP.To4() != nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 func (i *Interface) addStaticNeighbour(addr proto.Address) error {
 	addr = addr.WithZone("")
 	if _, exists := i.Neighbours.Lookup(addr); exists {
@@ -199,6 +257,7 @@ func (i *Interface) addStaticNeighbour(addr proto.Address) error {
 	if i.speaker.config.UnicastHelloInterval > 0 {
 		_ = n.sendUnicastHello()
 	}
+	n.startTimers()
 	return nil
 }
 
@@ -273,6 +332,7 @@ func (i *Interface) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address, 
 		}
 
 		i.Neighbours.Insert(n)
+		n.startTimers()
 	}
 
 	return n.onPacket(pkt, srcAddr, dstAddr, rxTime)
