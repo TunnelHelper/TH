@@ -476,6 +476,9 @@ func (m dashboardModel) peerLinesWithin(width, maxLines int) []string {
 	}
 	for _, peer := range view.Status.Peers {
 		key := peer.PublicKey
+		if peer.Protocol == "babel" {
+			key = formatBabelAddress(key)
+		}
 		if len(key) > 12 {
 			key = key[:12]
 		}

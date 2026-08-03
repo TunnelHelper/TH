@@ -735,7 +735,7 @@ func (s *Speaker) onUpdateReceived(n *Neighbour, upd *proto.Update) {
 			s.Routes.Insert(r)
 			s.logger.Info("Learnt route",
 				slog.String("prefix", pfx.String()),
-				slog.String("neighbour", n.Address.String()),
+				slog.String("neighbour", displayAddress(n.Address)),
 				slog.Any("metric", upd.Metric))
 		} else {
 			if r.Selected && !feasible && r.Source.RouterID == rid {

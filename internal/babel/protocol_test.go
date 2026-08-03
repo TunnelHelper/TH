@@ -4,11 +4,13 @@
 package babel
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"math"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,6 +303,22 @@ func TestOnUpdateReceived(t *testing.T) {
 	r2, ok := s2.Routes.LookupByNeighbour(pfx, n2)
 	if !ok || r2.NextHop != n2.Address {
 		t.Errorf("next hop must fall back to the sender, got %s", r2.NextHop)
+	}
+}
+
+func TestLearnedRouteLogUnmapsIPv4Neighbour(t *testing.T) {
+	var output bytes.Buffer
+	s := newTestSpeaker(t)
+	s.logger = slog.New(slog.NewJSONHandler(&output, nil))
+	n := newFakeNeighbour(s, "::ffff:10.44.0.2", 96)
+	s.onUpdateReceived(n, &proto.Update{
+		Prefix:   netip.MustParsePrefix("192.0.2.0/24"),
+		RouterID: proto.RouterID{9}, Seqno: 1, Metric: 100,
+	})
+
+	logLine := output.String()
+	if !strings.Contains(logLine, `"neighbour":"10.44.0.2"`) || strings.Contains(logLine, "::ffff:") {
+		t.Fatalf("IPv4-mapped neighbour leaked into log output: %s", logLine)
 	}
 }
 

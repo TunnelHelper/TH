@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,10 @@ type Neighbour struct {
 // as required by the RFC 9616 timestamp extension.
 func timestampNow() proto.Timestamp {
 	return proto.Timestamp(time.Now().UnixMicro())
+}
+
+func displayAddress(addr netip.Addr) string {
+	return addr.Unmap().String()
 }
 
 func (i *Interface) NewNeighbour(addr proto.Address) (*Neighbour, error) {

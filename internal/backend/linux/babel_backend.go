@@ -206,7 +206,7 @@ func (e *babelEngine) health() core.BabelHealth {
 		return iface.Neighbours.Foreach(func(n *babel.Neighbour) error {
 			stats := n.DelayStats()
 			health.Neighbours = append(health.Neighbours, core.BabelNeighbourHealth{
-				Interface: iface.Name, Address: n.Address.String(),
+				Interface: iface.Name, Address: n.Address.Unmap().String(),
 				RTTMicros: stats.Mean.Microseconds(), JitterMicros: stats.Jitter().Microseconds(),
 				MinRTTMicros: stats.Min.Microseconds(), AgeMillis: stats.Age(now).Milliseconds(),
 				Samples: stats.Samples, Outliers: stats.OutlierSamples,
@@ -265,7 +265,7 @@ func (e *babelEngine) routeHealthLocked(selected []babel.SelectedRoute, table in
 		for i, candidate := range candidates {
 			confidence := float64(candidate.PathMetricConfidence) / float64(math.MaxUint16)
 			item := core.BabelRouteHealth{
-				Prefix: prefix.String(), Interface: candidate.Interface, NextHop: candidate.NextHop.String(),
+				Prefix: prefix.String(), Interface: candidate.Interface, NextHop: candidate.NextHop.Unmap().String(),
 				PreferredSource: ipString(preferredSource),
 				Metric:          candidate.Metric, BottleneckMbps: candidate.BottleneckMbps,
 				RTTMicros: candidate.PathRTTMicros, JitterMicros: candidate.PathJitterMicros,
@@ -875,7 +875,7 @@ func (e *babelEngine) observe(record model.Tunnel) core.Observation {
 			confidence := stats.Confidence(now, babel.DefaultDelayWarmupSamples, e.settings.DelaySampleMaxAge())
 			fresh := stats.Fresh(now, babel.DefaultDelayWarmupSamples, e.settings.DelaySampleMaxAge())
 			peers = append(peers, model.PeerStatus{
-				Protocol: "babel", PublicKey: n.Address.String(), Endpoint: iface.Name,
+				Protocol: "babel", PublicKey: n.Address.Unmap().String(), Endpoint: iface.Name,
 				RTTMicros: &rtt, JitterMicros: &jitter, MetricAgeMillis: &age,
 				MetricConfidence: &confidence, MetricFresh: &fresh,
 			})

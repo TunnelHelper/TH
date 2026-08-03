@@ -920,7 +920,7 @@ func (m settingsModel) metricsBodyLines(width int) []string {
 				state = "fresh"
 			}
 			lines = append(lines,
-				fit(fmt.Sprintf("%s  %s", neighbour.Interface, neighbour.Address), width),
+				fit(fmt.Sprintf("%s  %s", neighbour.Interface, formatBabelAddress(neighbour.Address)), width),
 				workspaceDimStyle.Render(fit(fmt.Sprintf("  RTT %s  jitter %s  min %s  age %dms  %.0f%% %s  n=%d  spikes=%d",
 					formatBabelMicros(neighbour.RTTMicros), formatBabelMicros(neighbour.JitterMicros),
 					formatBabelMicros(neighbour.MinRTTMicros), neighbour.AgeMillis,
@@ -942,7 +942,7 @@ func (m settingsModel) metricsBodyLines(width int) []string {
 				source = "  src " + route.PreferredSource
 			}
 			lines = append(lines,
-				fit(fmt.Sprintf("%s  via %s  %s%s", route.Prefix, route.NextHop, route.Interface, source), width),
+				fit(fmt.Sprintf("%s  via %s  %s%s", route.Prefix, formatBabelAddress(route.NextHop), route.Interface, source), width),
 				workspaceDimStyle.Render(fit(fmt.Sprintf("  metric %d  bw %dMbps  RTT %s  jitter %s  age %dms  score %.4g  weight %s",
 					route.Metric, route.BottleneckMbps, formatBabelMicros(route.RTTMicros),
 					formatBabelMicros(route.JitterMicros), route.AgeMillis, route.Score, weight), width)),

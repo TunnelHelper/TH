@@ -358,6 +358,22 @@ func TestRouteHealthReportsDesiredAndInstalledWeights(t *testing.T) {
 	}
 }
 
+func TestRouteHealthUnmapsIPv4NextHop(t *testing.T) {
+	engine := &babelEngine{
+		settings:     config.Defaults().Babel,
+		tunnels:      map[string]babelTunnel{"a": {interfaceName: "wg0", bandwidthMbps: 100}},
+		weightStates: make(map[string]*babelWeightState),
+	}
+	selected := []babel.SelectedRoute{{
+		Prefix:  netip.MustParsePrefix("192.0.2.0/24"),
+		NextHop: netip.MustParseAddr("::ffff:10.44.0.2"), Interface: "wg0", Metric: 100,
+	}}
+	health := engine.routeHealthLocked(selected, 254, nil)
+	if len(health) != 1 || health[0].NextHop != "10.44.0.2" {
+		t.Fatalf("IPv4-mapped next hop leaked into route health: %+v", health)
+	}
+}
+
 func TestBabelPreferredSourceUsesClosestOriginatedAddress(t *testing.T) {
 	destination := netip.MustParsePrefix("2a0f:1cc5:3ff:fff2::/64")
 	candidates := []netip.Addr{

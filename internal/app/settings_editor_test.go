@@ -519,11 +519,11 @@ func TestSettingsLiveMetricsViewShowsDelayAndWeights(t *testing.T) {
 		RouterID:           "0011223344556677",
 		OriginatedPrefixes: []string{"10.1.0.0/24"},
 		Neighbours: []core.BabelNeighbourHealth{{
-			Interface: "wg0", Address: "fe80::1", RTTMicros: 12_000, JitterMicros: 2_000,
+			Interface: "wg0", Address: "::ffff:10.44.0.2", RTTMicros: 12_000, JitterMicros: 2_000,
 			MinRTTMicros: 10_000, AgeMillis: 500, Samples: 9, Confidence: 0.9, Fresh: true,
 		}},
 		Routes: []core.BabelRouteHealth{{
-			Prefix: "10.0.0.0/24", Interface: "wg0", NextHop: "fe80::1", Metric: 120,
+			Prefix: "10.0.0.0/24", Interface: "wg0", NextHop: "::ffff:10.44.0.2", Metric: 120,
 			PreferredSource: "10.1.0.1",
 			BottleneckMbps:  100, RTTMicros: 12_000, JitterMicros: 2_000, AgeMillis: 500,
 			Score: 1.25, InstalledWeight: 200, DesiredWeight: 180,
@@ -538,10 +538,13 @@ func TestSettingsLiveMetricsViewShowsDelayAndWeights(t *testing.T) {
 		t.Fatal("live metrics field did not open the metrics page")
 	}
 	view := model.metricsView(120)
-	for _, expected := range []string{"10.1.0.0/24", "wg0", "fe80::1", "RTT 12ms", "jitter 2ms", "10.0.0.0/24", "src 10.1.0.1", "weight 200 -> 180"} {
+	for _, expected := range []string{"10.1.0.0/24", "wg0", "10.44.0.2", "RTT 12ms", "jitter 2ms", "10.0.0.0/24", "src 10.1.0.1", "weight 200 -> 180"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("metrics view missing %q:\n%s", expected, view)
 		}
+	}
+	if strings.Contains(view, "::ffff:") {
+		t.Fatalf("metrics view exposed an IPv4-mapped address:\n%s", view)
 	}
 }
 

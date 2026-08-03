@@ -195,19 +195,22 @@ func TestDashboardRendersBabelDelayPeerWithoutWireGuardNoise(t *testing.T) {
 	view := model.TunnelView{
 		Tunnel: model.Tunnel{Name: "wg", Kind: model.KindWireGuard},
 		Status: model.Status{Peers: []model.PeerStatus{{
-			Protocol: "babel", PublicKey: "fe80::1", Endpoint: "wg0",
+			Protocol: "babel", PublicKey: "::ffff:10.44.0.2", Endpoint: "wg0",
 			RTTMicros: &rtt, JitterMicros: &jitter, MetricAgeMillis: &age,
 			MetricConfidence: &confidence, MetricFresh: &fresh,
 		}}},
 	}
 	lines := strings.Join((dashboardModel{views: []model.TunnelView{view}}).peerLines(100), "\n")
-	for _, expected := range []string{"Babel neighbor fe80::1", "RTT 12ms", "jitter 2ms", "90% fresh"} {
+	for _, expected := range []string{"Babel neighbor 10.44.0.2", "RTT 12ms", "jitter 2ms", "90% fresh"} {
 		if !strings.Contains(lines, expected) {
 			t.Fatalf("Babel peer details missing %q:\n%s", expected, lines)
 		}
 	}
 	if strings.Contains(lines, "Handshake:") || strings.Contains(lines, "WG transfer") {
 		t.Fatalf("Babel peer rendered unrelated WireGuard fields:\n%s", lines)
+	}
+	if strings.Contains(lines, "::ffff:") {
+		t.Fatalf("Babel peer exposed an IPv4-mapped address:\n%s", lines)
 	}
 }
 

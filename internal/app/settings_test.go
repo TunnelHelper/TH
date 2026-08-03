@@ -38,10 +38,11 @@ func TestValidateNeighbourListInput(t *testing.T) {
 
 func TestNeighbourListRoundTrip(t *testing.T) {
 	addrs := parseNeighbourList("fe80::1, 192.0.2.1 ,2001:db8::5")
-	if len(addrs) != 3 {
-		t.Fatalf("parsed %d addresses, want 3: %v", len(addrs), addrs)
+	addrs = append(addrs, netip.MustParseAddr("::ffff:10.44.0.2"))
+	if len(addrs) != 4 {
+		t.Fatalf("parsed %d addresses, want 4: %v", len(addrs), addrs)
 	}
-	if got := formatNeighbourList(addrs); got != "fe80::1,192.0.2.1,2001:db8::5" {
+	if got := formatNeighbourList(addrs); got != "fe80::1,192.0.2.1,2001:db8::5,10.44.0.2" {
 		t.Fatalf("formatted = %q", got)
 	}
 }

@@ -243,11 +243,11 @@ func (i *Interface) addStaticNeighbour(addr proto.Address) error {
 	}
 	n, err := i.NewNeighbour(addr)
 	if err != nil {
-		return fmt.Errorf("create static neighbour %s: %w", addr, err)
+		return fmt.Errorf("create static neighbour %s: %w", displayAddress(addr), err)
 	}
 	n.Static = true
 	i.Neighbours.Insert(n)
-	i.logger.Info("Added static neighbour", slog.String("addr", addr.String()))
+	i.logger.Info("Added static neighbour", slog.String("addr", displayAddress(addr)))
 
 	if h, ok := i.speaker.config.Handler.(NeighbourHandler); ok {
 		h.NeighbourAdded(n)
@@ -305,8 +305,8 @@ func (i *Interface) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address, 
 	isMulticast := dstAddr.IsLinkLocalMulticast()
 
 	i.logger.Debug("Received packet",
-		slog.Any("src_addr", srcAddr),
-		slog.Any("dst_addr", dstAddr),
+		slog.String("src_addr", displayAddress(srcAddr)),
+		slog.String("dst_addr", displayAddress(dstAddr)),
 		slog.Bool("multicast", isMulticast),
 		slog.Any("packet", pkt))
 
@@ -316,7 +316,7 @@ func (i *Interface) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address, 
 		// accepted; everything else is ignored.
 		if !i.multicast && i.speaker.config.StrictNeighbours {
 			i.logger.Debug("Ignoring packet from unconfigured neighbour",
-				slog.String("addr", srcAddr.String()))
+				slog.String("addr", displayAddress(srcAddr)))
 			return nil
 		}
 
@@ -325,7 +325,7 @@ func (i *Interface) onPacket(pkt *proto.Packet, srcAddr, dstAddr proto.Address, 
 			return fmt.Errorf("failed to create neighbour: %w", err)
 		}
 
-		i.logger.Debug("Found new neighbour", slog.String("addr", srcAddr.String()))
+		i.logger.Debug("Found new neighbour", slog.String("addr", displayAddress(srcAddr)))
 
 		if h, ok := i.speaker.config.Handler.(NeighbourHandler); ok {
 			h.NeighbourAdded(n)

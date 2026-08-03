@@ -116,9 +116,17 @@ func parseNeighbourList(value string) []netip.Addr {
 func formatNeighbourList(addrs []netip.Addr) string {
 	parts := make([]string, 0, len(addrs))
 	for _, addr := range addrs {
-		parts = append(parts, addr.String())
+		parts = append(parts, addr.Unmap().String())
 	}
 	return strings.Join(parts, ",")
+}
+
+func formatBabelAddress(value string) string {
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return value
+	}
+	return addr.Unmap().String()
 }
 
 func validateNeighbourListInput(value string) error {
