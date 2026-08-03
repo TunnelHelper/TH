@@ -986,6 +986,7 @@ func (p *Parser) update(b []byte) ([]byte, *Update, error) {
 			}
 			return b, nil
 		case SubTypePathMetrics:
+			v.PathMetricsPresent = true
 			var bottleneck uint32
 			var rtt uint32
 			if b, bottleneck, err = p.uint32(b); err != nil {
@@ -998,6 +999,7 @@ func (p *Parser) update(b []byte) ([]byte, *Update, error) {
 			v.PathRTTMicros = decodePathRTT(rtt)
 			return b, nil
 		case SubTypePathQuality:
+			v.PathQualityPresent = true
 			var jitter, age uint32
 			if b, jitter, err = p.uint32(b); err != nil {
 				return nil, err

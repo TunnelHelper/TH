@@ -244,6 +244,27 @@ func TestSelectionMultipath(t *testing.T) {
 	}
 }
 
+func TestSelectionDeduplicatesEquivalentForwardingPaths(t *testing.T) {
+	s := newTestSpeaker(t)
+	s.config.MaxPaths = 4
+	s.config.MultipathSlack = 50
+
+	n4 := newFakeNeighbour(s, "::ffff:10.44.0.2", 96)
+	n6 := newFakeNeighbour(s, "fe80::2", 96)
+	otherLink := newFakeNeighbour(s, "fe80::3", 96)
+	otherLink.intf.Interface = &net.Interface{Name: "test1", Index: 2}
+	rid := proto.RouterID{3}
+	insertRoute(s, n4, "2a0f:1cc5:3ff:1568::/64", rid, 1, 100).NextHop = netip.MustParseAddr("fe80::99")
+	insertRoute(s, n6, "2a0f:1cc5:3ff:1568::/64", rid, 1, 100).NextHop = netip.MustParseAddr("fe80::99")
+	insertRoute(s, otherLink, "2a0f:1cc5:3ff:1568::/64", rid, 1, 100).NextHop = netip.MustParseAddr("fe80::99")
+
+	s.runSelection()
+	exported := s.SelectedRoutes()
+	if len(exported) != 2 {
+		t.Fatalf("same-link duplicates must collapse while distinct interfaces remain, got %+v", exported)
+	}
+}
+
 func TestOnUpdateReceived(t *testing.T) {
 	s := newTestSpeaker(t)
 	n := newFakeNeighbour(s, "fe80::1", 96)
@@ -280,6 +301,49 @@ func TestOnUpdateReceived(t *testing.T) {
 	r2, ok := s2.Routes.LookupByNeighbour(pfx, n2)
 	if !ok || r2.NextHop != n2.Address {
 		t.Errorf("next hop must fall back to the sender, got %s", r2.NextHop)
+	}
+}
+
+func TestUnknownDelayRefreshPreservesMetricsForSamePath(t *testing.T) {
+	s := newTestSpeaker(t)
+	n := newFakeNeighbour(s, "fe80::1", 96)
+	pfx := netip.MustParsePrefix("2a0f:1cc5:3ff:1568::/64")
+	rid := proto.RouterID{9}
+	nextHop := netip.MustParseAddr("fe80::99")
+
+	s.onUpdateReceived(n, &proto.Update{
+		Prefix: pfx, RouterID: rid, Seqno: 1, Metric: 100, NextHop: nextHop,
+		PathBottleneckMbps: 100, PathRTTMicros: 9_456,
+		PathJitterMicros: 39, PathMetricAgeMillis: 10, PathMetricConfidence: math.MaxUint16,
+		PathMetricsPresent: true, PathQualityPresent: true,
+	})
+	route, ok := s.Routes.LookupByNeighbour(pfx, n)
+	if !ok {
+		t.Fatal("route was not learned")
+	}
+	measurementTime := route.PathMetricsReceivedAt
+
+	// A shared multicast refresh can carry bandwidth but no per-neighbour
+	// delay. It must not erase the last receiver-specific unicast sample.
+	s.onUpdateReceived(n, &proto.Update{
+		Prefix: pfx, RouterID: rid, Seqno: 2, Metric: 100, NextHop: nextHop,
+		PathBottleneckMbps: 200, PathRTTMicros: -1, PathMetricsPresent: true,
+	})
+	if route.PathBottleneckMbps != 200 || route.PathRTTMicros != 9_456 || route.PathJitterMicros != 39 {
+		t.Fatalf("unknown refresh erased path quality: %+v", route)
+	}
+	if !route.PathMetricsReceivedAt.Equal(measurementTime) {
+		t.Fatal("unknown refresh made the retained measurement artificially fresh")
+	}
+
+	// The same data cannot be retained when forwarding actually moves to a
+	// different next hop.
+	s.onUpdateReceived(n, &proto.Update{
+		Prefix: pfx, RouterID: rid, Seqno: 3, Metric: 100,
+		NextHop: netip.MustParseAddr("fe80::98"), PathRTTMicros: -1,
+	})
+	if route.PathRTTMicros != -1 || route.PathMetricsReceivedAt != (time.Time{}) {
+		t.Fatalf("metrics from the old next hop survived a path change: %+v", route)
 	}
 }
 

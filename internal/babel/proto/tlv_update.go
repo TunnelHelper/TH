@@ -50,6 +50,11 @@ type Update struct {
 	// stale; 65535 means fully warmed and fresh.
 	PathMetricConfidence uint16
 
+	// These flags distinguish an omitted extension from an extension whose
+	// value explicitly encodes unknown.
+	PathMetricsPresent bool
+	PathQualityPresent bool
+
 	// Sub-TLVs
 	SourcePrefix *Prefix
 }

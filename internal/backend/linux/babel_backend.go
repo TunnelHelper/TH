@@ -1041,11 +1041,24 @@ func (b *Backend) resolveBabelLink(name string) (int, error) {
 
 func babelRoutesToNetlink(table int, selected []babel.SelectedRoute, resolve babelLinkResolver, score func(babel.SelectedRoute) float64, source babelSourceSelector) ([]netlink.Route, error) {
 	byPrefix := make(map[netip.Prefix][]babel.SelectedRoute)
+	type forwardingPath struct {
+		interfaceName string
+		nextHop       netip.Addr
+	}
+	seen := make(map[netip.Prefix]map[forwardingPath]struct{})
 	for _, route := range selected {
 		if route.Local {
 			continue
 		}
 		prefix := route.Prefix.Masked()
+		key := forwardingPath{interfaceName: route.Interface, nextHop: route.NextHop.Unmap()}
+		if seen[prefix] == nil {
+			seen[prefix] = make(map[forwardingPath]struct{})
+		}
+		if _, duplicate := seen[prefix][key]; duplicate {
+			continue
+		}
+		seen[prefix][key] = struct{}{}
 		byPrefix[prefix] = append(byPrefix[prefix], route)
 	}
 

@@ -351,6 +351,9 @@ func TestParserPathMetricsRoundTrip(t *testing.T) {
 	if update.PathBottleneckMbps != 10 || update.PathRTTMicros != 5000 {
 		t.Fatalf("path metrics = (%d, %d), want (10, 5000)", update.PathBottleneckMbps, update.PathRTTMicros)
 	}
+	if !update.PathMetricsPresent {
+		t.Fatal("decoded update did not record the PathMetrics sub-TLV")
+	}
 }
 
 func TestParserPathQualityRoundTrip(t *testing.T) {
@@ -371,6 +374,9 @@ func TestParserPathQualityRoundTrip(t *testing.T) {
 	update := values[0].(*Update)
 	if update.PathJitterMicros != 700 || update.PathMetricAgeMillis != 1200 || update.PathMetricConfidence != 49151 {
 		t.Fatalf("path quality = (%d, %d, %d)", update.PathJitterMicros, update.PathMetricAgeMillis, update.PathMetricConfidence)
+	}
+	if !update.PathQualityPresent {
+		t.Fatal("decoded update did not record the PathQuality sub-TLV")
 	}
 }
 

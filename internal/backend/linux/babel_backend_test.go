@@ -285,6 +285,7 @@ func TestBabelRoutesToNetlink(t *testing.T) {
 	}
 	selected := []babel.SelectedRoute{
 		{Prefix: netip.MustParsePrefix("10.1.0.0/24"), NextHop: netip.MustParseAddr("fe80::1"), Interface: "wg0", Metric: 512},
+		{Prefix: netip.MustParsePrefix("10.1.0.0/24"), NextHop: netip.MustParseAddr("fe80::1"), Interface: "wg0", Metric: 512},
 		{Prefix: netip.MustParsePrefix("10.1.0.0/24"), NextHop: netip.MustParseAddr("fe80::2"), Interface: "wg0", Metric: 2816},
 		{Prefix: netip.MustParsePrefix("10.2.0.0/24"), NextHop: netip.MustParseAddr("fe80::3"), Interface: "wg0", Metric: 512},
 		{Prefix: netip.MustParsePrefix("10.3.0.0/24"), NextHop: netip.Addr{}, Interface: "", Metric: 0, Local: true},
@@ -307,6 +308,9 @@ func TestBabelRoutesToNetlink(t *testing.T) {
 	}
 	if len(multi.MultiPath) == 0 {
 		t.Fatal("multipath route not found")
+	}
+	if len(multi.MultiPath) != 2 {
+		t.Fatalf("duplicate forwarding path reached netlink: %+v", multi.MultiPath)
 	}
 	if multi.MultiPath[0].LinkIndex != 42 || multi.MultiPath[1].LinkIndex != 42 {
 		t.Error("nexthop link index must come from the resolver")

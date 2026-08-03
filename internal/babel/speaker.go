@@ -691,6 +691,7 @@ func (s *Speaker) onUpdateReceived(n *Neighbour, upd *proto.Update) {
 		s.logger.Debug("Ignoring update without router-id", slog.String("prefix", pfx.String()))
 		return
 	}
+	receivedAt := time.Now()
 
 	s.mu.Lock()
 	res := func() selectionResult {
@@ -723,19 +724,14 @@ func (s *Speaker) onUpdateReceived(n *Neighbour, upd *proto.Update) {
 					SeqNo:    upd.Seqno,
 					Metric:   int(upd.Metric),
 				},
-				Neighbour:             n,
-				AdvertisedMetric:      upd.Metric,
-				SeqNo:                 upd.Seqno,
-				NextHop:               nextHop,
-				Feasible:              true,
-				Expiry:                time.Now().Add(s.config.RouteExpiryTime),
-				PathBottleneckMbps:    upd.PathBottleneckMbps,
-				PathRTTMicros:         upd.PathRTTMicros,
-				PathJitterMicros:      upd.PathJitterMicros,
-				PathMetricAgeMillis:   upd.PathMetricAgeMillis,
-				PathMetricConfidence:  upd.PathMetricConfidence,
-				PathMetricsReceivedAt: time.Now(),
+				Neighbour:        n,
+				AdvertisedMetric: upd.Metric,
+				SeqNo:            upd.Seqno,
+				NextHop:          nextHop,
+				Feasible:         true,
+				Expiry:           receivedAt.Add(s.config.RouteExpiryTime),
 			}
+			applyUpdatePathMetrics(r, upd, true, receivedAt)
 			s.Routes.Insert(r)
 			s.logger.Info("Learnt route",
 				slog.String("prefix", pfx.String()),
@@ -747,26 +743,65 @@ func (s *Speaker) onUpdateReceived(n *Neighbour, upd *proto.Update) {
 				// selected route stable in the face of flapping updates.
 				return selectionResult{}
 			}
+			pathChanged := r.Source.RouterID != rid || upd.NextHop.IsValid() && r.NextHop != upd.NextHop
 			r.Source.RouterID = rid
 			r.SeqNo = upd.Seqno
 			r.AdvertisedMetric = upd.Metric
 			r.Feasible = feasible
 			r.Expired = false
-			r.PathBottleneckMbps = upd.PathBottleneckMbps
-			r.PathRTTMicros = upd.PathRTTMicros
-			r.PathJitterMicros = upd.PathJitterMicros
-			r.PathMetricAgeMillis = upd.PathMetricAgeMillis
-			r.PathMetricConfidence = upd.PathMetricConfidence
-			r.PathMetricsReceivedAt = time.Now()
 			if upd.NextHop.IsValid() {
 				r.NextHop = upd.NextHop
 			}
-			r.Expiry = time.Now().Add(s.config.RouteExpiryTime)
+			applyUpdatePathMetrics(r, upd, pathChanged, receivedAt)
+			r.Expiry = receivedAt.Add(s.config.RouteExpiryTime)
 		}
 
 		return s.runSelectionLocked()
 	}()
 	s.afterSelection(res)
+}
+
+// applyUpdatePathMetrics keeps receiver-specific delay data across a basic
+// multicast refresh. A shared multicast Update cannot describe a different
+// first-hop RTT for every receiver, so an unknown RTT is allowed to age the
+// last unicast measurement instead of erasing it immediately.
+func applyUpdatePathMetrics(r *Route, upd *proto.Update, pathChanged bool, receivedAt time.Time) {
+	hasMetrics := upd.PathMetricsPresent || upd.PathBottleneckMbps != 0 || upd.PathRTTMicros > 0
+	hasQuality := upd.PathQualityPresent || upd.PathJitterMicros > 0 ||
+		upd.PathMetricAgeMillis > 0 || upd.PathMetricConfidence != 0
+	rttUpdated := false
+
+	if pathChanged {
+		r.PathBottleneckMbps = 0
+		r.PathRTTMicros = -1
+		r.PathJitterMicros = -1
+		r.PathMetricAgeMillis = -1
+		r.PathMetricConfidence = 0
+		r.PathMetricsReceivedAt = time.Time{}
+	}
+	if hasMetrics {
+		r.PathBottleneckMbps = upd.PathBottleneckMbps
+		if upd.PathRTTMicros >= 0 {
+			r.PathRTTMicros = upd.PathRTTMicros
+			r.PathMetricsReceivedAt = receivedAt
+			rttUpdated = true
+			if !hasQuality {
+				// A legacy PathMetrics-only update has no jitter, age or
+				// confidence associated with its new RTT.
+				r.PathJitterMicros = -1
+				r.PathMetricAgeMillis = -1
+				r.PathMetricConfidence = 0
+			}
+		}
+	}
+	if hasQuality {
+		r.PathJitterMicros = upd.PathJitterMicros
+		r.PathMetricAgeMillis = upd.PathMetricAgeMillis
+		r.PathMetricConfidence = upd.PathMetricConfidence
+		if r.PathRTTMicros >= 0 && (rttUpdated || upd.PathMetricAgeMillis >= 0) {
+			r.PathMetricsReceivedAt = receivedAt
+		}
+	}
 }
 
 // onNeighbourCostChanged re-runs route selection after a link-cost change.
@@ -1013,6 +1048,20 @@ func (s *Speaker) exportCandidatesLocked(pfx netip.Prefix, selected *Route) []*R
 		if r == selected || !r.Feasible || r.Metric == proto.Retraction {
 			continue
 		}
+		// The same peer can be reachable through both an IPv4 and an IPv6
+		// Babel adjacency on one dual-stack interface. Updates received over
+		// those adjacencies can carry the same forwarding next hop; exporting
+		// both would create an invalid duplicate Linux multipath nexthop.
+		duplicate := false
+		for _, candidate := range candidates {
+			if sameForwardingPath(candidate, r) {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
+			continue
+		}
 		if int(r.Metric) > int(bestMetric)+slack {
 			continue
 		}
@@ -1025,6 +1074,13 @@ func (s *Speaker) exportCandidatesLocked(pfx netip.Prefix, selected *Route) []*R
 		candidates = candidates[:limit]
 	}
 	return candidates
+}
+
+func sameForwardingPath(a, b *Route) bool {
+	if a == nil || b == nil || a.Neighbour == nil || b.Neighbour == nil {
+		return false
+	}
+	return a.Neighbour.intf.Index == b.Neighbour.intf.Index && a.NextHop.Unmap() == b.NextHop.Unmap()
 }
 
 func (s *Speaker) exportForPrefixLocked(pfx netip.Prefix, selected *Route) []SelectedRoute {
