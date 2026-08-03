@@ -295,22 +295,22 @@ func (b *Backend) buildSRv6Routes(record model.Tunnel, underlay netlink.Link, ro
 			},
 		})
 	}
-	defaultRoute, err := b.defaultRoute(netlink.FAMILY_V6, underlay.Attrs().Index)
-	if err != nil {
-		return nil, err
-	}
 	for sid := range sids {
+		underlayRoute, err := b.mainRouteToSRv6SID(sid, underlay.Attrs().Index)
+		if err != nil {
+			return nil, err
+		}
 		route := netlink.Route{
 			LinkIndex: underlay.Attrs().Index,
 			Dst:       prefixToIPNet(netip.PrefixFrom(sid, 128)),
 			Table:     spec.Table,
 			Protocol:  managedRouteProtocol,
 			Realm:     realm,
-			Scope:     netlink.SCOPE_UNIVERSE,
+			Scope:     underlayRoute.Scope,
 			Priority:  1024,
 		}
-		if defaultRoute != nil && len(defaultRoute.Gw) > 0 {
-			route.Gw = defaultRoute.Gw
+		if len(underlayRoute.Gw) > 0 {
+			route.Gw = underlayRoute.Gw
 			route.Scope = netlink.SCOPE_UNIVERSE
 			route.Flags = int(netlink.FLAG_ONLINK)
 		}
@@ -319,20 +319,49 @@ func (b *Backend) buildSRv6Routes(record model.Tunnel, underlay netlink.Link, ro
 	return desired, nil
 }
 
-func (b *Backend) defaultRoute(family, linkIndex int) (*netlink.Route, error) {
-	routes, err := b.netlink.RouteListFiltered(family, &netlink.Route{Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_TABLE)
+func (b *Backend) mainRouteToSRv6SID(sid netip.Addr, linkIndex int) (*netlink.Route, error) {
+	routes, err := b.netlink.RouteListFiltered(netlink.FAMILY_V6, &netlink.Route{Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		return nil, fmt.Errorf("list main-table routes: %w", err)
 	}
+	return selectMainRouteToSRv6SID(routes, sid, linkIndex)
+}
+
+// The explicit SID /128 copied into the SRv6 table prevents encapsulated
+// traffic from recursively selecting itself. It must mirror a real main-table
+// underlay path; inventing a direct route makes an off-link SID fail at NDP
+// while the tunnel is incorrectly reported ready.
+func selectMainRouteToSRv6SID(routes []netlink.Route, sid netip.Addr, linkIndex int) (*netlink.Route, error) {
 	var selected *netlink.Route
 	for i := range routes {
-		if routes[i].LinkIndex != linkIndex || (routes[i].Dst != nil && maskSize(routes[i].Dst) != 0) {
-			continue
+		bits := 0
+		if routes[i].Dst != nil {
+			prefix, ok := prefixFromIPNet(routes[i].Dst)
+			if !ok || !prefix.Contains(sid) {
+				continue
+			}
+			bits = prefix.Bits()
 		}
-		if selected == nil || routes[i].Priority < selected.Priority {
-			copy := routes[i]
-			selected = &copy
+		if selected != nil {
+			selectedBits := 0
+			if selected.Dst != nil {
+				selectedBits = maskSize(selected.Dst)
+			}
+			if bits < selectedBits || (bits == selectedBits && routes[i].Priority >= selected.Priority) {
+				continue
+			}
 		}
+		copy := routes[i]
+		selected = &copy
+	}
+	if selected == nil {
+		return nil, fmt.Errorf("SRv6 SID %s has no route in the main table", sid)
+	}
+	if selected.LinkIndex != linkIndex {
+		return nil, fmt.Errorf("SRv6 SID %s resolves through link index %d, not configured underlay link index %d", sid, selected.LinkIndex, linkIndex)
+	}
+	if len(selected.MultiPath) > 0 {
+		return nil, fmt.Errorf("SRv6 SID %s resolves through an unsupported multipath underlay route", sid)
 	}
 	return selected, nil
 }

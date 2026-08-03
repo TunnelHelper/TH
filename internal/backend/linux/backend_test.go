@@ -426,6 +426,53 @@ func TestResolveSRv6RouteConflictsUsesStableOrderForDefensiveTies(t *testing.T) 
 	}
 }
 
+func TestSelectMainRouteToSRv6SID(t *testing.T) {
+	sid := netip.MustParseAddr("2001:db8:100::1")
+	gateway := net.ParseIP("fe80::1")
+	routes := []netlink.Route{
+		{LinkIndex: 2, Gw: gateway, Priority: 100, Scope: netlink.SCOPE_UNIVERSE},
+		{LinkIndex: 2, Dst: prefixToIPNet(netip.MustParsePrefix("2001:db8::/32")), Priority: 200, Scope: netlink.SCOPE_LINK},
+		{LinkIndex: 3, Dst: prefixToIPNet(netip.MustParsePrefix("2001:db8:200::/48")), Priority: 10, Scope: netlink.SCOPE_LINK},
+	}
+
+	selected, err := selectMainRouteToSRv6SID(routes, sid, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.LinkIndex != 2 || selected.Dst == nil || selected.Dst.String() != "2001:db8::/32" || len(selected.Gw) != 0 {
+		t.Fatalf("selected route = %+v, want the longest matching direct route", selected)
+	}
+
+	defaultOnly, err := selectMainRouteToSRv6SID(routes[:1], sid, 2)
+	if err != nil || !defaultOnly.Gw.Equal(gateway) {
+		t.Fatalf("default route = %+v, err = %v", defaultOnly, err)
+	}
+}
+
+func TestSelectMainRouteToSRv6SIDRejectsMissingOrWrongUnderlay(t *testing.T) {
+	sid := netip.MustParseAddr("2001:db8:100::1")
+	if _, err := selectMainRouteToSRv6SID(nil, sid, 2); err == nil || !strings.Contains(err.Error(), "no route") {
+		t.Fatalf("missing route error = %v", err)
+	}
+
+	wrongLink := []netlink.Route{{
+		LinkIndex: 3,
+		Dst:       prefixToIPNet(netip.MustParsePrefix("2001:db8::/32")),
+		Scope:     netlink.SCOPE_LINK,
+	}}
+	if _, err := selectMainRouteToSRv6SID(wrongLink, sid, 2); err == nil || !strings.Contains(err.Error(), "not configured underlay") {
+		t.Fatalf("wrong-link error = %v", err)
+	}
+
+	multipath := []netlink.Route{{
+		LinkIndex: 2,
+		MultiPath: []*netlink.NexthopInfo{{LinkIndex: 2}},
+	}}
+	if _, err := selectMainRouteToSRv6SID(multipath, sid, 2); err == nil || !strings.Contains(err.Error(), "unsupported multipath") {
+		t.Fatalf("multipath error = %v", err)
+	}
+}
+
 func TestStaticXFRMBuildersAreExact(t *testing.T) {
 	record := model.Tunnel{
 		Name: "static", Kind: model.KindXFRMStatic, Interface: "xfrm0",

@@ -408,6 +408,17 @@ func TestNamespaceTunnelLifecycles(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = backend.netlink.RouteDel(&mainDefault) }()
+		mainSIDRoute := netlink.Route{
+			LinkIndex: underlayLink.Attrs().Index,
+			Dst:       prefixToIPNet(netip.MustParsePrefix("2001:db8:1::/64")),
+			Table:     unix.RT_TABLE_MAIN,
+			Scope:     netlink.SCOPE_LINK,
+			Priority:  100,
+		}
+		if err := backend.netlink.RouteAdd(&mainSIDRoute); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = backend.netlink.RouteDel(&mainSIDRoute) }()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		observation, err := backend.Apply(ctx, record)
